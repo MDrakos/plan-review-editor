@@ -108,6 +108,7 @@ rendering as plain code. The reviewer's answer arrives in `submit.choices`.
 | POST | `/api/chat` | browser | reviewer chat message (queued for the agent) |
 | POST | `/api/submit` | browser | submit the review bundle (queued for the agent) |
 | POST | `/api/end` | browser | end the session (queued for the agent) |
+| POST | `/agent/reset` | CLI | start a fresh session: drop queued events, chat, and review state (`planreview start` calls this before presenting) |
 | POST | `/agent/present` | CLI | render a markdown file as the current document |
 | GET | `/agent/wait` | CLI | long-poll for the next reviewer event (`?timeout=<ms>` optional) |
 | POST | `/agent/say` | CLI | agent chat message to the reviewer |

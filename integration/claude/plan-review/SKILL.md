@@ -57,13 +57,16 @@ waiting. If a session is already running, use `$PR present plan.md` instead.
 
 ## 3. The event loop
 
-Repeatedly run (with a shell timeout comfortably above the poll window):
+Repeatedly run:
 
 ```sh
-$PR wait --timeout 240
+$PR wait --timeout 90
 ```
 
-Each call prints one JSON event. Handle it and loop:
+The 90s poll window stays under default shell time limits. If the shell
+kills the command anyway, nothing is lost — events queue on the server —
+so just run `wait` again. Each call prints one JSON event. Handle it and
+loop:
 
 - `{"type":"timeout"}` — nothing happened yet. Run `wait` again. Do not end
   your turn; the user is still reviewing.

@@ -54,6 +54,23 @@ function enqueueAgentEvent(event) {
   }
 }
 
+// A new session must not inherit anything from an abandoned one. Without
+// this, a leftover server whose reviewer hit "End session" (event queued,
+// never consumed) hands that stale end event to the next agent's very first
+// wait — which then declares the brand-new session over.
+function resetSession() {
+  for (const waiter of agentWaiters.splice(0)) {
+    clearTimeout(waiter.timer);
+    sendJson(waiter.res, 200, { type: 'end' }); // release any orphaned wait
+  }
+  agentQueue.length = 0;
+  state.chat = [];
+  state.submissions = [];
+  state.review = { comments: [], choices: {} };
+  state.status = 'idle';
+  broadcast('status', { status: state.status });
+}
+
 function titleFrom(markdown) {
   const m = markdown.match(/^#\s+(.+)$/m);
   return m ? m[1].trim() : null;
@@ -150,6 +167,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ----- agent API (driven by bin/planreview.js) -----
+
+    if (req.method === 'POST' && pathname === '/agent/reset') {
+      resetSession();
+      return sendJson(res, 200, { ok: true });
+    }
 
     if (req.method === 'POST' && pathname === '/agent/present') {
       const body = await readBody(req);

@@ -92,9 +92,13 @@ function resolveDoc(file) {
 }
 
 const commands = {
+  // start = begin a NEW session. If a server survived an abandoned session,
+  // reset it so stale events (especially a queued "end") cannot leak in.
+  // present = next round in the SAME session, keeping chat history.
   async start(args) {
     const file = args.find((a) => !a.startsWith('--'));
     await ensureServer();
+    await request('POST', '/agent/reset');
     let presented = null;
     if (file) presented = await request('POST', '/agent/present', { path: resolveDoc(file) });
     if (!args.includes('--no-open')) openBrowser(BASE);
