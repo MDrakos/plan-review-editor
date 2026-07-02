@@ -22,7 +22,17 @@ const state = {
   doc: { path: null, title: '', html: '', version: 0 },
   review: { comments: [], choices: {} }, // in-progress review, survives page refreshes
   submissions: [], // completed review bundles, oldest first
+  chat: [], // {role: 'reviewer' | 'agent', text, ts}
 };
+
+// ---------- server-sent events ----------
+
+const sseClients = new Set();
+
+function broadcast(event, data) {
+  const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of sseClients) client.write(frame);
+}
 
 function titleFrom(markdown) {
   const m = markdown.match(/^#\s+(.+)$/m);
@@ -84,7 +94,30 @@ const server = http.createServer(async (req, res) => {
         status: state.status,
         doc: { title: state.doc.title, html: state.doc.html, version: state.doc.version },
         review: state.review,
+        chat: state.chat,
       });
+    }
+
+    if (req.method === 'GET' && pathname === '/events') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      res.write('retry: 1000\n\n');
+      sseClients.add(res);
+      req.on('close', () => sseClients.delete(res));
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/chat') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim();
+      if (!text) return sendJson(res, 400, { error: 'empty message' });
+      const msg = { role: 'reviewer', text, ts: Date.now() };
+      state.chat.push(msg);
+      broadcast('chat', msg);
+      return sendJson(res, 200, { ok: true });
     }
 
     if (req.method === 'POST' && pathname === '/api/review-state') {

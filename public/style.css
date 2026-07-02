@@ -191,6 +191,59 @@ html, body {
 
 #submit-btn { padding: 10px; font-size: 14px; }
 
+/* ---------- chat ---------- */
+
+.chat-panel { border-top: 1px solid var(--line); }
+
+.chat-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chat-msg {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-msg.reviewer {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+
+.chat-msg.agent {
+  align-self: flex-start;
+  background: #eef0f3;
+  border-bottom-left-radius: 4px;
+}
+
+#chat-form {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+
+#chat-form input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 14px;
+}
+
+#chat-form input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+
 /* ---------- highlights ---------- */
 
 mark.hl {

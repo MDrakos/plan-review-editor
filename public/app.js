@@ -13,6 +13,9 @@ const commentListEl = document.getElementById('comment-list');
 const commentCountEl = document.getElementById('comment-count');
 const overallNoteEl = document.getElementById('overall-note');
 const submitBtn = document.getElementById('submit-btn');
+const chatListEl = document.getElementById('chat-list');
+const chatFormEl = document.getElementById('chat-form');
+const chatInputEl = document.getElementById('chat-input');
 
 // ---------- state ----------
 
@@ -59,6 +62,42 @@ async function fetchState() {
   for (const c of state.comments) anchorByQuote(c.quote, c.id);
   renderComments();
   bindChoices();
+  chatListEl.innerHTML = '';
+  for (const msg of s.chat || []) appendChatMessage(msg);
+}
+
+// ---------- chat ----------
+
+function appendChatMessage(msg) {
+  const el = document.createElement('div');
+  el.className = `chat-msg ${msg.role}`;
+  el.textContent = msg.text;
+  chatListEl.appendChild(el);
+  chatListEl.scrollTop = chatListEl.scrollHeight;
+}
+
+chatFormEl.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const text = chatInputEl.value.trim();
+  if (!text) return;
+  chatInputEl.value = '';
+  appendChatMessage({ role: 'reviewer', text });
+  await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  }).catch(() => {});
+});
+
+// ---------- live events ----------
+
+function connectEvents() {
+  const es = new EventSource('/events');
+  es.addEventListener('chat', (e) => {
+    const msg = JSON.parse(e.data);
+    // our own messages are appended optimistically on send
+    if (msg.role !== 'reviewer') appendChatMessage(msg);
+  });
 }
 
 // ---------- choice blocks ----------
@@ -323,3 +362,4 @@ function truncate(s, n) {
 // ---------- boot ----------
 
 fetchState();
+connectEvents();
