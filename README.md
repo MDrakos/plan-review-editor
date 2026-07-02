@@ -68,7 +68,27 @@ node bin/planreview.js wait
 # {"type":"submit","comments":[…],"choices":{…},"note":"…"}
 ```
 
-### Driving it from an agent
+### Automatic invocation from Claude Code
+
+`integration/claude/plan-review/` is a ready-made Claude Code skill. Symlink
+it into your personal skills directory and every session can trigger it on
+its own whenever it is about to present a plan, options, or a wall of text:
+
+```sh
+ln -s "$(pwd)/integration/claude/plan-review" ~/.claude/skills/plan-review
+```
+
+To make it non-negotiable rather than model-judged, also add one line to
+`~/.claude/CLAUDE.md`:
+
+```
+Whenever you are about to present a plan, a set of options, or a long text
+document for my review in an interactive session, do not print it to the
+terminal — use the plan-review skill and follow its event loop until I end
+the session.
+```
+
+### Driving it from any other agent
 
 Tell your terminal agent (e.g. in `CLAUDE.md`) to present plans through the
 review loop instead of printing them:
