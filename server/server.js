@@ -34,6 +34,22 @@ function broadcast(event, data) {
   for (const client of sseClients) client.write(frame);
 }
 
+// ---------- agent event queue ----------
+//
+// Everything the reviewer does that the agent must react to becomes an event:
+//   {type: 'chat', text}      — reviewer said something in the sidebar
+//   {type: 'submit', ...}     — reviewer submitted their bundled review
+// The agent consumes events one at a time via the long-polling GET /agent/wait.
+
+const agentQueue = [];
+const agentWaiters = [];
+
+function enqueueAgentEvent(event) {
+  const waiter = agentWaiters.shift();
+  if (waiter) sendJson(waiter, 200, event);
+  else agentQueue.push(event);
+}
+
 function titleFrom(markdown) {
   const m = markdown.match(/^#\s+(.+)$/m);
   return m ? m[1].trim() : null;
@@ -117,6 +133,41 @@ const server = http.createServer(async (req, res) => {
       const msg = { role: 'reviewer', text, ts: Date.now() };
       state.chat.push(msg);
       broadcast('chat', msg);
+      enqueueAgentEvent({ type: 'chat', text, ts: msg.ts });
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // ----- agent API (driven by bin/planreview.js) -----
+
+    if (req.method === 'POST' && pathname === '/agent/present') {
+      const body = await readBody(req);
+      if (!body.path) return sendJson(res, 400, { error: 'missing "path"' });
+      loadDoc(path.resolve(body.path));
+      return sendJson(res, 200, {
+        ok: true,
+        version: state.doc.version,
+        title: state.doc.title,
+      });
+    }
+
+    if (req.method === 'GET' && pathname === '/agent/wait') {
+      const event = agentQueue.shift();
+      if (event) return sendJson(res, 200, event);
+      agentWaiters.push(res);
+      req.on('close', () => {
+        const idx = agentWaiters.indexOf(res);
+        if (idx !== -1) agentWaiters.splice(idx, 1);
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/agent/say') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim();
+      if (!text) return sendJson(res, 400, { error: 'empty message' });
+      const msg = { role: 'agent', text, ts: Date.now() };
+      state.chat.push(msg);
+      broadcast('chat', msg);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -139,6 +190,7 @@ const server = http.createServer(async (req, res) => {
         submittedAt: new Date().toISOString(),
       });
       state.status = 'submitted';
+      enqueueAgentEvent({ type: 'submit', ...state.submissions[state.submissions.length - 1] });
       return sendJson(res, 200, { ok: true });
     }
 
@@ -150,6 +202,10 @@ const server = http.createServer(async (req, res) => {
 
 const docArg = process.argv[2];
 if (docArg) loadDoc(path.resolve(docArg));
+
+// /agent/wait long-polls can outlive Node's default 5-minute request timeout
+server.requestTimeout = 0;
+server.headersTimeout = 0;
 
 server.listen(PORT, HOST, () => {
   console.log(`plan-review-editor listening on http://${HOST}:${PORT}`);
