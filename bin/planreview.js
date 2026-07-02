@@ -108,10 +108,17 @@ const commands = {
 
   // Blocks until the reviewer produces the next event. Long-poll connections
   // that drop mid-wait (sleep, proxy, etc.) are retried; a dead server is not.
-  async wait() {
+  // --timeout <seconds> makes it return {"type":"timeout"} instead of blocking
+  // forever, so agents with shell time limits can poll in a loop.
+  async wait(args) {
+    const tIdx = args.indexOf('--timeout');
+    const seconds = tIdx !== -1 ? Number(args[tIdx + 1]) : 0;
+    if (tIdx !== -1 && (!Number.isFinite(seconds) || seconds <= 0))
+      throw new Error('usage: planreview wait [--timeout <seconds>]');
+    const qs = seconds > 0 ? `?timeout=${Math.round(seconds * 1000)}` : '';
     for (;;) {
       try {
-        const event = await request('GET', '/agent/wait');
+        const event = await request('GET', `/agent/wait${qs}`);
         console.log(JSON.stringify(event));
         return;
       } catch (err) {
@@ -156,7 +163,8 @@ function usage() {
 
   start [file.md] [--no-open]   boot the server, open the browser, present a plan
   present <file.md>             (re)present a plan document to the reviewer
-  wait                          block until the next reviewer event, print it as JSON
+  wait [--timeout <sec>]        block until the next reviewer event, print it as JSON;
+                                with --timeout, print {"type":"timeout"} if nothing happens
   say <message>                 send a chat message to the reviewer
   status                        print session status
   open                          reopen the review UI in the browser

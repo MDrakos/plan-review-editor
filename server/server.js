@@ -42,12 +42,16 @@ function broadcast(event, data) {
 // The agent consumes events one at a time via the long-polling GET /agent/wait.
 
 const agentQueue = [];
-const agentWaiters = [];
+const agentWaiters = []; // {res, timer}
 
 function enqueueAgentEvent(event) {
   const waiter = agentWaiters.shift();
-  if (waiter) sendJson(waiter, 200, event);
-  else agentQueue.push(event);
+  if (waiter) {
+    clearTimeout(waiter.timer);
+    sendJson(waiter.res, 200, event);
+  } else {
+    agentQueue.push(event);
+  }
 }
 
 function titleFrom(markdown) {
@@ -98,7 +102,8 @@ function sendFile(res, name, type) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const reqUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const pathname = reqUrl.pathname;
 
   try {
     if (req.method === 'GET' && STATIC[pathname]) {
@@ -161,9 +166,23 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && pathname === '/agent/wait') {
       const event = agentQueue.shift();
       if (event) return sendJson(res, 200, event);
-      agentWaiters.push(res);
+      const waiter = { res, timer: null };
+      // ?timeout=ms lets agents poll within their shell's time limit:
+      // they get {type: 'timeout'} back and simply call wait again.
+      const timeoutMs = Number(reqUrl.searchParams.get('timeout') || 0);
+      if (timeoutMs > 0) {
+        waiter.timer = setTimeout(() => {
+          const idx = agentWaiters.indexOf(waiter);
+          if (idx !== -1) {
+            agentWaiters.splice(idx, 1);
+            sendJson(res, 200, { type: 'timeout' });
+          }
+        }, timeoutMs);
+      }
+      agentWaiters.push(waiter);
       req.on('close', () => {
-        const idx = agentWaiters.indexOf(res);
+        clearTimeout(waiter.timer);
+        const idx = agentWaiters.indexOf(waiter);
         if (idx !== -1) agentWaiters.splice(idx, 1);
       });
       return;

@@ -69,6 +69,17 @@ terminal as usual.
 { "type": "end" }
 ```
 
+### `timeout`
+
+Only returned when waiting with `planreview wait --timeout <seconds>` (or
+`GET /agent/wait?timeout=<ms>`): nothing happened within the window. Not a
+reviewer action — just call `wait` again. This lets agents whose shells
+impose a per-command time limit poll in a loop instead of blocking forever.
+
+```json
+{ "type": "timeout" }
+```
+
 ## Choice blocks
 
 Embed decisions in the plan with a `choice` fence:
@@ -98,7 +109,7 @@ rendering as plain code. The reviewer's answer arrives in `submit.choices`.
 | POST | `/api/submit` | browser | submit the review bundle (queued for the agent) |
 | POST | `/api/end` | browser | end the session (queued for the agent) |
 | POST | `/agent/present` | CLI | render a markdown file as the current document |
-| GET | `/agent/wait` | CLI | long-poll for the next reviewer event |
+| GET | `/agent/wait` | CLI | long-poll for the next reviewer event (`?timeout=<ms>` optional) |
 | POST | `/agent/say` | CLI | agent chat message to the reviewer |
 | POST | `/agent/stop` | CLI | shut the server down |
 
