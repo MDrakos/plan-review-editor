@@ -11,6 +11,8 @@ const composerQuoteEl = document.getElementById('composer-quote');
 const composerTextEl = document.getElementById('composer-text');
 const commentListEl = document.getElementById('comment-list');
 const commentCountEl = document.getElementById('comment-count');
+const overallNoteEl = document.getElementById('overall-note');
+const submitBtn = document.getElementById('submit-btn');
 
 // ---------- state ----------
 
@@ -28,12 +30,14 @@ let pendingQuote = '';
 const STATUS_LABEL = {
   idle: 'waiting for a plan',
   reviewing: 'reviewing',
+  submitted: 'review submitted',
 };
 
 function setStatus(status) {
   state.status = status;
   statusPill.dataset.status = status;
   statusPill.textContent = STATUS_LABEL[status] || status;
+  submitBtn.disabled = status !== 'reviewing';
 }
 
 function renderDoc(doc) {
@@ -130,6 +134,9 @@ function saveComment() {
 
 function renderComments() {
   commentCountEl.textContent = String(state.comments.length);
+  submitBtn.textContent = state.comments.length
+    ? `Submit review (${state.comments.length})`
+    : 'Submit review';
   commentListEl.innerHTML = '';
   if (!state.comments.length) {
     commentListEl.innerHTML =
@@ -185,6 +192,31 @@ async function syncReview() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ comments: state.comments }),
   }).catch(() => {});
+}
+
+// ---------- submit ----------
+
+submitBtn.addEventListener('click', submitReview);
+
+async function submitReview() {
+  if (state.status !== 'reviewing') return;
+  const bundle = {
+    comments: state.comments,
+    note: overallNoteEl.value.trim(),
+    docVersion: state.version,
+  };
+  submitBtn.disabled = true;
+  const res = await fetch('/api/submit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(bundle),
+  }).catch(() => null);
+  if (!res || !res.ok) {
+    submitBtn.disabled = false;
+    return;
+  }
+  overallNoteEl.value = '';
+  setStatus('submitted');
 }
 
 // ---------- highlights ----------

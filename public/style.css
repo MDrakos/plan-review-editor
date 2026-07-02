@@ -166,6 +166,31 @@ html, body {
 
 .icon-btn:hover { background: #eef0f3; color: var(--ink); }
 
+/* ---------- submit ---------- */
+
+.submit-area {
+  border-top: 1px solid var(--line);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+}
+
+.submit-area textarea {
+  width: 100%;
+  resize: none;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.submit-area textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+
+#submit-btn { padding: 10px; font-size: 14px; }
+
 /* ---------- highlights ---------- */
 
 mark.hl {

@@ -18,9 +18,10 @@ const STATIC = {
 };
 
 const state = {
-  status: 'idle', // idle | reviewing
+  status: 'idle', // idle | reviewing | submitted
   doc: { path: null, title: '', html: '', version: 0 },
   review: { comments: [] }, // in-progress review, survives page refreshes
+  submissions: [], // completed review bundles, oldest first
 };
 
 function titleFrom(markdown) {
@@ -89,6 +90,20 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && pathname === '/api/review-state') {
       const body = await readBody(req);
       if (Array.isArray(body.comments)) state.review.comments = body.comments;
+      return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/submit') {
+      if (state.status !== 'reviewing')
+        return sendJson(res, 409, { error: `cannot submit while ${state.status}` });
+      const body = await readBody(req);
+      state.submissions.push({
+        comments: Array.isArray(body.comments) ? body.comments : [],
+        note: typeof body.note === 'string' ? body.note : '',
+        docVersion: state.doc.version,
+        submittedAt: new Date().toISOString(),
+      });
+      state.status = 'submitted';
       return sendJson(res, 200, { ok: true });
     }
 
