@@ -50,13 +50,69 @@ Three pieces, zero runtime dependencies:
   document; `wait` blocks until the reviewer produces an event (a chat
   message, a submitted review, or the end of the session).
 
+## Quick start
+
+No install, no dependencies — Node 18+ only.
+
+```sh
+# try it with the bundled sample plan
+node bin/planreview.js start examples/sample-plan.md
+```
+
+Your browser opens the rendered plan. Select any text to leave a comment,
+answer the storage-decision choice block, chat in the sidebar, then hit
+**Submit review**. In another terminal, see what the agent would see:
+
+```sh
+node bin/planreview.js wait
+# {"type":"submit","comments":[…],"choices":{…},"note":"…"}
+```
+
+### Driving it from an agent
+
+Tell your terminal agent (e.g. in `CLAUDE.md`) to present plans through the
+review loop instead of printing them:
+
+```
+When you have a plan for the user to review, do not print it. Instead:
+1. Write it to plan.md and run `planreview start plan.md`.
+2. Run `planreview wait` and parse the JSON event:
+   - {"type":"chat"}   → reply with `planreview say "<answer>"`, wait again.
+   - {"type":"submit"} → rework plan.md using every comment, choice, and
+                          note, run `planreview present plan.md`, wait again.
+   - {"type":"end"}    → run `planreview stop` and continue in the terminal.
+```
+
+The full event and endpoint reference lives in
+[docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+### Choice blocks
+
+Plans can embed decisions that render as clickable options:
+
+````markdown
+```choice
+id: storage
+prompt: Where should limiter state live?
+options:
+  - Redis
+  - In-process
+```
+````
+
+The reviewer's selection comes back in the submit bundle as
+`choices.storage`.
+
 ## Roadmap
 
-- [ ] Serve a markdown plan rendered as an HTML document
-- [ ] Select text to leave inline comments
-- [ ] Bundle comments and submit them as one review
-- [ ] Interactive choice blocks inside documents
-- [ ] Chat sidebar alongside the document
-- [ ] `planreview` CLI and the blocking agent event loop
-- [ ] Pause → rework → reload cycle in the same browser window
-- [ ] End-session handoff back to the terminal
+- [x] Serve a markdown plan rendered as an HTML document
+- [x] Select text to leave inline comments
+- [x] Bundle comments and submit them as one review
+- [x] Interactive choice blocks inside documents
+- [x] Chat sidebar alongside the document
+- [x] `planreview` CLI and the blocking agent event loop
+- [x] Pause → rework → reload cycle in the same browser window
+- [x] End-session handoff back to the terminal
+
+Possible next steps: comment threads with agent replies, diff view between
+document versions, multiple reviewers, persisting sessions to disk.
