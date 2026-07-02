@@ -361,3 +361,32 @@ mark.hl.active { background: var(--mark-active); }
 }
 
 .doc a { color: var(--accent); }
+
+/* ---------- choice blocks ---------- */
+
+.choice-block {
+  margin: 1em 0;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 14px 18px;
+  background: #fafbfd;
+}
+
+.choice-prompt {
+  font-weight: 600;
+  margin: 0 0 8px !important;
+}
+
+.choice-option {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.choice-option:hover { background: var(--accent-soft); }
+
+.choice-option input { accent-color: var(--accent); }

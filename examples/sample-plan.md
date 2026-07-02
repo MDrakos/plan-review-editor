@@ -29,6 +29,15 @@ The limiter needs shared state across gateway instances. Redis is the
 default candidate, but an in-process store would be simpler if we accept
 per-instance limits during the first rollout.
 
+```choice
+id: storage
+prompt: Where should limiter state live for the first rollout?
+options:
+  - Redis — shared limits across all gateway instances
+  - In-process — simpler, accepts per-instance limits initially
+  - In-process now, Redis behind the feature flag later
+```
+
 ## Defaults
 
 | Setting | Value | Notes |

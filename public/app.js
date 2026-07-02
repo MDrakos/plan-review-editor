@@ -20,6 +20,7 @@ const state = {
   status: 'idle',
   version: 0,
   comments: [], // {id, quote, text, ts}
+  choices: {}, // choiceId -> value (string) or values (string[]) when multi
 };
 
 let pendingRange = null;
@@ -54,8 +55,30 @@ async function fetchState() {
   renderDoc(s.doc);
   setStatus(s.status);
   state.comments = (s.review && s.review.comments) || [];
+  state.choices = (s.review && s.review.choices) || {};
   for (const c of state.comments) anchorByQuote(c.quote, c.id);
   renderComments();
+  bindChoices();
+}
+
+// ---------- choice blocks ----------
+
+function bindChoices() {
+  for (const block of docEl.querySelectorAll('.choice-block')) {
+    const id = block.dataset.choiceId;
+    const multi = block.dataset.multi === 'true';
+    const saved = state.choices[id];
+    for (const input of block.querySelectorAll('input')) {
+      if (saved !== undefined) {
+        input.checked = multi ? saved.includes(input.value) : saved === input.value;
+      }
+      input.addEventListener('change', () => {
+        const checked = [...block.querySelectorAll('input:checked')].map((i) => i.value);
+        state.choices[id] = multi ? checked : checked[0];
+        syncReview();
+      });
+    }
+  }
 }
 
 // ---------- selection → comment ----------
@@ -190,7 +213,7 @@ async function syncReview() {
   await fetch('/api/review-state', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ comments: state.comments }),
+    body: JSON.stringify({ comments: state.comments, choices: state.choices }),
   }).catch(() => {});
 }
 
@@ -202,6 +225,7 @@ async function submitReview() {
   if (state.status !== 'reviewing') return;
   const bundle = {
     comments: state.comments,
+    choices: state.choices,
     note: overallNoteEl.value.trim(),
     docVersion: state.version,
   };

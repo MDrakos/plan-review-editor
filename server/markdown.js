@@ -26,8 +26,52 @@ function inline(text) {
 }
 
 function renderFence(lang, body) {
+  if (lang === 'choice') return renderChoice(body);
   const cls = lang ? ` class="language-${escapeHtml(lang)}"` : '';
   return `<pre><code${cls}>${escapeHtml(body)}</code></pre>`;
+}
+
+// A ```choice fence embeds a decision in the document:
+//
+//   ```choice
+//   id: storage
+//   prompt: Where should limiter state live?
+//   multi: false
+//   options:
+//     - Redis
+//     - In-process
+//   ```
+function renderChoice(body) {
+  const spec = { id: '', prompt: '', multi: false, options: [] };
+  let inOptions = false;
+  for (const raw of body.split('\n')) {
+    const opt = raw.match(/^\s*-\s+(.*)$/);
+    if (inOptions && opt) {
+      spec.options.push(opt[1].trim());
+      continue;
+    }
+    const kv = raw.match(/^(\w+):\s*(.*)$/);
+    if (kv) {
+      inOptions = kv[1] === 'options';
+      if (kv[1] === 'multi') spec.multi = kv[2].trim() === 'true';
+      else if (kv[1] === 'id' || kv[1] === 'prompt') spec[kv[1]] = kv[2].trim();
+    }
+  }
+  if (!spec.id || !spec.options.length) {
+    // malformed block: fall back to showing it as code
+    return `<pre><code class="language-choice">${escapeHtml(body)}</code></pre>`;
+  }
+  const type = spec.multi ? 'checkbox' : 'radio';
+  const options = spec.options
+    .map(
+      (o) =>
+        `<label class="choice-option"><input type="${type}" name="choice-${escapeHtml(spec.id)}" value="${escapeHtml(o)}"> <span>${inline(o)}</span></label>`
+    )
+    .join('\n');
+  return `<div class="choice-block" data-choice-id="${escapeHtml(spec.id)}" data-multi="${spec.multi}">
+<p class="choice-prompt">${inline(spec.prompt || 'Choose:')}</p>
+${options}
+</div>`;
 }
 
 function splitRow(line) {
