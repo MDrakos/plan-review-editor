@@ -75,7 +75,49 @@ html, body {
   flex: 1;
   overflow-y: auto;
   padding: 32px 24px 96px;
+  position: relative;
 }
+
+/* ---------- working overlay ---------- */
+
+.overlay {
+  position: fixed;
+  top: 49px; /* below the topbar */
+  left: 0;
+  right: 340px; /* stop at the sidebar */
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(246, 247, 249, 0.82);
+  backdrop-filter: blur(3px);
+  z-index: 10;
+}
+
+.overlay-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 28px 36px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+  max-width: 380px;
+}
+
+.overlay-card p { margin: 6px 0 0; font-weight: 600; }
+.overlay-hint { color: var(--ink-soft); font-size: 13px; font-weight: 400 !important; }
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto 10px;
+  border: 3px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .sidebar {
   width: 340px;

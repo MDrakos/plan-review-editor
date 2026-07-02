@@ -34,7 +34,7 @@ let pendingQuote = '';
 const STATUS_LABEL = {
   idle: 'waiting for a plan',
   reviewing: 'reviewing',
-  submitted: 'review submitted',
+  working: 'agent is reworking the plan',
 };
 
 function setStatus(status) {
@@ -42,6 +42,7 @@ function setStatus(status) {
   statusPill.dataset.status = status;
   statusPill.textContent = STATUS_LABEL[status] || status;
   submitBtn.disabled = status !== 'reviewing';
+  document.getElementById('working-overlay').hidden = status !== 'working';
 }
 
 function renderDoc(doc) {
@@ -98,6 +99,13 @@ function connectEvents() {
     // our own messages are appended optimistically on send
     if (msg.role !== 'reviewer') appendChatMessage(msg);
   });
+  // a reworked document arrived: reload it in place and start a fresh review
+  es.addEventListener('doc', () => {
+    dismissComposer();
+    fabEl.hidden = true;
+    fetchState();
+  });
+  es.addEventListener('status', (e) => setStatus(JSON.parse(e.data).status));
 }
 
 // ---------- choice blocks ----------
@@ -132,6 +140,7 @@ function selectionInDoc() {
 }
 
 document.addEventListener('mouseup', (e) => {
+  if (state.status !== 'reviewing') return;
   if (composerEl.contains(e.target) || fabEl.contains(e.target)) return;
   // let the selection settle before reading it
   setTimeout(() => {
@@ -279,7 +288,7 @@ async function submitReview() {
     return;
   }
   overallNoteEl.value = '';
-  setStatus('submitted');
+  setStatus('working');
 }
 
 // ---------- highlights ----------

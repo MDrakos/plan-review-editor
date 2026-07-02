@@ -18,7 +18,7 @@ const STATIC = {
 };
 
 const state = {
-  status: 'idle', // idle | reviewing | submitted
+  status: 'idle', // idle | reviewing | working (agent is reworking the plan)
   doc: { path: null, title: '', html: '', version: 0 },
   review: { comments: [], choices: {} }, // in-progress review, survives page refreshes
   submissions: [], // completed review bundles, oldest first
@@ -143,6 +143,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body.path) return sendJson(res, 400, { error: 'missing "path"' });
       loadDoc(path.resolve(body.path));
+      broadcast('doc', { version: state.doc.version });
       return sendJson(res, 200, {
         ok: true,
         version: state.doc.version,
@@ -189,7 +190,8 @@ const server = http.createServer(async (req, res) => {
         docVersion: state.doc.version,
         submittedAt: new Date().toISOString(),
       });
-      state.status = 'submitted';
+      state.status = 'working';
+      broadcast('status', { status: state.status });
       enqueueAgentEvent({ type: 'submit', ...state.submissions[state.submissions.length - 1] });
       return sendJson(res, 200, { ok: true });
     }
