@@ -18,7 +18,7 @@ const STATIC = {
 };
 
 const state = {
-  status: 'idle', // idle | reviewing | working (agent is reworking the plan)
+  status: 'idle', // idle | reviewing | working (agent reworking) | ended
   doc: { path: null, title: '', html: '', version: 0 },
   review: { comments: [], choices: {} }, // in-progress review, survives page refreshes
   submissions: [], // completed review bundles, oldest first
@@ -137,6 +137,13 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    if (req.method === 'POST' && pathname === '/api/end') {
+      state.status = 'ended';
+      broadcast('status', { status: state.status });
+      enqueueAgentEvent({ type: 'end' });
+      return sendJson(res, 200, { ok: true });
+    }
+
     // ----- agent API (driven by bin/planreview.js) -----
 
     if (req.method === 'POST' && pathname === '/agent/present') {
@@ -170,6 +177,15 @@ const server = http.createServer(async (req, res) => {
       state.chat.push(msg);
       broadcast('chat', msg);
       return sendJson(res, 200, { ok: true });
+    }
+
+    if (req.method === 'POST' && pathname === '/agent/stop') {
+      state.status = 'ended';
+      broadcast('status', { status: state.status });
+      sendJson(res, 200, { ok: true });
+      // give the response and the SSE frame a moment to flush
+      setTimeout(() => process.exit(0), 200);
+      return;
     }
 
     if (req.method === 'POST' && pathname === '/api/review-state') {

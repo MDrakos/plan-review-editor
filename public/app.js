@@ -35,6 +35,7 @@ const STATUS_LABEL = {
   idle: 'waiting for a plan',
   reviewing: 'reviewing',
   working: 'agent is reworking the plan',
+  ended: 'session ended',
 };
 
 function setStatus(status) {
@@ -43,7 +44,16 @@ function setStatus(status) {
   statusPill.textContent = STATUS_LABEL[status] || status;
   submitBtn.disabled = status !== 'reviewing';
   document.getElementById('working-overlay').hidden = status !== 'working';
+  document.getElementById('ended-overlay').hidden = status !== 'ended';
+  document.getElementById('end-btn').disabled = status === 'ended';
+  chatInputEl.disabled = status === 'ended';
 }
+
+document.getElementById('end-btn').addEventListener('click', async () => {
+  if (!confirm('End the review session and hand control back to the terminal?')) return;
+  await fetch('/api/end', { method: 'POST' }).catch(() => {});
+  setStatus('ended');
+});
 
 function renderDoc(doc) {
   docTitleEl.textContent = doc.title || '';

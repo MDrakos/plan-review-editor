@@ -382,6 +382,16 @@ mark.hl.active { background: var(--mark-active); }
 
 .btn:disabled { opacity: 0.5; cursor: default; }
 
+.btn.danger {
+  color: #b91c1c;
+  border-color: #f3c4c4;
+}
+
+.btn.danger:hover { background: #fef2f2; }
+
+.pill[data-status="working"] { background: #fef3c7; color: var(--warn); }
+.pill[data-status="ended"] { background: #eef0f3; color: var(--ink-soft); }
+
 /* ---------- document typography ---------- */
 
 .doc {

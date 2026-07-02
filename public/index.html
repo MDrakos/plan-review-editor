@@ -11,6 +11,7 @@
     <div class="brand">Plan Review</div>
     <div class="doc-title" id="doc-title"></div>
     <span class="pill" id="status-pill" data-status="idle">idle</span>
+    <button id="end-btn" class="btn danger">End session</button>
   </header>
   <main class="layout">
     <section class="doc-pane">
@@ -20,6 +21,12 @@
           <div class="spinner"></div>
           <p>Review submitted — the agent is reworking the plan…</p>
           <p class="overlay-hint">The new version will load here automatically. Chat stays open.</p>
+        </div>
+      </div>
+      <div id="ended-overlay" class="overlay" hidden>
+        <div class="overlay-card">
+          <p>Session ended</p>
+          <p class="overlay-hint">Control has returned to the agent in your terminal. You can close this tab.</p>
         </div>
       </div>
     </section>

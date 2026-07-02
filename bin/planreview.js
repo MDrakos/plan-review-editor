@@ -145,6 +145,10 @@ const commands = {
     openBrowser(BASE);
     console.log(JSON.stringify({ ok: true, url: BASE }));
   },
+
+  async stop() {
+    console.log(JSON.stringify(await request('POST', '/agent/stop')));
+  },
 };
 
 function usage() {
@@ -155,7 +159,8 @@ function usage() {
   wait                          block until the next reviewer event, print it as JSON
   say <message>                 send a chat message to the reviewer
   status                        print session status
-  open                          reopen the review UI in the browser`);
+  open                          reopen the review UI in the browser
+  stop                          shut the server down (after the reviewer ends the session)`);
   process.exit(2);
 }
 
