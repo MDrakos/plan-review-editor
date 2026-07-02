@@ -16,7 +16,29 @@
     <section class="doc-pane">
       <article id="doc" class="doc"></article>
     </section>
+    <aside class="sidebar">
+      <section class="panel comments-panel">
+        <header class="panel-head">
+          Comments <span id="comment-count" class="count">0</span>
+        </header>
+        <div id="comment-list" class="comment-list"></div>
+      </section>
+    </aside>
   </main>
+
+  <div id="comment-fab" hidden>
+    <button id="fab-btn">💬 Comment</button>
+  </div>
+
+  <div id="composer" hidden>
+    <blockquote id="composer-quote"></blockquote>
+    <textarea id="composer-text" rows="3" placeholder="Leave a comment…"></textarea>
+    <div class="composer-actions">
+      <button id="composer-cancel" class="btn">Cancel</button>
+      <button id="composer-save" class="btn primary">Comment</button>
+    </div>
+  </div>
+
   <script src="/app.js"></script>
 </body>
 </html>

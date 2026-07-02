@@ -20,6 +20,7 @@ const STATIC = {
 const state = {
   status: 'idle', // idle | reviewing
   doc: { path: null, title: '', html: '', version: 0 },
+  review: { comments: [] }, // in-progress review, survives page refreshes
 };
 
 function titleFrom(markdown) {
@@ -33,7 +34,26 @@ function loadDoc(docPath) {
   state.doc.title = titleFrom(markdown) || path.basename(docPath);
   state.doc.html = render(markdown);
   state.doc.version += 1;
+  state.review = { comments: [] };
   state.status = 'reviewing';
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > 5 * 1024 * 1024) reject(new Error('body too large'));
+    });
+    req.on('end', () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch (err) {
+        reject(new Error('invalid JSON body'));
+      }
+    });
+    req.on('error', reject);
+  });
 }
 
 function sendJson(res, code, obj) {
@@ -50,21 +70,32 @@ function sendFile(res, name, type) {
   });
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-  if (req.method === 'GET' && STATIC[pathname]) {
-    return sendFile(res, STATIC[pathname][0], STATIC[pathname][1]);
-  }
+  try {
+    if (req.method === 'GET' && STATIC[pathname]) {
+      return sendFile(res, STATIC[pathname][0], STATIC[pathname][1]);
+    }
 
-  if (req.method === 'GET' && pathname === '/api/state') {
-    return sendJson(res, 200, {
-      status: state.status,
-      doc: { title: state.doc.title, html: state.doc.html, version: state.doc.version },
-    });
-  }
+    if (req.method === 'GET' && pathname === '/api/state') {
+      return sendJson(res, 200, {
+        status: state.status,
+        doc: { title: state.doc.title, html: state.doc.html, version: state.doc.version },
+        review: state.review,
+      });
+    }
 
-  sendJson(res, 404, { error: 'not found' });
+    if (req.method === 'POST' && pathname === '/api/review-state') {
+      const body = await readBody(req);
+      if (Array.isArray(body.comments)) state.review.comments = body.comments;
+      return sendJson(res, 200, { ok: true });
+    }
+
+    sendJson(res, 404, { error: 'not found' });
+  } catch (err) {
+    sendJson(res, 500, { error: String((err && err.message) || err) });
+  }
 });
 
 const docArg = process.argv[2];
