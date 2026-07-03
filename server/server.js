@@ -155,7 +155,10 @@ function loadDoc(s, docPath) {
   s.doc.html = html;
   s.doc.blocks = blocks;
   s.doc.version += 1;
-  s.review = { comments: [], choices: {} };
+  // Fresh comments each round, but keep prior answers — the reviewer shouldn't
+  // have to re-answer a question they already decided (the UI shows those
+  // collapsed with a "Change" option).
+  s.review = { comments: [], choices: s.review.choices || {} };
   s.progress = []; // the reworked doc is here — the previous round's steps are done
   s.status = 'reviewing';
   touch(s);

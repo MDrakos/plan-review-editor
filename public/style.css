@@ -793,6 +793,21 @@ mark.hl.active { background: var(--mark-active); }
 
 .choice-option input { accent-color: var(--accent); }
 
+/* answered-in-a-previous-cycle: collapse to a summary + Change, hide the options */
+.choice-summary { display: none; align-items: baseline; gap: 10px; margin-top: 6px; }
+.choice-block.answered .choice-summary { display: flex; }
+.choice-block.answered .choice-option { display: none; }
+
+.choice-summary-value { flex: 1; font-weight: 600; }
+.choice-summary-value::before {
+  content: '✓';
+  color: var(--success);
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.choice-change { padding: 3px 12px; flex: none; }
+
 /* the free-text "Other" row: radio/checkbox + label, then a stretchy text field */
 .choice-other { align-items: center; }
 .choice-other > label { display: flex; align-items: center; gap: 8px; cursor: pointer; white-space: nowrap; }

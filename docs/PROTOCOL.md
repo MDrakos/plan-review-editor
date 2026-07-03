@@ -156,6 +156,12 @@ their typed string — indistinguishable in shape from a preset answer, so no
 special handling is needed. Add `other: false` to omit it and require one of the
 listed options.
 
+**Answers persist across cycles.** A re-present keeps the reviewer's prior
+`choices` (only comments reset each round). So if you keep a choice block in the
+reworked doc, the reviewer isn't re-asked — their previous pick shows collapsed,
+with a "Change" option — and `submit`/`approve` still report the current value
+for every answered `id`.
+
 ## HTTP reference
 
 Session-scoped endpoints take `?session=<id>` and 404 without a valid one.

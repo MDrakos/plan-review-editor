@@ -254,6 +254,9 @@ function connectEvents() {
 
 // ---------- choice blocks ----------
 
+const answerText = (v) => (Array.isArray(v) ? v.join(', ') : v || '');
+const hasAnswer = (v) => (Array.isArray(v) ? v.length > 0 : !!v);
+
 function bindChoices() {
   for (const block of docEl.querySelectorAll('.choice-block')) {
     const id = block.dataset.choiceId;
@@ -263,6 +266,24 @@ function bindChoices() {
     const otherText = block.querySelector('.choice-other-text');
     const presets = new Set(boxes.filter((i) => !i.dataset.other).map((i) => i.value));
 
+    // A question answered in an earlier cycle collapses to a one-line summary
+    // with a Change button, so it isn't re-asked. Built here, shown via the
+    // `answered` class (which also hides the option rows — see CSS).
+    const summary = document.createElement('div');
+    summary.className = 'choice-summary';
+    const summaryVal = document.createElement('span');
+    summaryVal.className = 'choice-summary-value';
+    const changeBtn = document.createElement('button');
+    changeBtn.type = 'button';
+    changeBtn.className = 'btn choice-change';
+    changeBtn.textContent = 'Change';
+    changeBtn.addEventListener('click', () => block.classList.remove('answered'));
+    summary.append(summaryVal, changeBtn);
+    block.appendChild(summary);
+    const refreshSummary = () => {
+      summaryVal.textContent = answerText(state.choices[id]);
+    };
+
     // the value an option contributes: for "Other", whatever was typed
     const valueOf = (i) =>
       i.dataset.other ? (otherText ? otherText.value.trim() : '') : i.value;
@@ -270,6 +291,7 @@ function bindChoices() {
     const sync = () => {
       const vals = boxes.filter((i) => i.checked).map(valueOf).filter((v) => v !== '');
       state.choices[id] = multi ? vals : vals[0];
+      refreshSummary();
       syncReview();
     };
 
@@ -297,6 +319,9 @@ function bindChoices() {
         sync();
       });
     }
+
+    refreshSummary();
+    if (hasAnswer(state.choices[id])) block.classList.add('answered'); // collapse if already answered
   }
 }
 

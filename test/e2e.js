@@ -305,6 +305,22 @@ async function main() {
   );
   await cli('stop', '--session', pr.id);
 
+  console.log('answered questions persist across cycles (not re-asked); comments still reset');
+  const q = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${q.id}`, {
+    comments: [{ id: 'x', quote: 'q', text: 't' }],
+    choices: { pick: 'A1' },
+  });
+  fs.appendFileSync(docA, '\n(another revision)\n');
+  await cli('present', docA, '--session', q.id);
+  const cyc = await browser(`/api/state?session=${q.id}`);
+  check(
+    'a re-present keeps prior answers but clears comments',
+    cyc.data.review.choices.pick === 'A1' && cyc.data.review.comments.length === 0,
+    JSON.stringify(cyc.data.review)
+  );
+  await cli('stop', '--session', q.id);
+
   console.log('no time limit: wait blocks past poll windows until the reviewer acts');
   const np = await cli('start', docA, '--no-open');
   // no --timeout: must keep polling (past several 400ms server windows), not give up
@@ -386,6 +402,7 @@ async function main() {
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
   check('client highlights + can dismiss doc changes', /data-changed/.test(app.body) && /changes-dismissed/.test(app.body));
+  check('client collapses already-answered questions', /choice-summary/.test(app.body) && /'answered'/.test(app.body));
 
   await cli('stop', '--session', guard.id);
 
