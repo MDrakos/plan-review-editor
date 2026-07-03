@@ -51,6 +51,26 @@ function check(name, cond, detail) {
   }
 }
 
+// simulate a review tab's SSE connection
+async function openEventStream() {
+  const controller = new AbortController();
+  const res = await fetch(`${BASE}/events`, { signal: controller.signal });
+  const chunks = [];
+  const reader = res.body.getReader();
+  (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(Buffer.from(value).toString());
+      }
+    } catch {
+      /* aborted */
+    }
+  })();
+  return { text: () => chunks.join(''), close: () => controller.abort() };
+}
+
 async function main() {
   const doc = path.join(os.tmpdir(), 'planreview-e2e.md');
   fs.writeFileSync(
@@ -118,6 +138,25 @@ async function main() {
   await sleep(400);
   const alive = await fetch(`${BASE}/api/state`).then(() => true).catch(() => false);
   check('server shut down after stop', !alive);
+
+  console.log('stale tab: a connected tab is pulled into the next session');
+  await cli('start', doc, '--no-open');
+  const tab = await openEventStream();
+  await sleep(300);
+  const sTab = await browser('/api/state');
+  check('server reports the connected tab', sTab.clients === 1, `clients=${sTab.clients}`);
+  await browser('/api/end', {}); // reviewer ends; the tab now shows "session ended"
+  // a new agent session begins on the same server while the tab stays open:
+  await cli('start', doc, '--no-open');
+  await sleep(300);
+  const frames = tab.text();
+  check(
+    'tab receives the reset and the new document',
+    frames.includes('"status":"idle"') && frames.includes('event: doc'),
+    `frames: ${frames.replace(/\n/g, ' ').slice(-200)}`
+  );
+  tab.close();
+  await cli('stop');
 }
 
 main()
