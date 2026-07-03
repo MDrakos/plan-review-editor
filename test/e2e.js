@@ -93,6 +93,22 @@ async function main() {
     JSON.stringify(st)
   );
 
+  console.log('regression: an in-flight wait during a new start must not receive end');
+  // The agent's poll from the round being superseded is still open when the
+  // next start fires resetSession. If that wait gets `end`, the agent stops
+  // the brand-new session and the freshly opened tab shows "Session ended".
+  const inflight = cli('wait', '--timeout', '10'); // left open on purpose
+  await sleep(300); // let the waiter register on the server
+  await cli('start', doc, '--no-open'); // fires resetSession while inflight is open
+  const released = await inflight;
+  check(
+    'superseded wait re-polls instead of ending',
+    released.type === 'timeout',
+    `got ${JSON.stringify(released)}`
+  );
+  const stAfter = await cli('status');
+  check('new session stays reviewing', stAfter.status === 'reviewing', JSON.stringify(stAfter));
+
   console.log('full cycle: chat -> submit -> rework -> end');
   const waitChat = cli('wait', '--timeout', '10');
   await sleep(300);
@@ -121,8 +137,9 @@ async function main() {
   check('session paused while agent reworks', stWorking.status === 'working');
 
   fs.appendFileSync(doc, '\n## Revisions\n\nExpanded the body paragraph.\n');
+  const beforeRep = (await cli('status')).version;
   const rep = await cli('present', doc);
-  check('re-present bumps the doc version', rep.version === started.version + 1);
+  check('re-present bumps the doc version', rep.version === beforeRep + 1);
   const s2 = await browser('/api/state');
   check(
     'rework starts a fresh round: review cleared, chat kept',
@@ -181,6 +198,29 @@ async function main() {
   check('start replaces the old server and presents', up.ok === true && up.version === 1);
   const stUp = await cli('status');
   check('replaced server is reviewing the new doc', stUp.status === 'reviewing');
+  await cli('stop');
+  await sleep(400);
+
+  console.log('static assets: no-store cache + overlays can actually hide');
+  await cli('start', doc, '--no-open');
+  const cssRes = await fetch(`${BASE}/style.css`);
+  const cacheHeader = cssRes.headers.get('cache-control');
+  const css = await cssRes.text();
+  check(
+    'static assets sent no-store so a cached file cannot mask a fix',
+    cacheHeader === 'no-store',
+    `cache-control: ${cacheHeader}`
+  );
+  // The `hidden` attribute must defeat the component `display` rules, or the
+  // ended/working overlays paint over every page (the "Session ended on load"
+  // bug). Guard the rule that makes `[hidden]` win. NB: a static check — it
+  // catches removal of the rule, not every way the cascade could break; a true
+  // render test would need a browser engine this zero-dep tool avoids.
+  check(
+    'css neutralizes [hidden] so overlays hide when toggled off',
+    /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css),
+    'missing [hidden] { display: none !important }'
+  );
   await cli('stop');
 }
 

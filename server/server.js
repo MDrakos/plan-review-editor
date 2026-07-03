@@ -61,7 +61,12 @@ function enqueueAgentEvent(event) {
 function resetSession() {
   for (const waiter of agentWaiters.splice(0)) {
     clearTimeout(waiter.timer);
-    sendJson(waiter.res, 200, { type: 'end' }); // release any orphaned wait
+    // Release any in-flight wait with `timeout`, never `end`. An open poll
+    // here is the agent's own wait from the round we're superseding; `end`
+    // would make it tear the brand-new session down (and the freshly opened
+    // browser tab flashes "Session ended"). `timeout` just makes it re-wait,
+    // so it slides straight into the new session.
+    sendJson(waiter.res, 200, { type: 'timeout' });
   }
   agentQueue.length = 0;
   state.chat = [];
@@ -113,7 +118,9 @@ function sendJson(res, code, obj) {
 function sendFile(res, name, type) {
   fs.readFile(path.join(PUBLIC_DIR, name), (err, data) => {
     if (err) return sendJson(res, 500, { error: `missing asset: ${name}` });
-    res.writeHead(200, { 'Content-Type': type });
+    // These files are edited live during development; never let the browser
+    // serve a stale cached copy (a cached style.css hid the CSS overlay fix).
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
     res.end(data);
   });
 }

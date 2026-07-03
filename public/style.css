@@ -15,6 +15,12 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute must beat component `display` rules (e.g.
+   .overlay { display: flex }), otherwise the overlays, comment FAB, and
+   composer render even when the JS sets `.hidden = true` — which made the
+   "Session ended" overlay show on top of every page regardless of status. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;
