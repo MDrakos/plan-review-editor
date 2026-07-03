@@ -693,3 +693,21 @@ mark.hl.active { background: var(--mark-active); }
 .choice-option:hover { background: var(--accent-soft); }
 
 .choice-option input { accent-color: var(--accent); }
+
+/* the free-text "Other" row: radio/checkbox + label, then a stretchy text field */
+.choice-other { align-items: center; }
+.choice-other > label { display: flex; align-items: center; gap: 8px; cursor: pointer; white-space: nowrap; }
+
+.choice-other-text {
+  flex: 1;
+  min-width: 120px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.choice-other-text:focus { outline: 2px solid var(--accent); border-color: transparent; }

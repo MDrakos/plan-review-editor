@@ -42,7 +42,9 @@ function renderFence(lang, body) {
 //     - In-process
 //   ```
 function renderChoice(body) {
-  const spec = { id: '', prompt: '', multi: false, options: [] };
+  // `other` (default true) appends a free-text "Other" answer, like the CLI's
+  // AskUserQuestion; set `other: false` to force a choice from the listed options.
+  const spec = { id: '', prompt: '', multi: false, other: true, options: [] };
   let inOptions = false;
   for (const raw of body.split('\n')) {
     const opt = raw.match(/^\s*-\s+(.*)$/);
@@ -54,6 +56,7 @@ function renderChoice(body) {
     if (kv) {
       inOptions = kv[1] === 'options';
       if (kv[1] === 'multi') spec.multi = kv[2].trim() === 'true';
+      else if (kv[1] === 'other') spec.other = kv[2].trim() !== 'false';
       else if (kv[1] === 'id' || kv[1] === 'prompt') spec[kv[1]] = kv[2].trim();
     }
   }
@@ -62,15 +65,20 @@ function renderChoice(body) {
     return `<pre><code class="language-choice">${escapeHtml(body)}</code></pre>`;
   }
   const type = spec.multi ? 'checkbox' : 'radio';
+  const name = `choice-${escapeHtml(spec.id)}`;
   const options = spec.options
     .map(
       (o) =>
-        `<label class="choice-option"><input type="${type}" name="choice-${escapeHtml(spec.id)}" value="${escapeHtml(o)}"> <span>${inline(o)}</span></label>`
+        `<label class="choice-option"><input type="${type}" name="${name}" value="${escapeHtml(o)}"> <span>${inline(o)}</span></label>`
     )
     .join('\n');
+  // The "Other" answer contributes whatever the reviewer types (see bindChoices).
+  const other = spec.other
+    ? `\n<div class="choice-option choice-other"><label><input type="${type}" name="${name}" value="" data-other="true"> <span>Other</span></label><input type="text" class="choice-other-text" placeholder="Type your own answer…"></div>`
+    : '';
   return `<div class="choice-block" data-choice-id="${escapeHtml(spec.id)}" data-multi="${spec.multi}">
 <p class="choice-prompt">${inline(spec.prompt || 'Choose:')}</p>
-${options}
+${options}${other}
 </div>`;
 }
 

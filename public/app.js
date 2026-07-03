@@ -189,15 +189,43 @@ function bindChoices() {
   for (const block of docEl.querySelectorAll('.choice-block')) {
     const id = block.dataset.choiceId;
     const multi = block.dataset.multi === 'true';
+    const boxes = [...block.querySelectorAll('input[type="radio"], input[type="checkbox"]')];
+    const otherBox = block.querySelector('input[data-other="true"]');
+    const otherText = block.querySelector('.choice-other-text');
+    const presets = new Set(boxes.filter((i) => !i.dataset.other).map((i) => i.value));
+
+    // the value an option contributes: for "Other", whatever was typed
+    const valueOf = (i) =>
+      i.dataset.other ? (otherText ? otherText.value.trim() : '') : i.value;
+
+    const sync = () => {
+      const vals = boxes.filter((i) => i.checked).map(valueOf).filter((v) => v !== '');
+      state.choices[id] = multi ? vals : vals[0];
+      syncReview();
+    };
+
+    // restore a saved answer — a value that matches no preset is an "Other" answer
     const saved = state.choices[id];
-    for (const input of block.querySelectorAll('input')) {
+    for (const box of boxes) {
       if (saved !== undefined) {
-        input.checked = multi ? saved.includes(input.value) : saved === input.value;
+        if (box.dataset.other) {
+          const custom = (multi ? saved : [saved]).filter((v) => v && !presets.has(v))[0];
+          if (custom) {
+            box.checked = true;
+            if (otherText) otherText.value = custom;
+          }
+        } else {
+          box.checked = multi ? saved.includes(box.value) : saved === box.value;
+        }
       }
-      input.addEventListener('change', () => {
-        const checked = [...block.querySelectorAll('input:checked')].map((i) => i.value);
-        state.choices[id] = multi ? checked : checked[0];
-        syncReview();
+      box.addEventListener('change', sync);
+    }
+
+    if (otherText) {
+      // typing implies choosing "Other" (and, for single-select, deselects the rest)
+      otherText.addEventListener('input', () => {
+        if (otherBox && !otherBox.checked) otherBox.checked = true;
+        sync();
       });
     }
   }

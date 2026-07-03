@@ -142,7 +142,14 @@ options:
 ````
 
 `id` and at least one option are required; a malformed block falls back to
-rendering as plain code. The reviewer's answer arrives in `submit.choices`.
+rendering as plain code. The reviewer's answer arrives in `submit.choices` (and
+`approve.choices`).
+
+By default each block also renders a free-text **"Other"** answer (a radio or
+checkbox plus a text field). If the reviewer types there, `choices[id]` holds
+their typed string — indistinguishable in shape from a preset answer, so no
+special handling is needed. Add `other: false` to omit it and require one of the
+listed options.
 
 ## HTTP reference
 

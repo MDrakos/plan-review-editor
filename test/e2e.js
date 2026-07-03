@@ -20,6 +20,7 @@ const os = require('os');
 const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
+const { render } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const env = {
   ...process.env,
   PLANREVIEW_PORT: String(PORT),
@@ -146,6 +147,18 @@ async function main() {
   );
   await cli('stop', '--session', restarted.id);
 
+  console.log('choice blocks: free-text "Other" by default, opt out with other:false');
+  const withOther = render('```choice\nid: q\nprompt: Pick\noptions:\n  - A\n  - B\n```\n');
+  check(
+    'a choice block renders a free-text Other input by default',
+    /data-other="true"/.test(withOther) && /choice-other-text/.test(withOther)
+  );
+  const noOther = render('```choice\nid: q\nprompt: Pick\nother: false\noptions:\n  - A\n  - B\n```\n');
+  check(
+    'other: false omits the free-text input',
+    !/data-other/.test(noOther) && /choice-option/.test(noOther)
+  );
+
   console.log('isolation: two agents, two sessions, zero cross-contamination');
   const a = await cli('start', docA, '--no-open');
   const b = await cli('start', docB, '--no-open');
@@ -194,15 +207,15 @@ async function main() {
   await sleep(300);
   await browser(`/api/submit?session=${id}`, {
     comments: [{ id: 'c1', quote: 'Body of plan A.', text: 'expand this' }],
-    choices: { pick: 'A2' },
+    choices: { pick: 'a custom third option' }, // free-text "Other" answer
     note: 'almost there',
   });
   const subEv = await waitSubmit;
   check(
-    'submit bundle delivered with comments, choices, note',
+    'submit delivers comments, note, and a free-text Other choice value',
     subEv.type === 'submit' &&
       subEv.comments.length === 1 &&
-      subEv.choices.pick === 'A2' &&
+      subEv.choices.pick === 'a custom third option' &&
       subEv.note === 'almost there'
   );
   const stWorking = await cli('status', '--session', id);

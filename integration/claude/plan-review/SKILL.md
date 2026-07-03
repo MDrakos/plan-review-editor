@@ -44,6 +44,11 @@ options:
 ```
 ````
 
+Every choice block also offers a free-text **"Other"** answer by default, so the
+user is never boxed into your options — their custom text arrives in
+`choices[id]` just like a preset would. Add `other: false` to a block to force a
+pick from the listed options only.
+
 ## 2. Present it — and capture the session id
 
 ```sh
