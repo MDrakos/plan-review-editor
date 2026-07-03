@@ -64,8 +64,13 @@ function renderDoc(doc) {
 }
 
 async function fetchState() {
-  const res = await fetch('/api/state');
-  const s = await res.json();
+  let s;
+  try {
+    const res = await fetch('/api/state');
+    s = await res.json();
+  } catch {
+    return; // server unreachable — the event stream's reconnect will retry us
+  }
   renderDoc(s.doc);
   setStatus(s.status);
   state.comments = (s.review && s.review.comments) || [];
@@ -104,6 +109,10 @@ chatFormEl.addEventListener('submit', async (e) => {
 
 function connectEvents() {
   const es = new EventSource('/events');
+  // Resync on every (re)connect. A tab that missed broadcasts while the
+  // server restarted — e.g. one still showing a previous session's "ended"
+  // overlay — heals itself the moment it reattaches to the new session.
+  es.onopen = () => fetchState();
   es.addEventListener('chat', (e) => {
     const msg = JSON.parse(e.data);
     // our own messages are appended optimistically on send

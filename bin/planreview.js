@@ -101,7 +101,14 @@ const commands = {
     await request('POST', '/agent/reset');
     let presented = null;
     if (file) presented = await request('POST', '/agent/present', { path: resolveDoc(file) });
-    if (!args.includes('--no-open')) openBrowser(BASE);
+    if (!args.includes('--no-open')) {
+      // Tabs from a previous session reconnect within ~1s and reload in
+      // place. Give them that window and only open a new tab if none did —
+      // otherwise every session leaves another stale tab behind.
+      await sleep(1500);
+      const s = await request('GET', '/api/state');
+      if (!s.clients) openBrowser(BASE);
+    }
     console.log(JSON.stringify({ ok: true, url: BASE, ...(presented || {}) }));
   },
 

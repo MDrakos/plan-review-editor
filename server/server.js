@@ -133,6 +133,7 @@ const server = http.createServer(async (req, res) => {
         doc: { title: state.doc.title, html: state.doc.html, version: state.doc.version },
         review: state.review,
         chat: state.chat,
+        clients: sseClients.size, // connected review tabs
       });
     }
 
