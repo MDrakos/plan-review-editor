@@ -189,7 +189,7 @@ function renderBlocks(markdown) {
       const tbody = rows
         .map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`)
         .join('');
-      out.push(`<table>${thead}<tbody>${tbody}</tbody></table>`);
+      out.push(`<div class="table-wrap"><table>${thead}<tbody>${tbody}</tbody></table></div>`);
       continue;
     }
 

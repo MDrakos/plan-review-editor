@@ -741,10 +741,20 @@ mark.hl.active { background: var(--mark-active); }
 
 .doc pre code { background: none; padding: 0; font-size: 0.85em; }
 
+/* Tables scroll horizontally inside their own container rather than being
+   crushed into the 760px reading column — otherwise a many-column table
+   shrinks each cell below word width and every word stacks on its own line. */
+.doc .table-wrap {
+  margin: 1em 0;
+  overflow-x: auto;
+}
+
 .doc table {
   border-collapse: collapse;
-  margin: 1em 0;
-  width: 100%;
+  /* fill the column when the content is narrow, but grow (and let the wrapper
+     scroll) when the natural width exceeds it, so cells never word-stack. */
+  width: auto;
+  min-width: 100%;
   font-size: 0.95em;
 }
 
@@ -752,6 +762,7 @@ mark.hl.active { background: var(--mark-active); }
   border: 1px solid var(--line);
   padding: 6px 12px;
   text-align: left;
+  min-width: 90px;
 }
 
 .doc th { background: var(--fill-hover); }
