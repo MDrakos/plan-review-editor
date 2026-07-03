@@ -49,6 +49,7 @@ const STATUS_LABEL = {
   idle: 'waiting for a plan',
   reviewing: 'reviewing',
   working: 'agent is reworking the plan',
+  done: 'review approved',
   ended: 'session ended',
 };
 
@@ -56,12 +57,15 @@ function setStatus(status) {
   state.status = status;
   statusPill.dataset.status = status;
   statusPill.textContent = STATUS_LABEL[status] || status;
-  submitBtn.disabled = status !== 'reviewing';
   document.getElementById('working-overlay').hidden = status !== 'working';
+  document.getElementById('done-overlay').hidden = status !== 'done';
   document.getElementById('ended-overlay').hidden = status !== 'ended';
-  document.getElementById('end-btn').disabled = status === 'ended';
-  chatInputEl.disabled = status === 'ended';
-  if (status === 'ended') hideTyping();
+  // 'done' and 'ended' are both terminal — the review is over either way
+  const terminal = status === 'done' || status === 'ended';
+  document.getElementById('end-btn').disabled = terminal;
+  chatInputEl.disabled = terminal;
+  if (terminal) hideTyping();
+  updateSubmitButton();
 }
 
 document.getElementById('end-btn').addEventListener('click', async () => {
@@ -276,9 +280,7 @@ function saveComment() {
 
 function renderComments() {
   commentCountEl.textContent = String(state.comments.length);
-  submitBtn.textContent = state.comments.length
-    ? `Submit review (${state.comments.length})`
-    : 'Submit review';
+  updateSubmitButton();
   commentListEl.innerHTML = '';
   if (!state.comments.length) {
     commentListEl.innerHTML =
@@ -415,30 +417,100 @@ async function syncReview() {
   }).catch(() => {});
 }
 
-// ---------- submit ----------
+// ---------- submit / approve (split button) ----------
+//
+// The primary button submits a review round (agent reworks and re-presents);
+// the dropdown switches it to "Approve & finish", which sends the same bundle
+// but ends the review — the UI goes straight to a terminal state instead of
+// spinning, so it never waits on the agent.
 
-submitBtn.addEventListener('click', submitReview);
+const submitMenuToggle = document.getElementById('submit-menu-toggle');
+const submitMenu = document.getElementById('submit-menu');
+let submitMode = 'submit'; // 'submit' | 'approve'
 
-async function submitReview() {
-  if (state.status !== 'reviewing') return;
-  const bundle = {
+function updateSubmitButton() {
+  if (submitMode === 'approve') {
+    submitBtn.textContent = 'Approve & finish';
+    submitBtn.classList.add('approve');
+  } else {
+    submitBtn.textContent = state.comments.length
+      ? `Submit review (${state.comments.length})`
+      : 'Submit review';
+    submitBtn.classList.remove('approve');
+  }
+  const locked = state.status !== 'reviewing';
+  submitBtn.disabled = locked;
+  submitMenuToggle.disabled = locked;
+}
+
+function closeSubmitMenu() {
+  submitMenu.hidden = true;
+  submitMenuToggle.setAttribute('aria-expanded', 'false');
+}
+
+submitMenuToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = submitMenu.hidden;
+  submitMenu.hidden = !open;
+  submitMenuToggle.setAttribute('aria-expanded', String(open));
+});
+
+for (const item of submitMenu.querySelectorAll('.split-item')) {
+  item.addEventListener('click', () => {
+    submitMode = item.dataset.mode;
+    closeSubmitMenu();
+    updateSubmitButton();
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (!submitMenu.hidden && !submitMenu.contains(e.target) && e.target !== submitMenuToggle)
+    closeSubmitMenu();
+});
+
+submitBtn.addEventListener('click', () => (submitMode === 'approve' ? approveReview() : submitReview()));
+
+function reviewBundle() {
+  return {
     comments: state.comments,
     choices: state.choices,
     note: overallNoteEl.value.trim(),
     docVersion: state.version,
   };
+}
+
+// Surface a failed POST instead of silently swallowing it (a stale/old server,
+// for instance, 404s a request and the click would otherwise look like a no-op).
+function flashSubmitError() {
+  submitBtn.disabled = false;
+  submitBtn.textContent = "Couldn't reach the agent — try again";
+  setTimeout(updateSubmitButton, 2500);
+}
+
+async function submitReview() {
+  if (state.status !== 'reviewing') return;
   submitBtn.disabled = true;
   const res = await fetch(api('/api/submit'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(bundle),
+    body: JSON.stringify(reviewBundle()),
   }).catch(() => null);
-  if (!res || !res.ok) {
-    submitBtn.disabled = false;
-    return;
-  }
+  if (!res || !res.ok) return flashSubmitError();
   overallNoteEl.value = '';
   setStatus('working');
+}
+
+async function approveReview() {
+  if (state.status !== 'reviewing') return;
+  submitBtn.disabled = true;
+  const res = await fetch(api('/api/approve'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(reviewBundle()),
+  }).catch(() => null);
+  if (!res || !res.ok) return flashSubmitError();
+  overallNoteEl.value = '';
+  setStatus('done');
 }
 
 // ---------- highlights ----------

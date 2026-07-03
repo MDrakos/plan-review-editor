@@ -32,6 +32,8 @@ loop:
     chat)    reply with `planreview say "…" --session $id`, then wait again
     submit)  rework plan.md using the bundle,
              `planreview present plan.md --session $id`, then wait again
+    approve) apply any feedback in the bundle, `planreview stop --session $id`,
+             then proceed with the work — do NOT present again
     end)     `planreview stop --session $id`, return to normal operation
   esac
 ```
@@ -74,10 +76,31 @@ shows a "reworking" overlay until you `present` again.
 - Rework the document, then `planreview present <file> --session <id>` — the
   browser reloads it in place and a fresh review round begins.
 
+### `approve`
+
+The reviewer chose **Approve & finish** — they're satisfied and done. The
+payload is the same bundle shape as `submit` (`comments`/`choices`/`note`, any
+of which may be empty). Apply any feedback it carries, run `planreview stop`,
+then proceed with the work. Do **not** `present` again — the reviewer's page is
+already in a terminal "Review approved" state and no further round is coming.
+Unlike `submit`, this never leaves the page spinning: the session goes straight
+to `done`, independent of what the agent does next.
+
+```json
+{
+  "type": "approve",
+  "comments": [],
+  "choices": { "storage": "In-process" },
+  "note": "ship it",
+  "docVersion": 3,
+  "submittedAt": "2026-07-03T18:12:00.000Z"
+}
+```
+
 ### `end`
 
-The reviewer ended the session. Run `planreview stop --session <id>`, then
-continue in the terminal as usual.
+The reviewer ended the session without an explicit approval. Run
+`planreview stop --session <id>`, then continue in the terminal as usual.
 
 ```json
 { "type": "end" }
@@ -129,8 +152,9 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `status` |
 | POST | `/api/review-state?session=` | browser | persist in-progress comments/choices |
 | POST | `/api/chat?session=` | browser | reviewer chat message (queued for the agent) |
-| POST | `/api/submit?session=` | browser | submit the review bundle (queued for the agent) |
-| POST | `/api/end?session=` | browser | end the session (queued for the agent) |
+| POST | `/api/submit?session=` | browser | submit a review round (→ `working`; queued as `submit`) |
+| POST | `/api/approve?session=` | browser | approve & finish (→ `done`; queued as `approve`) |
+| POST | `/api/end?session=` | browser | end the session (queued as `end`) |
 | POST | `/agent/present?session=` | CLI | render a markdown file as the session's document |
 | GET | `/agent/wait?session=` | CLI | long-poll for the next reviewer event (`&timeout=<ms>` optional) |
 | POST | `/agent/say?session=` | CLI | agent chat message to the reviewer |

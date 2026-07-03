@@ -190,6 +190,28 @@ async function main() {
   const gone = await browser(`/api/state?session=${id}`);
   check('stop drops the session (state now 404s)', gone.status === 404, `status=${gone.status}`);
 
+  console.log('approve & finish: terminal state, no spinner, no re-present');
+  const ap = await cli('start', docA, '--no-open');
+  await browser(`/api/approve?session=${ap.id}`, {
+    comments: [{ id: 'c9', quote: 'Body of plan A.', text: 'tiny nit' }],
+    choices: { pick: 'A1' },
+    note: 'ship it',
+  });
+  const apState = await browser(`/api/state?session=${ap.id}`);
+  check(
+    'approve goes to terminal "done" (not "working")',
+    apState.data.status === 'done',
+    apState.data.status
+  );
+  const apEv = await cli('wait', '--session', ap.id, '--timeout', '3');
+  check(
+    'agent gets an approve event carrying the final bundle',
+    apEv.type === 'approve' && apEv.note === 'ship it' && apEv.comments.length === 1
+  );
+  const reApprove = await browser(`/api/approve?session=${ap.id}`, {});
+  check('cannot approve again once done', reApprove.status === 409, `status=${reApprove.status}`);
+  await cli('stop', '--session', ap.id);
+
   console.log('guard: a session id is required, unknown ids are rejected');
   const guard = await cli('start', docB, '--no-open'); // keep the server up
   const noId = await cliRaw('status');
@@ -217,7 +239,10 @@ async function main() {
   const index = await text('/');
   check('/ serves the sessions index page', index.ok && /Plan Review/.test(index.body) && /api\/sessions/.test(index.body));
   const appPage = await text(`/s/${guard.id}`);
-  check('/s/<id> serves the review app', appPage.ok && /id="doc"/.test(appPage.body));
+  check(
+    '/s/<id> serves the review app with the submit split-button',
+    appPage.ok && /id="doc"/.test(appPage.body) && /split-btn/.test(appPage.body)
+  );
 
   console.log('connected tab shows up in the session\'s client count');
   const tab = await openEventStream(guard.id);
@@ -236,6 +261,7 @@ async function main() {
   );
   const app = await text('/app.js');
   check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
+  check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
 
   await cli('stop', '--session', guard.id);
 

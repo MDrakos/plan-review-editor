@@ -20,7 +20,13 @@
         <div class="overlay-card">
           <div class="spinner"></div>
           <p>Review submitted — the agent is reworking the plan…</p>
-          <p class="overlay-hint">The new version will load here automatically. Chat stays open.</p>
+          <p class="overlay-hint">The new version will load here automatically. Chat stays open. If the agent has already moved on, click <strong>End session</strong> above.</p>
+        </div>
+      </div>
+      <div id="done-overlay" class="overlay" hidden>
+        <div class="overlay-card">
+          <p>Review approved ✓</p>
+          <p class="overlay-hint">The agent is applying your feedback and proceeding. You can close this tab.</p>
         </div>
       </div>
       <div id="ended-overlay" class="overlay" hidden>
@@ -39,7 +45,20 @@
       </section>
       <section class="submit-area">
         <textarea id="overall-note" rows="2" placeholder="Overall note to the agent (optional)…"></textarea>
-        <button id="submit-btn" class="btn primary">Submit review</button>
+        <div class="split-btn">
+          <button id="submit-btn" class="btn primary">Submit review</button>
+          <button id="submit-menu-toggle" class="btn primary split-caret" aria-haspopup="true" aria-expanded="false" title="Change action">▾</button>
+          <div id="submit-menu" class="split-menu" hidden>
+            <button class="split-item" data-mode="submit">
+              <span class="split-item-title">Submit review</span>
+              <span class="split-item-sub">Rework and show me again</span>
+            </button>
+            <button class="split-item" data-mode="approve">
+              <span class="split-item-title">Approve &amp; finish</span>
+              <span class="split-item-sub">Apply my feedback, then proceed</span>
+            </button>
+          </div>
+        </div>
       </section>
       <section class="panel chat-panel">
         <header class="panel-head">Chat</header>

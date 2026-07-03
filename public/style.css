@@ -16,6 +16,11 @@
   --accent-soft: #e8effd;
   --on-accent: #ffffff;    /* text on an accent fill */
 
+  --success: #15803d;      /* the terminal "approve & finish" action */
+  --success-hover: #166534;
+  --success-soft: #dcfce7;
+  --on-success: #ffffff;
+
   --warn: #b45309;
   --warn-soft: #fef3c7;
   --danger: #b91c1c;
@@ -60,6 +65,11 @@
     --accent-hover: #7aa2ff;
     --accent-soft: #1e2740;
     --on-accent: #0d1220;   /* dark text reads on the bright accent */
+
+    --success: #34d399;
+    --success-hover: #52e0aa;
+    --success-soft: #12301f;
+    --on-success: #05261a;
 
     --warn: #fbbf24;
     --warn-soft: #3a2e12;
@@ -330,7 +340,66 @@ html, body {
 
 .submit-area textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
 
-#submit-btn { padding: 10px; font-size: 14px; }
+/* split button: primary action + a caret that opens the action menu */
+.split-btn { position: relative; display: flex; }
+
+#submit-btn {
+  padding: 10px;
+  font-size: 14px;
+  flex: 1;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.split-caret {
+  padding: 10px 10px;
+  font-size: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.3);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+/* approve mode recolors both halves to the terminal "success" action */
+#submit-btn.approve,
+#submit-btn.approve + .split-caret {
+  background: var(--success);
+  border-color: var(--success);
+  color: var(--on-success);
+}
+#submit-btn.approve:hover,
+#submit-btn.approve + .split-caret:hover { background: var(--success-hover); }
+
+.split-menu {
+  position: absolute;
+  bottom: calc(100% + 6px); /* open upward — the button sits at the panel bottom */
+  right: 0;
+  left: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  z-index: 30;
+}
+
+.split-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--ink);
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.split-item:hover { background: var(--fill-subtle); }
+.split-item-title { font-size: 14px; font-weight: 600; }
+.split-item-sub { font-size: 12px; color: var(--ink-soft); }
 
 /* ---------- chat ---------- */
 
@@ -518,6 +587,7 @@ mark.hl.active { background: var(--mark-active); }
 .btn.danger:hover { background: var(--danger-soft); }
 
 .pill[data-status="working"] { background: var(--warn-soft); color: var(--warn); }
+.pill[data-status="done"] { background: var(--success-soft); color: var(--success); }
 .pill[data-status="ended"] { background: var(--fill-subtle); color: var(--ink-soft); }
 
 /* ---------- document typography ---------- */

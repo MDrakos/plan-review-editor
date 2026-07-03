@@ -152,6 +152,17 @@ function loadDoc(s, docPath) {
   touch(s);
 }
 
+// Normalize a review bundle from a browser POST (shared by submit + approve).
+function reviewBundle(s, body) {
+  return {
+    comments: Array.isArray(body.comments) ? body.comments : [],
+    choices: body.choices && typeof body.choices === 'object' ? body.choices : {},
+    note: typeof body.note === 'string' ? body.note : '',
+    docVersion: s.doc.version,
+    submittedAt: new Date().toISOString(),
+  };
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -334,21 +345,22 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    if (method === 'POST' && pathname === '/api/submit') {
+    // Submit = another round: the agent reworks and re-presents (status
+    // 'working' until it does). Approve = the reviewer is satisfied and done:
+    // the same bundle, but the session goes straight to a terminal 'done'
+    // state (no spinner, no dependency on the agent) and the agent is told to
+    // apply any feedback and proceed WITHOUT re-presenting.
+    if (method === 'POST' && (pathname === '/api/submit' || pathname === '/api/approve')) {
+      const approve = pathname === '/api/approve';
+      const verb = approve ? 'approve' : 'submit';
       if (s.status !== 'reviewing')
-        return sendJson(res, 409, { error: `cannot submit while ${s.status}` });
-      const body = await readBody(req);
-      s.submissions.push({
-        comments: Array.isArray(body.comments) ? body.comments : [],
-        choices: body.choices && typeof body.choices === 'object' ? body.choices : {},
-        note: typeof body.note === 'string' ? body.note : '',
-        docVersion: s.doc.version,
-        submittedAt: new Date().toISOString(),
-      });
-      s.status = 'working';
+        return sendJson(res, 409, { error: `cannot ${verb} while ${s.status}` });
+      const bundle = reviewBundle(s, await readBody(req));
+      s.submissions.push(bundle);
+      s.status = approve ? 'done' : 'working';
       touch(s);
       broadcast(s, 'status', { status: s.status });
-      enqueueAgentEvent(s, { type: 'submit', ...s.submissions[s.submissions.length - 1] });
+      enqueueAgentEvent(s, { type: verb, ...bundle });
       return sendJson(res, 200, { ok: true });
     }
 

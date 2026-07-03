@@ -79,14 +79,22 @@ loop:
 - `{"type":"chat","text":…}` — the user said something in the sidebar. It
   may be unrelated to the document; answer it (do real work if needed) with
   `planreview say "<answer>" --session a1b2c3`, then `wait` again.
-- `{"type":"submit",…}` — the bundled review. `comments[]` each carry the
-  exact selected passage in `quote` plus the user's `text` about it;
-  `choices` maps each choice-fence `id` to the selected option; `note` is an
-  overall remark. Rework the markdown file addressing **every** comment and
-  honoring every choice, then `planreview present plan.md --session a1b2c3`
-  (the browser reloads it in place) and `wait` again.
-- `{"type":"end"}` — the user is done. Run `planreview stop --session a1b2c3`,
-  give a brief terminal summary of the final document and decisions, and
+- `{"type":"submit",…}` — the bundled review (another round wanted).
+  `comments[]` each carry the exact selected passage in `quote` plus the
+  user's `text` about it; `choices` maps each choice-fence `id` to the selected
+  option; `note` is an overall remark. Rework the markdown file addressing
+  **every** comment and honoring every choice, then
+  `planreview present plan.md --session a1b2c3` (the browser reloads it in
+  place) and `wait` again. **Always follow a submit with either `present` (to
+  continue) or `stop` (if you're truly done) — until you do, the reviewer's
+  page shows a "reworking" spinner. Never leave it hanging.**
+- `{"type":"approve",…}` — the user approved and is **done reviewing**. Same
+  bundle shape as `submit` (`comments`/`choices`/`note`), which may be empty.
+  Apply any feedback it carries, then run `planreview stop --session a1b2c3`
+  and proceed with the work. Do **not** `present` again — the reviewer will not
+  review further, and their page already shows "Review approved".
+- `{"type":"end"}` — the user ended the session without an explicit approval.
+  Run `planreview stop --session a1b2c3`, give a brief terminal summary, and
   continue normally.
 
 `planreview list` shows every open session if you lose track of an id.
