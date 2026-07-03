@@ -11,7 +11,7 @@
 //
 // Run: node test/e2e.js   (uses port 4799 so it never clashes with a real session)
 
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -156,6 +156,31 @@ async function main() {
     `frames: ${frames.replace(/\n/g, ' ').slice(-200)}`
   );
   tab.close();
+  await cli('stop');
+  await sleep(400);
+
+  console.log('upgrade: a leftover server from an older tool version is replaced');
+  // mimics a pre-/agent/reset server: 404s the reset, honors stop
+  const OLD_SERVER = `
+    const http = require('http');
+    http.createServer((req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/api/state')
+        return res.end(JSON.stringify({ status: 'ended', doc: { title: 'old', html: '', version: 9 }, review: { comments: [], choices: {} }, chat: [] }));
+      if (req.url === '/agent/stop' && req.method === 'POST') {
+        res.end('{"ok":true}');
+        return setTimeout(() => process.exit(0), 100);
+      }
+      res.statusCode = 404;
+      res.end('{"error":"not found"}');
+    }).listen(${PORT}, '127.0.0.1');
+  `;
+  spawn(process.execPath, ['-e', OLD_SERVER], { stdio: 'ignore', detached: true }).unref();
+  await sleep(300);
+  const up = await cli('start', doc, '--no-open');
+  check('start replaces the old server and presents', up.ok === true && up.version === 1);
+  const stUp = await cli('status');
+  check('replaced server is reviewing the new doc', stUp.status === 'reviewing');
   await cli('stop');
 }
 
