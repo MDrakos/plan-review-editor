@@ -80,7 +80,9 @@ shows a "reworking" overlay until you `present` again.
 - `choices` maps each `id` from a ` ```choice ` fence to the selected option
   (an array when the block sets `multi: true`).
 - Rework the document, then `planreview present <file> --session <id>` — the
-  browser reloads it in place and a fresh review round begins.
+  browser reloads it in place and a fresh review round begins. Every re-present
+  after the first automatically highlights the blocks that changed since the
+  previous version (the reviewer can dismiss the highlight); no action needed.
 - While reworking, `planreview progress "<step>" --session <id>` appends a step
   to a live checklist shown in the reviewer's "reworking" overlay (SSE
   `progress` event). Steps reset each round and clear when you `present`.

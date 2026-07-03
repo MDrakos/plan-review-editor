@@ -125,6 +125,12 @@ function renderList(items) {
 }
 
 function render(markdown) {
+  return renderBlocks(markdown).join('\n');
+}
+
+// Render to an array of top-level block HTML strings (one per paragraph,
+// heading, list, table, etc.). Diffing works at this granularity.
+function renderBlocks(markdown) {
   const lines = String(markdown).replace(/\r\n/g, '\n').split('\n');
   const out = [];
   let i = 0;
@@ -205,7 +211,37 @@ function render(markdown) {
     out.push(`<p>${inline(para.join(' '))}</p>`);
   }
 
-  return out.join('\n');
+  return out;
 }
 
-module.exports = { render, escapeHtml };
+// Wrap blocks in `newBlocks` that aren't present (unchanged) in `prevBlocks`
+// in a <div data-changed> highlight container. A multiset match handles
+// duplicate blocks; a modified block's text differs from the old one, so it
+// counts as changed. Added and changed blocks get wrapped; removed ones simply
+// vanish. Wrapping (vs. tagging the block itself) lets the highlight own its
+// border/padding without disturbing the inner block's own styling.
+function markChanges(prevBlocks, newBlocks) {
+  const counts = new Map();
+  for (const b of prevBlocks) counts.set(b, (counts.get(b) || 0) + 1);
+  return newBlocks
+    .map((b) => {
+      const c = counts.get(b) || 0;
+      if (c > 0) {
+        counts.set(b, c - 1);
+        return b; // unchanged since last cycle
+      }
+      return `<div data-changed>${b}</div>`; // new or modified
+    })
+    .join('\n');
+}
+
+// Render `markdown`, highlighting what changed since `prevBlocks` (the block
+// array from the previous cycle). Returns { html, blocks }; pass the returned
+// `blocks` as `prevBlocks` next time. With no prevBlocks, nothing is marked.
+function renderDiff(markdown, prevBlocks) {
+  const blocks = renderBlocks(markdown);
+  const html = prevBlocks ? markChanges(prevBlocks, blocks) : blocks.join('\n');
+  return { html, blocks };
+}
+
+module.exports = { render, renderDiff, escapeHtml };

@@ -20,7 +20,7 @@ const os = require('os');
 const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
-const { render } = require(path.join(__dirname, '..', 'server', 'markdown'));
+const { render, renderDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const env = {
   ...process.env,
   PLANREVIEW_PORT: String(PORT),
@@ -159,6 +159,23 @@ async function main() {
     !/data-other/.test(noOther) && /choice-option/.test(noOther)
   );
 
+  console.log('doc changes: re-render highlights new/changed blocks; first render is clean');
+  const firstRender = renderDiff('# T\n\nAlpha.\n\nBeta.\n', null);
+  check(
+    'first render marks nothing changed',
+    !/data-changed/.test(firstRender.html) && firstRender.blocks.length >= 3
+  );
+  const reRender = renderDiff('# T\n\nAlpha.\n\nBeta changed.\n\nGamma.\n', firstRender.blocks);
+  const marks = (reRender.html.match(/data-changed/g) || []).length;
+  check(
+    're-render wraps only the changed and added blocks',
+    marks === 2 &&
+      /<div data-changed><p>Beta changed\./.test(reRender.html) &&
+      /<div data-changed><p>Gamma\./.test(reRender.html) &&
+      !/data-changed><p>Alpha/.test(reRender.html),
+    `marks=${marks}`
+  );
+
   console.log('isolation: two agents, two sessions, zero cross-contamination');
   const a = await cli('start', docA, '--no-open');
   const b = await cli('start', docB, '--no-open');
@@ -230,6 +247,7 @@ async function main() {
     'rework starts a fresh round: review cleared, chat kept',
     s2.data.status === 'reviewing' && s2.data.review.comments.length === 0 && s2.data.chat.length === 2
   );
+  check('the re-presented doc highlights the blocks that changed', /data-changed/.test(s2.data.doc.html));
 
   const waitEnd = cli('wait', '--session', id, '--timeout', '10');
   await sleep(300);
@@ -367,6 +385,7 @@ async function main() {
   check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
+  check('client highlights + can dismiss doc changes', /data-changed/.test(app.body) && /changes-dismissed/.test(app.body));
 
   await cli('stop', '--session', guard.id);
 

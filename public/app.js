@@ -30,6 +30,9 @@ const chatListEl = document.getElementById('chat-list');
 const chatFormEl = document.getElementById('chat-form');
 const chatInputEl = document.getElementById('chat-input');
 const progressListEl = document.getElementById('progress-list');
+const changesBar = document.getElementById('changes-bar');
+const changesLabel = document.getElementById('changes-label');
+const changesDismiss = document.getElementById('changes-dismiss');
 
 // ---------- state ----------
 
@@ -82,7 +85,24 @@ function renderDoc(doc) {
   docEl.innerHTML =
     doc.html || '<p class="empty">Waiting for the agent to present a plan…</p>';
   state.version = doc.version;
+  updateChangesBar();
 }
+
+// Blocks changed since the last cycle carry a data-changed attribute (added by
+// the server). Show a dismissible bar when there are any; a freshly rendered
+// doc always starts with its highlights visible.
+function updateChangesBar() {
+  docEl.classList.remove('changes-dismissed');
+  const n = docEl.querySelectorAll('[data-changed]').length;
+  changesBar.hidden = n === 0;
+  if (n > 0)
+    changesLabel.textContent = `${n} change${n === 1 ? '' : 's'} since your last review — highlighted below.`;
+}
+
+changesDismiss.addEventListener('click', () => {
+  docEl.classList.add('changes-dismissed');
+  changesBar.hidden = true;
+});
 
 async function fetchState() {
   let s;

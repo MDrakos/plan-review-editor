@@ -96,7 +96,8 @@ event when something happens. Handle it and wait again:
   option; `note` is an overall remark. Rework the markdown file addressing
   **every** comment and honoring every choice, then
   `planreview present plan.md --session a1b2c3` (the browser reloads it in
-  place) and `wait` again. **Always follow a submit with either `present` (to
+  place, automatically highlighting what changed since the last version) and
+  `wait` again. **Always follow a submit with either `present` (to
   continue) or `stop` (if you're truly done) — until you do, the reviewer's
   page shows a "reworking" spinner. Never leave it hanging.** For a multi-step
   rework, call `planreview progress "<step>" --session a1b2c3` as you go (e.g.

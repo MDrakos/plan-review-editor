@@ -5,7 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { render } = require('./markdown');
+const { renderDiff } = require('./markdown');
 const { codeVersion } = require('./version');
 
 const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
@@ -39,7 +39,7 @@ function createSession() {
   const s = {
     id,
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
-    doc: { path: null, title: '', html: '', version: 0 },
+    doc: { path: null, title: '', html: '', version: 0, blocks: null }, // blocks: prev render, for diff
     review: { comments: [], choices: {} }, // in-progress review, survives refreshes
     submissions: [], // completed review bundles, oldest first
     chat: [], // {role: 'reviewer' | 'agent', text, ts}
@@ -148,9 +148,12 @@ function titleFrom(markdown) {
 
 function loadDoc(s, docPath) {
   const markdown = fs.readFileSync(docPath, 'utf8');
+  // Highlight what changed since the previous cycle (nothing on the first load).
+  const { html, blocks } = renderDiff(markdown, s.doc.blocks);
   s.doc.path = docPath;
   s.doc.title = titleFrom(markdown) || path.basename(docPath);
-  s.doc.html = render(markdown);
+  s.doc.html = html;
+  s.doc.blocks = blocks;
   s.doc.version += 1;
   s.review = { comments: [], choices: {} };
   s.progress = []; // the reworked doc is here — the previous round's steps are done

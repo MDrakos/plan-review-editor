@@ -21,6 +21,9 @@
   --success-soft: #dcfce7;
   --on-success: #ffffff;
 
+  --change-bar: #2f9e5e;   /* highlight for blocks changed since the last cycle */
+  --change-bg: #e9faf0;
+
   --warn: #b45309;
   --warn-soft: #fef3c7;
   --danger: #b91c1c;
@@ -70,6 +73,9 @@
     --success-hover: #52e0aa;
     --success-soft: #12301f;
     --on-success: #05261a;
+
+    --change-bar: #34d399;
+    --change-bg: #16301f;
 
     --warn: #fbbf24;
     --warn-soft: #3a2e12;
@@ -163,6 +169,46 @@ html, body {
   padding: 32px 24px 96px;
   position: relative;
 }
+
+/* ---------- changed-since-last-cycle highlight ---------- */
+
+.changes-bar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 760px;
+  margin: 0 auto 16px;
+  padding: 8px 8px 8px 14px;
+  background: var(--change-bg);
+  border: 1px solid var(--change-bar);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.changes-bar span { flex: 1; }
+.changes-bar .btn { padding: 4px 12px; }
+
+/* wrapper around blocks the server flagged as new/changed. The negative left
+   margin offsets the border + padding so the inner text stays aligned with the
+   unchanged blocks (and never sits under the accent bar). */
+.doc:not(.changes-dismissed) [data-changed] {
+  background: var(--change-bg);
+  border-left: 3px solid var(--change-bar);
+  border-radius: 0 4px 4px 0;
+  padding: 8px 14px;
+  /* left: 3px border + 14px padding, pulled back so inner text stays aligned */
+  margin: 0.8em 0 0.8em -17px;
+}
+
+.doc:not(.changes-dismissed) [data-changed] > :first-child { margin-top: 0; }
+.doc:not(.changes-dismissed) [data-changed] > :last-child { margin-bottom: 0; }
+
+/* when dismissed, the wrapper collapses to a plain passthrough */
+.doc.changes-dismissed [data-changed] { display: contents; }
 
 /* ---------- working overlay ---------- */
 
