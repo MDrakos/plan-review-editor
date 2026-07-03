@@ -28,6 +28,7 @@ const state = {
 
 let pendingRange = null;
 let pendingQuote = '';
+let editingId = null; // id of the comment currently open for inline editing
 
 // ---------- status & document ----------
 
@@ -234,27 +235,106 @@ function renderComments() {
     return;
   }
   for (const c of state.comments) {
-    const card = document.createElement('div');
-    card.className = 'comment-card';
-    card.dataset.cid = c.id;
+    commentListEl.appendChild(c.id === editingId ? editCard(c) : viewCard(c));
+  }
+}
 
-    const quote = document.createElement('blockquote');
-    quote.textContent = truncate(c.quote, 120);
-    const body = document.createElement('p');
-    body.textContent = c.text;
-    const del = document.createElement('button');
-    del.className = 'icon-btn';
-    del.title = 'Delete comment';
-    del.textContent = '✕';
-    del.addEventListener('click', (e) => {
+function iconBtn(glyph, title, onClick) {
+  const b = document.createElement('button');
+  b.className = 'icon-btn';
+  b.title = title;
+  b.textContent = glyph;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function viewCard(c) {
+  const card = document.createElement('div');
+  card.className = 'comment-card';
+  card.dataset.cid = c.id;
+
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
+  actions.append(
+    iconBtn('✎', 'Edit comment', (e) => {
+      e.stopPropagation();
+      beginEdit(c.id);
+    }),
+    iconBtn('✕', 'Delete comment', (e) => {
       e.stopPropagation();
       deleteComment(c.id);
-    });
+    })
+  );
 
-    card.append(del, quote, body);
-    card.addEventListener('click', () => flashHighlight(c.id));
-    commentListEl.appendChild(card);
+  const quote = document.createElement('blockquote');
+  quote.textContent = truncate(c.quote, 120);
+  const body = document.createElement('p');
+  body.textContent = c.text;
+
+  card.append(actions, quote, body);
+  card.addEventListener('click', () => flashHighlight(c.id));
+  return card;
+}
+
+function editCard(c) {
+  const card = document.createElement('div');
+  card.className = 'comment-card editing';
+  card.dataset.cid = c.id;
+  // clicks inside the editor must not scroll/flash the document highlight
+  card.addEventListener('click', (e) => e.stopPropagation());
+
+  const quote = document.createElement('blockquote');
+  quote.textContent = truncate(c.quote, 120);
+
+  const ta = document.createElement('textarea');
+  ta.className = 'comment-edit';
+  ta.rows = 3;
+  ta.value = c.text;
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') cancelEdit();
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) commitEdit(c.id, ta.value);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'composer-actions';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn';
+  cancel.textContent = 'Cancel';
+  cancel.addEventListener('click', cancelEdit);
+  const save = document.createElement('button');
+  save.className = 'btn primary';
+  save.textContent = 'Save';
+  save.addEventListener('click', () => commitEdit(c.id, ta.value));
+  actions.append(cancel, save);
+
+  card.append(quote, ta, actions);
+  // focus once the card is in the DOM, caret at the end
+  setTimeout(() => {
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }, 0);
+  return card;
+}
+
+function beginEdit(id) {
+  editingId = id;
+  renderComments();
+}
+
+function cancelEdit() {
+  editingId = null;
+  renderComments();
+}
+
+function commitEdit(id, value) {
+  const text = value.trim();
+  const c = state.comments.find((c) => c.id === id);
+  if (c && text) {
+    c.text = text;
+    syncReview();
   }
+  editingId = null;
+  renderComments();
 }
 
 function deleteComment(id) {

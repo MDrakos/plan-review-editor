@@ -259,8 +259,10 @@ html, body {
 
 .comment-card:hover { border-color: var(--accent); }
 
+.comment-card.editing { cursor: default; }
+
 .comment-card blockquote {
-  margin: 0 24px 6px 0;
+  margin: 0 48px 6px 0; /* clear the edit + delete buttons */
   padding-left: 8px;
   border-left: 3px solid var(--mark-active);
   color: var(--ink-soft);
@@ -269,10 +271,29 @@ html, body {
 
 .comment-card p { margin: 0; white-space: pre-wrap; }
 
-.icon-btn {
+.comment-edit {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px;
+  font: inherit;
+  font-size: 14px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.comment-edit:focus { outline: 2px solid var(--accent); border-color: transparent; }
+
+.card-actions {
   position: absolute;
   top: 6px;
   right: 6px;
+  display: flex;
+  gap: 2px;
+}
+
+.icon-btn {
   border: none;
   background: none;
   color: var(--ink-soft);
