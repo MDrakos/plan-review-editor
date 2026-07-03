@@ -40,15 +40,18 @@ review loop in the browser.
 
 Three pieces, zero runtime dependencies:
 
-- **`server/`** — a Node.js HTTP server that holds session state (document,
-  comments, chat, review status), renders markdown to HTML, and bridges the
-  browser and the agent. Browser ⇄ server uses JSON + server-sent events;
-  agent ⇄ server uses a small localhost API.
-- **`public/`** — the review UI: document pane on the left, comments and
-  chat on the right.
-- **`bin/planreview.js`** — the CLI the agent drives. `present` pushes a
-  document; `wait` blocks until the reviewer produces an event (a chat
-  message, a submitted review, or the end of the session).
+- **`server/`** — one Node.js HTTP server hosting **many isolated sessions**,
+  each keyed by a short id (its own document, comments, chat, review status,
+  and browser tab). It renders markdown to HTML and bridges browser and agent.
+  Browser ⇄ server uses JSON + server-sent events; agent ⇄ server uses a small
+  localhost API. Because sessions share nothing, several agents can run reviews
+  at once without cross-contamination.
+- **`public/`** — the review UI (document pane left, comments + chat right),
+  served at `/s/<id>`; `/` is an index of every open session.
+- **`bin/planreview.js`** — the CLI the agent drives. `start` mints a session
+  and prints its `id`; every later command carries `--session <id>`. `present`
+  pushes a revised document; `wait` blocks until the reviewer produces an event
+  (a chat message, a submitted review, or the end of the session).
 
 ## Quick start
 
@@ -57,16 +60,22 @@ No install, no dependencies — Node 18+ only.
 ```sh
 # try it with the bundled sample plan
 node bin/planreview.js start examples/sample-plan.md
+# -> {"id":"a1b2c3","url":"http://127.0.0.1:4780/s/a1b2c3", …}
 ```
 
-Your browser opens the rendered plan. Select any text to leave a comment,
-answer the storage-decision choice block, chat in the sidebar, then hit
-**Submit review**. In another terminal, see what the agent would see:
+Your browser opens the rendered plan in its own tab. Select any text to leave
+a comment, answer the storage-decision choice block, chat in the sidebar, then
+hit **Submit review**. In another terminal, see what the agent would see —
+passing the session `id` that `start` printed:
 
 ```sh
-node bin/planreview.js wait
+node bin/planreview.js wait --session a1b2c3
 # {"type":"submit","comments":[…],"choices":{…},"note":"…"}
 ```
+
+Every session is isolated, so a second `start` opens a separate plan in its
+own tab without touching the first. Visit `http://127.0.0.1:4780/` to see all
+open sessions.
 
 ### Install the `planreview` command
 
@@ -110,12 +119,14 @@ review loop instead of printing them:
 
 ```
 When you have a plan for the user to review, do not print it. Instead:
-1. Write it to plan.md and run `planreview start plan.md`.
-2. Run `planreview wait` and parse the JSON event:
-   - {"type":"chat"}   → reply with `planreview say "<answer>"`, wait again.
-   - {"type":"submit"} → rework plan.md using every comment, choice, and
-                          note, run `planreview present plan.md`, wait again.
-   - {"type":"end"}    → run `planreview stop` and continue in the terminal.
+1. Write it to plan.md, run `planreview start plan.md`, and capture the
+   session id it prints (call it ID below).
+2. Run `planreview wait --session ID` and parse the JSON event:
+   - {"type":"chat"}   → reply with `planreview say "<answer>" --session ID`,
+                          wait again.
+   - {"type":"submit"} → rework plan.md using every comment, choice, and note,
+                          run `planreview present plan.md --session ID`, wait again.
+   - {"type":"end"}    → run `planreview stop --session ID` and continue.
 ```
 
 The full event and endpoint reference lives in
@@ -148,6 +159,7 @@ The reviewer's selection comes back in the submit bundle as
 - [x] `planreview` CLI and the blocking agent event loop
 - [x] Pause → rework → reload cycle in the same browser window
 - [x] End-session handoff back to the terminal
+- [x] Concurrent isolated sessions — many agents at once, one tab each
 
 Possible next steps: comment threads with agent replies, diff view between
-document versions, multiple reviewers, persisting sessions to disk.
+document versions, multiple reviewers on one plan, persisting sessions to disk.

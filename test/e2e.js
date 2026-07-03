@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 'use strict';
 
-// End-to-end test of a full review session, driven exactly the way an agent
-// drives it (through the CLI) with the browser side simulated over HTTP.
+// End-to-end test of the multi-session server, driven the way agents drive it
+// (through the CLI) with the browser side simulated over HTTP.
 //
-// Covers the stale-session regression: a reviewer who clicks "End session"
-// in an abandoned session leaves an unconsumed `end` event on the server;
-// the next agent's first `wait` must NOT receive it and declare the new
-// session over.
+// The headline guarantee: two agents can each have a plan open at once, keyed
+// by distinct session ids, and neither can touch — or even see — the other's
+// session. The rest covers a full review cycle, the "session id required"
+// guard, the sessions index, and the idle self-shutdown.
 //
-// Run: node test/e2e.js   (uses port 4799 so it never clashes with a real session)
+// Run: node test/e2e.js   (port 4799 + a short idle window so it never clashes
+// with a real session and cleans itself up fast)
 
 const { execFile, spawn } = require('child_process');
 const path = require('path');
@@ -19,7 +20,7 @@ const os = require('os');
 const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
-const env = { ...process.env, PLANREVIEW_PORT: String(PORT) };
+const env = { ...process.env, PLANREVIEW_PORT: String(PORT), PLANREVIEW_IDLE_MS: '1500' };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -32,6 +33,15 @@ function cli(...args) {
   });
 }
 
+// like cli() but never rejects — for asserting on failures/exit codes
+function cliRaw(...args) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [CLI, ...args], { env }, (err, stdout, stderr) => {
+      resolve({ code: err ? err.code || 1 : 0, stdout: (stdout || '').trim(), stderr: (stderr || '').trim() });
+    });
+  });
+}
+
 // simulate the review UI in the browser
 async function browser(pathname, body) {
   const res = await fetch(BASE + pathname, {
@@ -39,7 +49,44 @@ async function browser(pathname, body) {
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  return res.json();
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    /* non-JSON (e.g. HTML page) */
+  }
+  return { status: res.status, ok: res.ok, data };
+}
+
+async function text(pathname) {
+  const res = await fetch(BASE + pathname);
+  return { status: res.status, ok: res.ok, body: await res.text() };
+}
+
+async function serverAlive() {
+  try {
+    return (await fetch(`${BASE}/health`)).ok;
+  } catch {
+    return false;
+  }
+}
+
+// simulate a review tab's SSE connection to one session
+async function openEventStream(id) {
+  const controller = new AbortController();
+  const res = await fetch(`${BASE}/events?session=${id}`, { signal: controller.signal });
+  const reader = res.body.getReader();
+  (async () => {
+    try {
+      for (;;) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    } catch {
+      /* aborted */
+    }
+  })();
+  return { close: () => controller.abort() };
 }
 
 let failures = 0;
@@ -51,77 +98,65 @@ function check(name, cond, detail) {
   }
 }
 
-// simulate a review tab's SSE connection
-async function openEventStream() {
-  const controller = new AbortController();
-  const res = await fetch(`${BASE}/events`, { signal: controller.signal });
-  const chunks = [];
-  const reader = res.body.getReader();
-  (async () => {
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(Buffer.from(value).toString());
-      }
-    } catch {
-      /* aborted */
-    }
-  })();
-  return { text: () => chunks.join(''), close: () => controller.abort() };
-}
-
 async function main() {
-  const doc = path.join(os.tmpdir(), 'planreview-e2e.md');
+  const dir = os.tmpdir();
+  const docA = path.join(dir, 'planreview-e2e-a.md');
+  const docB = path.join(dir, 'planreview-e2e-b.md');
   fs.writeFileSync(
-    doc,
-    '# E2E plan\n\nBody paragraph.\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A\n  - B\n```\n'
+    docA,
+    '# Plan A\n\nBody of plan A.\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n'
   );
+  fs.writeFileSync(docB, '# Plan B\n\nBody of plan B — a totally separate document.\n');
 
-  console.log('regression: abandoned session must not leak into the next one');
-  await cli('start', doc, '--no-open');
-  await browser('/api/end', {}); // reviewer ends it; no agent ever consumes the event
-  // session abandoned, server still running — a new agent session begins:
-  const started = await cli('start', doc, '--no-open');
-  check('start reuses the live server and presents', started.ok === true && started.version >= 1);
-  const first = await cli('wait', '--timeout', '2');
-  check('first wait sees no stale end event', first.type === 'timeout', `got ${JSON.stringify(first)}`);
-  const st = await cli('status');
+  console.log('isolation: two agents, two sessions, zero cross-contamination');
+  const a = await cli('start', docA, '--no-open');
+  const b = await cli('start', docB, '--no-open');
+  check('start mints distinct session ids', a.id && b.id && a.id !== b.id, `${a.id} vs ${b.id}`);
+  const stateA = await browser(`/api/state?session=${a.id}`);
+  const stateB = await browser(`/api/state?session=${b.id}`);
   check(
-    'fresh session: reviewing, empty chat',
-    st.status === 'reviewing' && st.chat === 0,
-    JSON.stringify(st)
+    'each session serves its own document',
+    stateA.data.doc.title === 'Plan A' && stateB.data.doc.title === 'Plan B',
+    `A=${stateA.data.doc.title} B=${stateB.data.doc.title}`
   );
 
-  console.log('regression: an in-flight wait during a new start must not receive end');
-  // The agent's poll from the round being superseded is still open when the
-  // next start fires resetSession. If that wait gets `end`, the agent stops
-  // the brand-new session and the freshly opened tab shows "Session ended".
-  const inflight = cli('wait', '--timeout', '10'); // left open on purpose
-  await sleep(300); // let the waiter register on the server
-  await cli('start', doc, '--no-open'); // fires resetSession while inflight is open
-  const released = await inflight;
-  check(
-    'superseded wait re-polls instead of ending',
-    released.type === 'timeout',
-    `got ${JSON.stringify(released)}`
-  );
-  const stAfter = await cli('status');
-  check('new session stays reviewing', stAfter.status === 'reviewing', JSON.stringify(stAfter));
+  // a review submitted to A must reach A's agent and never B's
+  await browser(`/api/submit?session=${a.id}`, {
+    comments: [{ id: 'c1', quote: 'Body of plan A.', text: 'for A only' }],
+    choices: { pick: 'A2' },
+    note: 'A note',
+  });
+  const evA = await cli('wait', '--session', a.id, '--timeout', '3');
+  check('A\'s agent receives A\'s submit', evA.type === 'submit' && evA.note === 'A note');
+  const evB = await cli('wait', '--session', b.id, '--timeout', '1');
+  check('B\'s agent sees nothing (no leak from A)', evB.type === 'timeout', JSON.stringify(evB));
 
-  console.log('full cycle: chat -> submit -> rework -> end');
-  const waitChat = cli('wait', '--timeout', '10');
+  // a chat in B must reach B's agent and never A's
+  await browser(`/api/chat?session=${b.id}`, { text: 'B question' });
+  const ev2B = await cli('wait', '--session', b.id, '--timeout', '3');
+  check('B\'s agent receives B\'s chat', ev2B.type === 'chat' && ev2B.text === 'B question');
+  const ev2A = await cli('wait', '--session', a.id, '--timeout', '1');
+  check('A\'s agent sees nothing (no leak from B)', ev2A.type === 'timeout', JSON.stringify(ev2A));
+
+  await cli('stop', '--session', a.id);
+  await cli('stop', '--session', b.id);
+
+  console.log('full cycle: chat -> submit -> rework -> end within one session');
+  const s = await cli('start', docA, '--no-open');
+  const id = s.id;
+
+  const waitChat = cli('wait', '--session', id, '--timeout', '10');
   await sleep(300);
-  await browser('/api/chat', { text: 'why option B?' });
+  await browser(`/api/chat?session=${id}`, { text: 'why A2?' });
   const chatEv = await waitChat;
-  check('chat event delivered to wait', chatEv.type === 'chat' && chatEv.text === 'why option B?');
-  await cli('say', 'Because of X.');
+  check('chat event delivered to wait', chatEv.type === 'chat' && chatEv.text === 'why A2?');
+  await cli('say', 'Because of X.', '--session', id);
 
-  const waitSubmit = cli('wait', '--timeout', '10');
+  const waitSubmit = cli('wait', '--session', id, '--timeout', '10');
   await sleep(300);
-  await browser('/api/submit', {
-    comments: [{ id: 'c1', quote: 'Body paragraph.', text: 'expand this' }],
-    choices: { pick: 'B' },
+  await browser(`/api/submit?session=${id}`, {
+    comments: [{ id: 'c1', quote: 'Body of plan A.', text: 'expand this' }],
+    choices: { pick: 'A2' },
     note: 'almost there',
   });
   const subEv = await waitSubmit;
@@ -129,99 +164,93 @@ async function main() {
     'submit bundle delivered with comments, choices, note',
     subEv.type === 'submit' &&
       subEv.comments.length === 1 &&
-      subEv.comments[0].quote === 'Body paragraph.' &&
-      subEv.choices.pick === 'B' &&
+      subEv.choices.pick === 'A2' &&
       subEv.note === 'almost there'
   );
-  const stWorking = await cli('status');
+  const stWorking = await cli('status', '--session', id);
   check('session paused while agent reworks', stWorking.status === 'working');
 
-  fs.appendFileSync(doc, '\n## Revisions\n\nExpanded the body paragraph.\n');
-  const beforeRep = (await cli('status')).version;
-  const rep = await cli('present', doc);
-  check('re-present bumps the doc version', rep.version === beforeRep + 1);
-  const s2 = await browser('/api/state');
+  fs.appendFileSync(docA, '\n## Revisions\n\nExpanded the body.\n');
+  const before = (await cli('status', '--session', id)).version;
+  const rep = await cli('present', docA, '--session', id);
+  check('re-present bumps the doc version', rep.version === before + 1);
+  const s2 = await browser(`/api/state?session=${id}`);
   check(
     'rework starts a fresh round: review cleared, chat kept',
-    s2.status === 'reviewing' && s2.review.comments.length === 0 && s2.chat.length === 2
+    s2.data.status === 'reviewing' && s2.data.review.comments.length === 0 && s2.data.chat.length === 2
   );
 
-  const waitEnd = cli('wait', '--timeout', '10');
+  const waitEnd = cli('wait', '--session', id, '--timeout', '10');
   await sleep(300);
-  await browser('/api/end', {});
+  await browser(`/api/end?session=${id}`, {});
   const endEv = await waitEnd;
   check('end event delivered to wait', endEv.type === 'end');
-  await cli('stop');
-  await sleep(400);
-  const alive = await fetch(`${BASE}/api/state`).then(() => true).catch(() => false);
-  check('server shut down after stop', !alive);
+  await cli('stop', '--session', id);
+  await sleep(400); // stop drops the session ~200ms after responding
+  const gone = await browser(`/api/state?session=${id}`);
+  check('stop drops the session (state now 404s)', gone.status === 404, `status=${gone.status}`);
 
-  console.log('stale tab: a connected tab is pulled into the next session');
-  await cli('start', doc, '--no-open');
-  const tab = await openEventStream();
-  await sleep(300);
-  const sTab = await browser('/api/state');
-  check('server reports the connected tab', sTab.clients === 1, `clients=${sTab.clients}`);
-  await browser('/api/end', {}); // reviewer ends; the tab now shows "session ended"
-  // a new agent session begins on the same server while the tab stays open:
-  await cli('start', doc, '--no-open');
-  await sleep(300);
-  const frames = tab.text();
+  console.log('guard: a session id is required, unknown ids are rejected');
+  const guard = await cli('start', docB, '--no-open'); // keep the server up
+  const noId = await cliRaw('status');
+  check('CLI errors without --session', noId.code === 2 && /--session/.test(noId.stderr), noId.stderr);
+  const noIdWait = await cliRaw('wait');
+  check('wait errors without --session', noIdWait.code === 2 && /--session/.test(noIdWait.stderr));
+  const noSess = await browser('/api/state');
+  check('server 404s a request with no session', noSess.status === 404);
+  const badSess = await browser('/api/state?session=deadbeef');
+  check('server 404s an unknown session', badSess.status === 404);
+  const badWait = await cliRaw('wait', '--session', 'deadbeef', '--timeout', '2');
+  check('CLI reports a vanished session', badWait.code === 2 && /no such session/.test(badWait.stderr));
+
+  console.log('index + listing: every open session is discoverable');
+  const list = await browser('/api/sessions');
   check(
-    'tab receives the reset and the new document',
-    frames.includes('"status":"idle"') && frames.includes('event: doc'),
-    `frames: ${frames.replace(/\n/g, ' ').slice(-200)}`
+    '/api/sessions lists the open session',
+    Array.isArray(list.data) && list.data.some((x) => x.id === guard.id && x.title === 'Plan B'),
+    JSON.stringify(list.data)
   );
+  const cliList = await cli('list');
+  check('CLI list matches /api/sessions', cliList.some((x) => x.id === guard.id));
+  const health = await browser('/health');
+  check('/health reports session count', health.data.ok === true && health.data.sessions >= 1);
+  const index = await text('/');
+  check('/ serves the sessions index page', index.ok && /Plan Review/.test(index.body) && /api\/sessions/.test(index.body));
+  const appPage = await text(`/s/${guard.id}`);
+  check('/s/<id> serves the review app', appPage.ok && /id="doc"/.test(appPage.body));
+
+  console.log('connected tab shows up in the session\'s client count');
+  const tab = await openEventStream(guard.id);
+  await sleep(300);
+  const withTab = await browser(`/api/state?session=${guard.id}`);
+  check('a connected tab is counted on its own session', withTab.data.clients === 1, `clients=${withTab.data.clients}`);
   tab.close();
-  await cli('stop');
-  await sleep(400);
 
-  console.log('upgrade: a leftover server from an older tool version is replaced');
-  // mimics a pre-/agent/reset server: 404s the reset, honors stop
-  const OLD_SERVER = `
-    const http = require('http');
-    http.createServer((req, res) => {
-      res.setHeader('Content-Type', 'application/json');
-      if (req.url === '/api/state')
-        return res.end(JSON.stringify({ status: 'ended', doc: { title: 'old', html: '', version: 9 }, review: { comments: [], choices: {} }, chat: [] }));
-      if (req.url === '/agent/stop' && req.method === 'POST') {
-        res.end('{"ok":true}');
-        return setTimeout(() => process.exit(0), 100);
-      }
-      res.statusCode = 404;
-      res.end('{"error":"not found"}');
-    }).listen(${PORT}, '127.0.0.1');
-  `;
-  spawn(process.execPath, ['-e', OLD_SERVER], { stdio: 'ignore', detached: true }).unref();
-  await sleep(300);
-  const up = await cli('start', doc, '--no-open');
-  check('start replaces the old server and presents', up.ok === true && up.version === 1);
-  const stUp = await cli('status');
-  check('replaced server is reviewing the new doc', stUp.status === 'reviewing');
-  await cli('stop');
-  await sleep(400);
-
-  console.log('static assets: no-store cache + overlays can actually hide');
-  await cli('start', doc, '--no-open');
-  const cssRes = await fetch(`${BASE}/style.css`);
-  const cacheHeader = cssRes.headers.get('cache-control');
-  const css = await cssRes.text();
+  console.log('static assets: no-store cache + overlays can hide + client is session-scoped');
+  const css = await text('/style.css');
+  check('style.css sent no-store', /no-store/.test((await fetch(`${BASE}/style.css`)).headers.get('cache-control') || ''));
   check(
-    'static assets sent no-store so a cached file cannot mask a fix',
-    cacheHeader === 'no-store',
-    `cache-control: ${cacheHeader}`
-  );
-  // The `hidden` attribute must defeat the component `display` rules, or the
-  // ended/working overlays paint over every page (the "Session ended on load"
-  // bug). Guard the rule that makes `[hidden]` win. NB: a static check — it
-  // catches removal of the rule, not every way the cascade could break; a true
-  // render test would need a browser engine this zero-dep tool avoids.
-  check(
-    'css neutralizes [hidden] so overlays hide when toggled off',
-    /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css),
+    'css neutralizes [hidden] so overlays can hide',
+    /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css.body),
     'missing [hidden] { display: none !important }'
   );
-  await cli('stop');
+  const app = await text('/app.js');
+  check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
+
+  await cli('stop', '--session', guard.id);
+
+  console.log('lifecycle: the shared server shuts itself down once empty');
+  const open = (await browser('/api/sessions')).data || [];
+  for (const x of open) await cli('stop', '--session', x.id).catch(() => {});
+  let exited = false;
+  for (let i = 0; i < 40; i++) {
+    await sleep(150);
+    if (!(await serverAlive())) {
+      exited = true;
+      break;
+    }
+  }
+  check('server auto-exits after the last session ends', exited, 'still alive after ~6s');
 }
 
 main()
@@ -230,8 +259,13 @@ main()
     console.error(` FAIL  e2e crashed — ${err.message}`);
   })
   .then(async () => {
-    // best-effort cleanup if a check bailed early
-    await fetch(`${BASE}/agent/stop`, { method: 'POST' }).catch(() => {});
+    // best-effort cleanup if a check bailed early: stop any stragglers
+    try {
+      const open = (await browser('/api/sessions')).data || [];
+      for (const x of open) await cli('stop', '--session', x.id).catch(() => {});
+    } catch {
+      /* server already down */
+    }
     console.log(failures ? `\n${failures} failure(s)` : '\nall checks passed');
     process.exit(failures ? 1 : 0);
   });

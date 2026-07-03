@@ -1,9 +1,22 @@
 # Agent protocol
 
 Everything runs against a single localhost server (default
-`http://127.0.0.1:4780`, override with `PLANREVIEW_PORT`). The
-`planreview` CLI wraps these endpoints; agents normally never call them
-directly.
+`http://127.0.0.1:4780`, override with `PLANREVIEW_PORT`). That one server
+hosts **many isolated sessions** — one per plan under review — so several
+agents can drive reviews at the same time. The `planreview` CLI wraps these
+endpoints; agents normally never call them directly.
+
+## Sessions
+
+`planreview start` creates a session, returns its short **`id`**, and opens
+`/s/<id>` in the browser. Every other command must carry that id
+(`--session <id>` on the CLI, `?session=<id>` on the HTTP API). Sessions share
+nothing — document, review, chat, event queue, and browser tabs are all
+per-session — so one agent's `start` can neither touch nor see another's.
+
+A missing or unknown session id is an error (HTTP 404); there is no implicit
+"current" session. The shared server exits on its own once no sessions remain,
+and a fresh `start` respawns it.
 
 ## The event loop
 
@@ -11,14 +24,15 @@ The agent presents a document, then blocks on `wait`. Every reviewer action
 that needs the agent's attention arrives as one JSON event:
 
 ```
-planreview start plan.md          # boot server + browser, present the plan
+resp=$(planreview start plan.md)         # -> {"id":"a1b2c3", …}; opens browser
+id=a1b2c3                                 # capture the session id from resp
 loop:
-  event=$(planreview wait)        # blocks until the reviewer acts
+  event=$(planreview wait --session $id) # blocks until the reviewer acts
   case $event.type in
-    chat)    reply with `planreview say "…"`, then wait again
-    submit)  rework plan.md using the bundle, `planreview present plan.md`,
-             then wait again
-    end)     `planreview stop`, return to normal terminal operation
+    chat)    reply with `planreview say "…" --session $id`, then wait again
+    submit)  rework plan.md using the bundle,
+             `planreview present plan.md --session $id`, then wait again
+    end)     `planreview stop --session $id`, return to normal operation
   esac
 ```
 
@@ -57,13 +71,13 @@ shows a "reworking" overlay until you `present` again.
   source to understand what the comment anchors to.
 - `choices` maps each `id` from a ` ```choice ` fence to the selected option
   (an array when the block sets `multi: true`).
-- Rework the document, then `planreview present <file>` — the browser
-  reloads it in place and a fresh review round begins.
+- Rework the document, then `planreview present <file> --session <id>` — the
+  browser reloads it in place and a fresh review round begins.
 
 ### `end`
 
-The reviewer ended the session. Run `planreview stop`, then continue in the
-terminal as usual.
+The reviewer ended the session. Run `planreview stop --session <id>`, then
+continue in the terminal as usual.
 
 ```json
 { "type": "end" }
@@ -71,10 +85,11 @@ terminal as usual.
 
 ### `timeout`
 
-Only returned when waiting with `planreview wait --timeout <seconds>` (or
-`GET /agent/wait?timeout=<ms>`): nothing happened within the window. Not a
-reviewer action — just call `wait` again. This lets agents whose shells
-impose a per-command time limit poll in a loop instead of blocking forever.
+Only returned when waiting with `planreview wait --session <id> --timeout
+<seconds>` (or `GET /agent/wait?session=<id>&timeout=<ms>`): nothing happened
+within the window. Not a reviewer action — just call `wait` again. This lets
+agents whose shells impose a per-command time limit poll in a loop instead of
+blocking forever.
 
 ```json
 { "type": "timeout" }
@@ -100,19 +115,26 @@ rendering as plain code. The reviewer's answer arrives in `submit.choices`.
 
 ## HTTP reference
 
+Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
+
 | Method | Path | Caller | Purpose |
 | --- | --- | --- | --- |
-| GET | `/api/state` | browser | full session state (doc, review, chat, status) |
-| GET | `/events` | browser | SSE stream: `doc`, `chat`, `status` |
-| POST | `/api/review-state` | browser | persist in-progress comments/choices |
-| POST | `/api/chat` | browser | reviewer chat message (queued for the agent) |
-| POST | `/api/submit` | browser | submit the review bundle (queued for the agent) |
-| POST | `/api/end` | browser | end the session (queued for the agent) |
-| POST | `/agent/reset` | CLI | start a fresh session: drop queued events, chat, and review state (`planreview start` calls this before presenting) |
-| POST | `/agent/present` | CLI | render a markdown file as the current document |
-| GET | `/agent/wait` | CLI | long-poll for the next reviewer event (`?timeout=<ms>` optional) |
-| POST | `/agent/say` | CLI | agent chat message to the reviewer |
-| POST | `/agent/stop` | CLI | shut the server down |
+| GET | `/` | browser | index page listing all open sessions |
+| GET | `/s/<id>` | browser | the review UI for one session |
+| GET | `/app.js`, `/style.css` | browser | shared static assets |
+| GET | `/health` | CLI | liveness + open-session count (no session needed) |
+| GET | `/api/sessions` | both | list open sessions (`planreview list`) |
+| POST | `/agent/start` | CLI | create a session and present a document; returns its `id` |
+| GET | `/api/state?session=` | browser | full session state (doc, review, chat, status, clients) |
+| GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `status` |
+| POST | `/api/review-state?session=` | browser | persist in-progress comments/choices |
+| POST | `/api/chat?session=` | browser | reviewer chat message (queued for the agent) |
+| POST | `/api/submit?session=` | browser | submit the review bundle (queued for the agent) |
+| POST | `/api/end?session=` | browser | end the session (queued for the agent) |
+| POST | `/agent/present?session=` | CLI | render a markdown file as the session's document |
+| GET | `/agent/wait?session=` | CLI | long-poll for the next reviewer event (`&timeout=<ms>` optional) |
+| POST | `/agent/say?session=` | CLI | agent chat message to the reviewer |
+| POST | `/agent/stop?session=` | CLI | end and drop just this session |
 
 The server binds to `127.0.0.1` only and holds all state in memory — a
-session lives and dies with the server process.
+session lives and dies with the server process (or an explicit `stop`).

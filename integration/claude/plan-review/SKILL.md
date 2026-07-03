@@ -44,21 +44,29 @@ options:
 ```
 ````
 
-## 2. Present it
+## 2. Present it — and capture the session id
 
 ```sh
-planreview start plan.md        # boots the server and opens the browser
+planreview start plan.md
+# -> {"ok":true,"id":"a1b2c3","url":"http://127.0.0.1:4780/s/a1b2c3", …}
 ```
 
+`start` opens the plan in its own browser tab and prints a **session `id`**.
+Each session is fully isolated, so several agents can run reviews at once
+without clobbering each other — but that only works if you **pass this id to
+every later command** for this review (`--session <id>`). Grab the `id` now and
+reuse it throughout. (Do NOT call `start` again for the same review — that mints
+a *new* session; use `present` to send revisions into the existing one.)
+
 Tell the user (one line) that the plan is open in their browser, then start
-waiting. If a session is already running, use `planreview present plan.md` instead.
+waiting.
 
 ## 3. The event loop
 
-Repeatedly run:
+With your session id in hand, repeatedly run (substituting the real id):
 
 ```sh
-planreview wait --timeout 90
+planreview wait --session a1b2c3 --timeout 90
 ```
 
 The 90s poll window stays under default shell time limits. If the shell
@@ -70,14 +78,17 @@ loop:
   your turn; the user is still reviewing.
 - `{"type":"chat","text":…}` — the user said something in the sidebar. It
   may be unrelated to the document; answer it (do real work if needed) with
-  `planreview say "<answer>"`, then `wait` again.
+  `planreview say "<answer>" --session a1b2c3`, then `wait` again.
 - `{"type":"submit",…}` — the bundled review. `comments[]` each carry the
   exact selected passage in `quote` plus the user's `text` about it;
   `choices` maps each choice-fence `id` to the selected option; `note` is an
   overall remark. Rework the markdown file addressing **every** comment and
-  honoring every choice, then `planreview present plan.md` (the browser reloads it
-  in place) and `wait` again.
-- `{"type":"end"}` — the user is done. Run `planreview stop`, give a brief terminal
-  summary of the final document and decisions, and continue normally.
+  honoring every choice, then `planreview present plan.md --session a1b2c3`
+  (the browser reloads it in place) and `wait` again.
+- `{"type":"end"}` — the user is done. Run `planreview stop --session a1b2c3`,
+  give a brief terminal summary of the final document and decisions, and
+  continue normally.
+
+`planreview list` shows every open session if you lose track of an id.
 
 Full protocol reference: `/Users/miked/work/plan-review-editor/docs/PROTOCOL.md`.

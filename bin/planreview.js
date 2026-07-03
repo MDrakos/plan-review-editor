@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 'use strict';
 
-// The agent-facing CLI. A terminal agent drives a review session like this:
+// The agent-facing CLI. Each plan under review is an isolated SESSION, so
+// multiple agents can drive their own reviews at once without clobbering each
+// other. `start` mints a session and prints its id; every later command for
+// that review must carry it via `--session <id>`:
 //
-//   planreview start plan.md        # boot server, open browser, present plan
-//   planreview wait                 # block until the reviewer does something
-//   ... {"type":"chat"}    -> planreview say "answer" ; planreview wait
-//   ... {"type":"submit"}  -> rework plan.md ; planreview present plan.md ; wait
-//   ... {"type":"end"}     -> planreview stop
+//   planreview start plan.md            # -> {"id":"a1b2c3","url":"…/s/a1b2c3", …}
+//   planreview wait --session a1b2c3    # block until the reviewer does something
+//   ... {"type":"chat"}    -> planreview say "answer" --session a1b2c3 ; wait
+//   ... {"type":"submit"}  -> rework plan.md ; planreview present plan.md --session a1b2c3 ; wait
+//   ... {"type":"end"}     -> planreview stop --session a1b2c3
 //
-// Every command prints JSON to stdout so agents can parse results directly.
+// One shared server (default port 4780) holds every session. Every command
+// prints JSON to stdout so agents can parse results directly.
 
 const http = require('http');
 const path = require('path');
@@ -61,7 +65,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function serverAlive() {
   try {
-    await request('GET', '/api/state');
+    await request('GET', '/health');
     return true;
   } catch {
     return false;
@@ -85,63 +89,83 @@ async function ensureServer() {
 }
 
 function resolveDoc(file) {
-  if (!file) throw new Error('usage: planreview present <file.md>');
+  if (!file) throw new Error('missing <file.md>');
   const abs = path.resolve(file);
   if (!fs.existsSync(abs)) throw new Error(`no such file: ${abs}`);
   return abs;
 }
 
+// Minimal flag parser: pulls --session/--timeout (value flags) and --no-open
+// (boolean) out, leaving the rest as positionals.
+function parseArgs(argv) {
+  const opts = {};
+  const positionals = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--session') opts.session = argv[++i];
+    else if (a === '--timeout') opts.timeout = Number(argv[++i]);
+    else if (a === '--no-open') opts.noOpen = true;
+    else if (a.startsWith('--')) opts[a.slice(2)] = true;
+    else positionals.push(a);
+  }
+  return { opts, positionals };
+}
+
+function requireSession(opts, cmd) {
+  const id = opts.session || process.env.PLANREVIEW_SESSION;
+  if (!id) throw new Error(`${cmd} requires --session <id> (printed by \`planreview start\`)`);
+  return id;
+}
+
+function scoped(pathname, id) {
+  const sep = pathname.includes('?') ? '&' : '?';
+  return `${pathname}${sep}session=${encodeURIComponent(id)}`;
+}
+
 const commands = {
-  // start = begin a NEW session. If a server survived an abandoned session,
-  // reset it so stale events (especially a queued "end") cannot leak in.
-  // present = next round in the SAME session, keeping chat history.
-  async start(args) {
-    const file = args.find((a) => !a.startsWith('--'));
+  // start = begin a NEW isolated session and present the plan in a fresh tab.
+  async start(argv) {
+    const { opts, positionals } = parseArgs(argv);
+    const file = resolveDoc(positionals[0]);
     await ensureServer();
-    try {
-      await request('POST', '/agent/reset');
-    } catch {
-      // leftover server from an older version of this tool (no /agent/reset
-      // endpoint) — replace it with a fresh process instead of failing
-      await request('POST', '/agent/stop').catch(() => {});
-      await sleep(500);
-      await ensureServer();
-      await request('POST', '/agent/reset');
-    }
-    let presented = null;
-    if (file) presented = await request('POST', '/agent/present', { path: resolveDoc(file) });
-    if (!args.includes('--no-open')) {
-      // Tabs from a previous session reconnect within ~1s and reload in
-      // place. Give them that window and only open a new tab if none did —
-      // otherwise every session leaves another stale tab behind.
-      await sleep(1500);
-      const s = await request('GET', '/api/state');
-      if (!s.clients) openBrowser(BASE);
-    }
-    console.log(JSON.stringify({ ok: true, url: BASE, ...(presented || {}) }));
+    const out = await request('POST', '/agent/start', { path: file });
+    const url = BASE + out.url;
+    if (!opts.noOpen) openBrowser(url);
+    console.log(
+      JSON.stringify({ ok: true, id: out.id, url, version: out.version, title: out.title })
+    );
   },
 
-  async present(args) {
-    const out = await request('POST', '/agent/present', { path: resolveDoc(args[0]) });
-    console.log(JSON.stringify(out));
+  // present = next round in the SAME session (keeps chat history).
+  async present(argv) {
+    const { opts, positionals } = parseArgs(argv);
+    const id = requireSession(opts, 'present');
+    const file = resolveDoc(positionals[0]);
+    const out = await request('POST', scoped('/agent/present', id), { path: file });
+    console.log(JSON.stringify({ ok: true, id, ...out }));
   },
 
-  // Blocks until the reviewer produces the next event. Long-poll connections
-  // that drop mid-wait (sleep, proxy, etc.) are retried; a dead server is not.
+  // Blocks until the reviewer produces the next event for this session.
+  // Long-poll connections that drop mid-wait (sleep, proxy, etc.) are retried;
+  // a dead server or a vanished session is not.
   // --timeout <seconds> makes it return {"type":"timeout"} instead of blocking
   // forever, so agents with shell time limits can poll in a loop.
-  async wait(args) {
-    const tIdx = args.indexOf('--timeout');
-    const seconds = tIdx !== -1 ? Number(args[tIdx + 1]) : 0;
-    if (tIdx !== -1 && (!Number.isFinite(seconds) || seconds <= 0))
-      throw new Error('usage: planreview wait [--timeout <seconds>]');
-    const qs = seconds > 0 ? `?timeout=${Math.round(seconds * 1000)}` : '';
+  async wait(argv) {
+    const { opts } = parseArgs(argv);
+    const id = requireSession(opts, 'wait');
+    const seconds = opts.timeout;
+    if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0))
+      throw new Error('usage: planreview wait --session <id> [--timeout <seconds>]');
+    let pathname = scoped('/agent/wait', id);
+    if (seconds > 0) pathname += `&timeout=${Math.round(seconds * 1000)}`;
     for (;;) {
       try {
-        const event = await request('GET', `/agent/wait${qs}`);
+        const event = await request('GET', pathname);
         console.log(JSON.stringify(event));
         return;
       } catch (err) {
+        if (/no such session/i.test(err.message))
+          throw new Error(`no such session: ${id} (it may have ended)`);
         if (err.code === 'ECONNREFUSED') throw new Error('server is not running');
         await sleep(500);
         if (!(await serverAlive())) throw new Error('server is not running');
@@ -149,46 +173,67 @@ const commands = {
     }
   },
 
-  async say(args) {
-    const text = args.join(' ').trim();
-    if (!text) throw new Error('usage: planreview say <message>');
-    console.log(JSON.stringify(await request('POST', '/agent/say', { text })));
+  async say(argv) {
+    const { opts, positionals } = parseArgs(argv);
+    const id = requireSession(opts, 'say');
+    const text = positionals.join(' ').trim();
+    if (!text) throw new Error('usage: planreview say <message> --session <id>');
+    console.log(JSON.stringify(await request('POST', scoped('/agent/say', id), { text })));
   },
 
-  async status() {
-    const s = await request('GET', '/api/state');
+  async status(argv) {
+    const { opts } = parseArgs(argv);
+    const id = requireSession(opts, 'status');
+    const s = await request('GET', scoped('/api/state', id));
     console.log(
       JSON.stringify({
+        id,
         status: s.status,
         title: s.doc.title,
         version: s.doc.version,
         comments: s.review.comments.length,
         chat: s.chat.length,
+        clients: s.clients,
       })
     );
   },
 
-  async open() {
-    openBrowser(BASE);
-    console.log(JSON.stringify({ ok: true, url: BASE }));
+  // list every open session on the shared server (mirrors the / index page).
+  async list() {
+    if (!(await serverAlive())) return console.log(JSON.stringify([]));
+    console.log(JSON.stringify(await request('GET', '/api/sessions')));
   },
 
-  async stop() {
-    console.log(JSON.stringify(await request('POST', '/agent/stop')));
+  async open(argv) {
+    const { opts } = parseArgs(argv);
+    const id = requireSession(opts, 'open');
+    const url = `${BASE}/s/${id}`;
+    openBrowser(url);
+    console.log(JSON.stringify({ ok: true, url }));
+  },
+
+  async stop(argv) {
+    const { opts } = parseArgs(argv);
+    const id = requireSession(opts, 'stop');
+    console.log(JSON.stringify(await request('POST', scoped('/agent/stop', id))));
   },
 };
 
 function usage() {
   console.error(`usage: planreview <command>
 
-  start [file.md] [--no-open]   boot the server, open the browser, present a plan
-  present <file.md>             (re)present a plan document to the reviewer
-  wait [--timeout <sec>]        block until the next reviewer event, print it as JSON;
-                                with --timeout, print {"type":"timeout"} if nothing happens
-  say <message>                 send a chat message to the reviewer
-  status                        print session status
-  open                          reopen the review UI in the browser
-  stop                          shut the server down (after the reviewer ends the session)`);
+  start <file.md> [--no-open]        create an isolated session, present the plan, open a tab;
+                                     prints {"id":…} — pass that id to every later command
+  present <file.md> --session <id>   (re)present a plan into an existing session
+  wait --session <id> [--timeout s]  block until the next reviewer event, print it as JSON;
+                                     with --timeout, print {"type":"timeout"} if nothing happens
+  say <message> --session <id>       send a chat message to the reviewer
+  status --session <id>              print session status
+  list                               list all open sessions
+  open --session <id>                (re)open a session's review tab in the browser
+  stop --session <id>                end and drop the session
+
+The shared server (default port 4780) exits on its own once no sessions remain.`);
   process.exit(2);
 }
 

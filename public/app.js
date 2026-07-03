@@ -1,5 +1,18 @@
 'use strict';
 
+// ---------- session ----------
+//
+// This tab is bound to exactly one session, identified in its URL as /s/<id>.
+// Every request carries that id so the server routes it to the right session —
+// which is what keeps concurrent agents' plans from cross-contaminating.
+
+const SESSION = decodeURIComponent((location.pathname.match(/\/s\/([^/]+)/) || [])[1] || '');
+
+function api(pathname) {
+  const sep = pathname.includes('?') ? '&' : '?';
+  return `${pathname}${sep}session=${encodeURIComponent(SESSION)}`;
+}
+
 // ---------- elements ----------
 
 const docEl = document.getElementById('doc');
@@ -52,7 +65,7 @@ function setStatus(status) {
 
 document.getElementById('end-btn').addEventListener('click', async () => {
   if (!confirm('End the review session and hand control back to the terminal?')) return;
-  await fetch('/api/end', { method: 'POST' }).catch(() => {});
+  await fetch(api('/api/end'), { method: 'POST' }).catch(() => {});
   setStatus('ended');
 });
 
@@ -67,7 +80,12 @@ function renderDoc(doc) {
 async function fetchState() {
   let s;
   try {
-    const res = await fetch('/api/state');
+    const res = await fetch(api('/api/state'));
+    if (!res.ok) {
+      // the session no longer exists (server restarted, or it was stopped)
+      setStatus('ended');
+      return;
+    }
     s = await res.json();
   } catch {
     return; // server unreachable — the event stream's reconnect will retry us
@@ -99,7 +117,7 @@ chatFormEl.addEventListener('submit', async (e) => {
   if (!text) return;
   chatInputEl.value = '';
   appendChatMessage({ role: 'reviewer', text });
-  await fetch('/api/chat', {
+  await fetch(api('/api/chat'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text }),
@@ -109,7 +127,7 @@ chatFormEl.addEventListener('submit', async (e) => {
 // ---------- live events ----------
 
 function connectEvents() {
-  const es = new EventSource('/events');
+  const es = new EventSource(api('/events'));
   // Resync on every (re)connect. A tab that missed broadcasts while the
   // server restarted — e.g. one still showing a previous session's "ended"
   // overlay — heals itself the moment it reattaches to the new session.
@@ -357,7 +375,7 @@ function flashHighlight(id) {
 }
 
 async function syncReview() {
-  await fetch('/api/review-state', {
+  await fetch(api('/api/review-state'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ comments: state.comments, choices: state.choices }),
@@ -377,7 +395,7 @@ async function submitReview() {
     docVersion: state.version,
   };
   submitBtn.disabled = true;
-  const res = await fetch('/api/submit', {
+  const res = await fetch(api('/api/submit'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(bundle),
