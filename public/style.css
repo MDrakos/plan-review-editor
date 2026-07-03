@@ -448,12 +448,13 @@ html, body {
   flex: 1;
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;
+  border-right: none; /* the caret owns the single divider line */
 }
 
 .split-caret {
   padding: 10px 10px;
   font-size: 12px;
-  border-left: 1px solid rgba(255, 255, 255, 0.3);
+  border-left: 1px solid rgba(255, 255, 255, 0.4); /* the one visible divider */
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
 }
