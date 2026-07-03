@@ -6,10 +6,14 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { render } = require('./markdown');
+const { codeVersion } = require('./version');
 
 const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
 const HOST = '127.0.0.1';
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+// Fingerprint of this process's code, captured at startup. The CLI compares it
+// to the on-disk code to detect (and restart) a server running stale logic.
+const VERSION = codeVersion();
 
 // Exit once no sessions remain for this long, so the shared server doesn't
 // linger forever after every agent is done (a fresh `start` respawns it).
@@ -255,7 +259,14 @@ const server = http.createServer(async (req, res) => {
     // ----- shared, session-less routes -----
 
     if (method === 'GET' && pathname === '/health') {
-      return sendJson(res, 200, { ok: true, sessions: sessions.size });
+      return sendJson(res, 200, { ok: true, sessions: sessions.size, version: VERSION });
+    }
+    // Shut the whole server down (used by the CLI to restart a server running
+    // stale code). Localhost-only, like everything else here.
+    if (method === 'POST' && pathname === '/admin/shutdown') {
+      sendJson(res, 200, { ok: true });
+      setTimeout(() => process.exit(0), 100);
+      return;
     }
     if (method === 'GET' && pathname === '/app.js') {
       return sendFile(res, 'app.js', 'text/javascript; charset=utf-8');

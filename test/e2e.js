@@ -108,6 +108,39 @@ async function main() {
   );
   fs.writeFileSync(docB, '# Plan B\n\nBody of plan B — a totally separate document.\n');
 
+  console.log('safeguard: a server running stale code is restarted on start');
+  // occupy the port with a server that reports old code + no active sessions
+  const STALE = `
+    const http = require('http');
+    http.createServer((req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.url === '/health')
+        return res.end(JSON.stringify({ ok: true, sessions: 0, version: 'stale-000000' }));
+      if (req.url === '/admin/shutdown' && req.method === 'POST') {
+        res.end('{"ok":true}');
+        return setTimeout(() => process.exit(0), 50);
+      }
+      res.statusCode = 404; res.end('{"error":"not found"}');
+    }).listen(${PORT}, '127.0.0.1');
+  `;
+  spawn(process.execPath, ['-e', STALE], { stdio: 'ignore', detached: true }).unref();
+  await sleep(300);
+  const staleBefore = await browser('/health');
+  check(
+    'a stale-code server is occupying the port',
+    staleBefore.data && staleBefore.data.version === 'stale-000000',
+    JSON.stringify(staleBefore.data)
+  );
+  const restarted = await cli('start', docA, '--no-open');
+  check('start replaces the stale server and presents', restarted.ok === true && !!restarted.id);
+  const fresh = await browser('/health');
+  check(
+    'the replacement runs current code',
+    fresh.data.version && fresh.data.version !== 'stale-000000',
+    JSON.stringify(fresh.data)
+  );
+  await cli('stop', '--session', restarted.id);
+
   console.log('isolation: two agents, two sessions, zero cross-contamination');
   const a = await cli('start', docA, '--no-open');
   const b = await cli('start', docB, '--no-open');
@@ -235,7 +268,13 @@ async function main() {
   const cliList = await cli('list');
   check('CLI list matches /api/sessions', cliList.some((x) => x.id === guard.id));
   const health = await browser('/health');
-  check('/health reports session count', health.data.ok === true && health.data.sessions >= 1);
+  check(
+    '/health reports session count + code version',
+    health.data.ok === true &&
+      health.data.sessions >= 1 &&
+      typeof health.data.version === 'string' &&
+      health.data.version.length > 0
+  );
   const index = await text('/');
   check('/ serves the sessions index page', index.ok && /Plan Review/.test(index.body) && /api\/sessions/.test(index.body));
   const appPage = await text(`/s/${guard.id}`);

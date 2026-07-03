@@ -23,6 +23,7 @@ const { spawn, execFile } = require('child_process');
 const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
 const BASE = `http://127.0.0.1:${PORT}`;
 const SERVER = path.join(__dirname, '..', 'server', 'server.js');
+const { codeVersion } = require(path.join(__dirname, '..', 'server', 'version'));
 
 function request(method, pathname, body) {
   return new Promise((resolve, reject) => {
@@ -63,13 +64,16 @@ function request(method, pathname, body) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function serverAlive() {
+async function serverHealth() {
   try {
-    await request('GET', '/health');
-    return true;
+    return await request('GET', '/health');
   } catch {
-    return false;
+    return null;
   }
+}
+
+async function serverAlive() {
+  return (await serverHealth()) !== null;
 }
 
 function openBrowser(url) {
@@ -78,14 +82,42 @@ function openBrowser(url) {
   execFile(opener, [url], () => {});
 }
 
-async function ensureServer() {
-  if (await serverAlive()) return false;
+async function spawnServer(want) {
   spawn(process.execPath, [SERVER], { detached: true, stdio: 'ignore' }).unref();
   for (let i = 0; i < 50; i++) {
     await sleep(100);
-    if (await serverAlive()) return true;
+    const h = await serverHealth();
+    if (h && h.version === want) return true;
   }
   throw new Error(`server did not come up on ${BASE}`);
+}
+
+async function shutdownAndWait() {
+  await request('POST', '/admin/shutdown').catch(() => {});
+  for (let i = 0; i < 30; i++) {
+    await sleep(100);
+    if (!(await serverAlive())) return;
+  }
+}
+
+// Ensure a server running CURRENT code is up. A server that started before a
+// code edit is stale; replace it — but only when it has no active sessions, so
+// a code change can never yank another agent's live review out from under it.
+async function ensureServer() {
+  const want = codeVersion();
+  const health = await serverHealth();
+  if (health) {
+    if (health.version === want) return false; // up to date — reuse
+    if (health.sessions > 0) {
+      console.error(
+        `planreview: server on ${BASE} runs older code and has ${health.sessions} active ` +
+          `session(s); reusing it as-is. Stop those sessions (or run \`planreview restart --force\`) to load the new code.`
+      );
+      return false;
+    }
+    await shutdownAndWait(); // stale and empty — safe to replace
+  }
+  return spawnServer(want);
 }
 
 function resolveDoc(file) {
@@ -217,6 +249,21 @@ const commands = {
     const id = requireSession(opts, 'stop');
     console.log(JSON.stringify(await request('POST', scoped('/agent/stop', id))));
   },
+
+  // Force the shared server to reload its code. Normally unnecessary — `start`
+  // auto-restarts a stale, empty server — but useful after editing server code
+  // while sessions are open. Refuses to drop live sessions without --force.
+  async restart(argv) {
+    const { opts } = parseArgs(argv);
+    const health = await serverHealth();
+    if (health && health.sessions > 0 && !opts.force)
+      throw new Error(
+        `refusing to restart: ${health.sessions} active session(s) would be dropped — re-run with --force`
+      );
+    if (health) await shutdownAndWait();
+    await spawnServer(codeVersion());
+    console.log(JSON.stringify({ ok: true, url: BASE }));
+  },
 };
 
 function usage() {
@@ -232,6 +279,8 @@ function usage() {
   list                               list all open sessions
   open --session <id>                (re)open a session's review tab in the browser
   stop --session <id>                end and drop the session
+  restart [--force]                  reload the server's code (auto on start when the
+                                     server is stale + idle; --force drops live sessions)
 
 The shared server (default port 4780) exits on its own once no sessions remain.`);
   process.exit(2);

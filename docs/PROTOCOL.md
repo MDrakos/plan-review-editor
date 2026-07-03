@@ -18,6 +18,12 @@ A missing or unknown session id is an error (HTTP 404); there is no implicit
 "current" session. The shared server exits on its own once no sessions remain,
 and a fresh `start` respawns it.
 
+`/health` reports the server's code fingerprint. `start` compares it to the
+on-disk code and, if the running server is stale (started before a code edit)
+**and idle**, restarts it so changes take effect — but it will not restart a
+server with live sessions (that would drop other agents' reviews); use
+`planreview restart --force` to override.
+
 ## The event loop
 
 The agent presents a document, then blocks on `wait`. Every reviewer action
@@ -145,7 +151,8 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | GET | `/` | browser | index page listing all open sessions |
 | GET | `/s/<id>` | browser | the review UI for one session |
 | GET | `/app.js`, `/style.css` | browser | shared static assets |
-| GET | `/health` | CLI | liveness + open-session count (no session needed) |
+| GET | `/health` | CLI | liveness, open-session count, and code `version` (no session needed) |
+| POST | `/admin/shutdown` | CLI | shut the whole server down (used to restart a server running stale code) |
 | GET | `/api/sessions` | both | list open sessions (`planreview list`) |
 | POST | `/agent/start` | CLI | create a session and present a document; returns its `id` |
 | GET | `/api/state?session=` | browser | full session state (doc, review, chat, status, clients) |
