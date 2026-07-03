@@ -61,6 +61,7 @@ function setStatus(status) {
   document.getElementById('ended-overlay').hidden = status !== 'ended';
   document.getElementById('end-btn').disabled = status === 'ended';
   chatInputEl.disabled = status === 'ended';
+  if (status === 'ended') hideTyping();
 }
 
 document.getElementById('end-btn').addEventListener('click', async () => {
@@ -97,6 +98,7 @@ async function fetchState() {
   for (const c of state.comments) anchorByQuote(c.quote, c.id);
   renderComments();
   bindChoices();
+  hideTyping();
   chatListEl.innerHTML = '';
   for (const msg of s.chat || []) appendChatMessage(msg);
 }
@@ -111,12 +113,40 @@ function appendChatMessage(msg) {
   chatListEl.scrollTop = chatListEl.scrollHeight;
 }
 
+// A "…" bubble shown from the moment the reviewer sends a message until the
+// agent's reply arrives, so it's clear a response is on the way. Purely visual
+// and local to this tab; cleared by the agent's chat over SSE (or, as a safety
+// net if no agent is listening, after a couple of minutes).
+let typingEl = null;
+let typingTimer = null;
+
+function showTyping() {
+  hideTyping();
+  typingEl = document.createElement('div');
+  typingEl.className = 'chat-msg agent typing';
+  typingEl.setAttribute('aria-label', 'Agent is replying');
+  typingEl.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+  chatListEl.appendChild(typingEl);
+  chatListEl.scrollTop = chatListEl.scrollHeight;
+  typingTimer = setTimeout(hideTyping, 120000);
+}
+
+function hideTyping() {
+  clearTimeout(typingTimer);
+  typingTimer = null;
+  if (typingEl) {
+    typingEl.remove();
+    typingEl = null;
+  }
+}
+
 chatFormEl.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = chatInputEl.value.trim();
   if (!text) return;
   chatInputEl.value = '';
   appendChatMessage({ role: 'reviewer', text });
+  showTyping();
   await fetch(api('/api/chat'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -135,7 +165,10 @@ function connectEvents() {
   es.addEventListener('chat', (e) => {
     const msg = JSON.parse(e.data);
     // our own messages are appended optimistically on send
-    if (msg.role !== 'reviewer') appendChatMessage(msg);
+    if (msg.role !== 'reviewer') {
+      hideTyping(); // the reply is here
+      appendChatMessage(msg);
+    }
   });
   // a reworked document arrived: reload it in place and start a fresh review
   es.addEventListener('doc', () => {
