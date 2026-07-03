@@ -68,6 +68,21 @@ node bin/planreview.js wait
 # {"type":"submit","comments":[…],"choices":{…},"note":"…"}
 ```
 
+### Install the `planreview` command
+
+Optional, but it lets you (and any agent) run `planreview` from anywhere
+instead of the full `node …/bin/planreview.js` path. Symlink the bin onto a
+directory that is on your `PATH`:
+
+```sh
+ln -s "$(pwd)/bin/planreview.js" ~/.local/bin/planreview
+```
+
+The symlink points at the repo, so tool edits take effect with no reinstall.
+(`bin/planreview.js` is already executable and has a `#!/usr/bin/env node`
+shebang.) Prefer this over `npm link` / `npm install -g` if your Node lives in
+a managed cache dir that could be wiped.
+
 ### Automatic invocation from Claude Code
 
 `integration/claude/plan-review/` is a ready-made Claude Code skill. Symlink

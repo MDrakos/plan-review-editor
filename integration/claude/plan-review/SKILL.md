@@ -22,11 +22,9 @@ plan mode), or the user explicitly asks for terminal output.
 
 ## Setup
 
-The CLI (no install, zero dependencies):
-
-```sh
-PR="node /Users/miked/work/plan-review-editor/bin/planreview.js"
-```
+Drive the session with the `planreview` command (zero dependencies — it is a
+PATH symlink to this repo's `bin/planreview.js`). If `planreview` is not on the
+PATH, fall back to `node /Users/miked/work/plan-review-editor/bin/planreview.js`.
 
 ## 1. Write the document
 
@@ -49,18 +47,18 @@ options:
 ## 2. Present it
 
 ```sh
-$PR start plan.md        # boots the server and opens the browser
+planreview start plan.md        # boots the server and opens the browser
 ```
 
 Tell the user (one line) that the plan is open in their browser, then start
-waiting. If a session is already running, use `$PR present plan.md` instead.
+waiting. If a session is already running, use `planreview present plan.md` instead.
 
 ## 3. The event loop
 
 Repeatedly run:
 
 ```sh
-$PR wait --timeout 90
+planreview wait --timeout 90
 ```
 
 The 90s poll window stays under default shell time limits. If the shell
@@ -72,14 +70,14 @@ loop:
   your turn; the user is still reviewing.
 - `{"type":"chat","text":…}` — the user said something in the sidebar. It
   may be unrelated to the document; answer it (do real work if needed) with
-  `$PR say "<answer>"`, then `wait` again.
+  `planreview say "<answer>"`, then `wait` again.
 - `{"type":"submit",…}` — the bundled review. `comments[]` each carry the
   exact selected passage in `quote` plus the user's `text` about it;
   `choices` maps each choice-fence `id` to the selected option; `note` is an
   overall remark. Rework the markdown file addressing **every** comment and
-  honoring every choice, then `$PR present plan.md` (the browser reloads it
+  honoring every choice, then `planreview present plan.md` (the browser reloads it
   in place) and `wait` again.
-- `{"type":"end"}` — the user is done. Run `$PR stop`, give a brief terminal
+- `{"type":"end"}` — the user is done. Run `planreview stop`, give a brief terminal
   summary of the final document and decisions, and continue normally.
 
 Full protocol reference: `/Users/miked/work/plan-review-editor/docs/PROTOCOL.md`.
