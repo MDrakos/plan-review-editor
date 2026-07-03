@@ -55,6 +55,20 @@ Three pieces, zero runtime dependencies:
   `start` also restarts the shared server if it is running stale code and idle
   (so tool edits take effect); `planreview restart --force` does it on demand.
 
+## Demo
+
+Want to see the whole loop without wiring up a real agent?
+
+```sh
+npm run demo
+```
+
+A scripted stand-in "agent" presents a sample plan, opens your browser, and as
+you review it replies to your chats, shows live rework progress, re-presents a
+revised version with the changes highlighted, and remembers the questions you
+already answered. Runs on its own port (4781), so it never touches a real
+session. (Great to screen-record for a walkthrough.)
+
 ## Quick start
 
 No install, no dependencies — Node 18+ only.

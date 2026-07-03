@@ -8,6 +8,7 @@
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js",
+    "demo": "node demo/demo.js",
     "test": "node test/e2e.js"
   },
   "engines": {
