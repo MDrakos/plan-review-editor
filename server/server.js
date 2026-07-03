@@ -43,6 +43,7 @@ function createSession() {
     review: { comments: [], choices: {} }, // in-progress review, survives refreshes
     submissions: [], // completed review bundles, oldest first
     chat: [], // {role: 'reviewer' | 'agent', text, ts}
+    progress: [], // {text, ts} steps the agent reports while reworking
     sse: new Set(), // browser tabs watching this session
     queue: [], // agent events awaiting a wait
     waiters: [], // {res, timer} in-flight /agent/wait long-polls
@@ -152,6 +153,7 @@ function loadDoc(s, docPath) {
   s.doc.html = render(markdown);
   s.doc.version += 1;
   s.review = { comments: [], choices: {} };
+  s.progress = []; // the reworked doc is here — the previous round's steps are done
   s.status = 'reviewing';
   touch(s);
 }
@@ -311,6 +313,7 @@ const server = http.createServer(async (req, res) => {
         doc: { title: s.doc.title, html: s.doc.html, version: s.doc.version },
         review: s.review,
         chat: s.chat,
+        progress: s.progress,
         clients: s.sse.size,
       });
     }
@@ -368,6 +371,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 409, { error: `cannot ${verb} while ${s.status}` });
       const bundle = reviewBundle(s, await readBody(req));
       s.submissions.push(bundle);
+      s.progress = []; // start the rework round with a clean progress log
       s.status = approve ? 'done' : 'working';
       touch(s);
       broadcast(s, 'status', { status: s.status });
@@ -419,6 +423,19 @@ const server = http.createServer(async (req, res) => {
       s.chat.push(msg);
       touch(s);
       broadcast(s, 'chat', msg);
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // A rework step, shown live in the "reworking" overlay so the reviewer sees
+    // real progress instead of a bare spinner. Cleared when the new doc arrives.
+    if (method === 'POST' && pathname === '/agent/progress') {
+      const body = await readBody(req);
+      const text = String(body.text || '').trim();
+      if (!text) return sendJson(res, 400, { error: 'empty progress' });
+      const msg = { text, ts: Date.now() };
+      s.progress.push(msg);
+      touch(s);
+      broadcast(s, 'progress', msg);
       return sendJson(res, 200, { ok: true });
     }
 

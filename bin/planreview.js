@@ -244,6 +244,15 @@ const commands = {
     console.log(JSON.stringify(await request('POST', scoped('/agent/say', id), { text })));
   },
 
+  // Report a rework step; shown live in the reviewer's "reworking" overlay.
+  async progress(argv) {
+    const { opts, positionals } = parseArgs(argv);
+    const id = requireSession(opts, 'progress');
+    const text = positionals.join(' ').trim();
+    if (!text) throw new Error('usage: planreview progress <message> --session <id>');
+    console.log(JSON.stringify(await request('POST', scoped('/agent/progress', id), { text })));
+  },
+
   async status(argv) {
     const { opts } = parseArgs(argv);
     const id = requireSession(opts, 'status');
@@ -308,6 +317,7 @@ function usage() {
                                      after s seconds (for shell-capped agents that re-loop);
                                      --warn-after notes a long wait on stderr (default 300s)
   say <message> --session <id>       send a chat message to the reviewer
+  progress <message> --session <id>  report a rework step (shown live while reworking)
   status --session <id>              print session status
   list                               list all open sessions
   open --session <id>                (re)open a session's review tab in the browser

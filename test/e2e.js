@@ -263,6 +263,30 @@ async function main() {
   check('cannot approve again once done', reApprove.status === 409, `status=${reApprove.status}`);
   await cli('stop', '--session', ap.id);
 
+  console.log('rework progress: steps accumulate while working, clear on present');
+  const pr = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${pr.id}`, { comments: [], choices: {}, note: '' });
+  await cli('progress', 'Applying comments', '--session', pr.id);
+  await cli('progress', 'Rewriting the storage section', '--session', pr.id);
+  const during = await browser(`/api/state?session=${pr.id}`);
+  check(
+    'progress steps accumulate during rework',
+    during.data.status === 'working' &&
+      during.data.progress.length === 2 &&
+      during.data.progress[0].text === 'Applying comments' &&
+      during.data.progress[1].text === 'Rewriting the storage section',
+    JSON.stringify(during.data.progress)
+  );
+  fs.appendFileSync(docA, '\n(reworked)\n');
+  await cli('present', docA, '--session', pr.id);
+  const afterPresent = await browser(`/api/state?session=${pr.id}`);
+  check(
+    'present clears progress and returns to reviewing',
+    afterPresent.data.status === 'reviewing' && afterPresent.data.progress.length === 0,
+    JSON.stringify({ status: afterPresent.data.status, progress: afterPresent.data.progress })
+  );
+  await cli('stop', '--session', pr.id);
+
   console.log('no time limit: wait blocks past poll windows until the reviewer acts');
   const np = await cli('start', docA, '--no-open');
   // no --timeout: must keep polling (past several 400ms server windows), not give up
@@ -342,6 +366,7 @@ async function main() {
   const app = await text('/app.js');
   check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
+  check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
 
   await cli('stop', '--session', guard.id);
 

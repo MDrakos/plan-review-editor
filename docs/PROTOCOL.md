@@ -81,6 +81,9 @@ shows a "reworking" overlay until you `present` again.
   (an array when the block sets `multi: true`).
 - Rework the document, then `planreview present <file> --session <id>` — the
   browser reloads it in place and a fresh review round begins.
+- While reworking, `planreview progress "<step>" --session <id>` appends a step
+  to a live checklist shown in the reviewer's "reworking" overlay (SSE
+  `progress` event). Steps reset each round and clear when you `present`.
 
 ### `approve`
 
@@ -164,8 +167,8 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/admin/shutdown` | CLI | shut the whole server down (used to restart a server running stale code) |
 | GET | `/api/sessions` | both | list open sessions (`planreview list`) |
 | POST | `/agent/start` | CLI | create a session and present a document; returns its `id` |
-| GET | `/api/state?session=` | browser | full session state (doc, review, chat, status, clients) |
-| GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `status` |
+| GET | `/api/state?session=` | browser | full session state (doc, review, chat, progress, status, clients) |
+| GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `progress`, `status` |
 | POST | `/api/review-state?session=` | browser | persist in-progress comments/choices |
 | POST | `/api/chat?session=` | browser | reviewer chat message (queued for the agent) |
 | POST | `/api/submit?session=` | browser | submit a review round (→ `working`; queued as `submit`) |
@@ -174,6 +177,7 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/agent/present?session=` | CLI | render a markdown file as the session's document |
 | GET | `/agent/wait?session=` | CLI | long-poll for the next reviewer event (`&timeout=<ms>` optional) |
 | POST | `/agent/say?session=` | CLI | agent chat message to the reviewer |
+| POST | `/agent/progress?session=` | CLI | append a rework step to the working overlay |
 | POST | `/agent/stop?session=` | CLI | end and drop just this session |
 
 The server binds to `127.0.0.1` only and holds all state in memory — a

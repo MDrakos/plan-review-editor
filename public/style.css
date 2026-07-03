@@ -205,6 +205,59 @@ html, body {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* rework progress checklist inside the working overlay */
+.progress-list {
+  list-style: none;
+  margin: 14px 0 4px;
+  padding: 0;
+  text-align: left;
+  max-height: 180px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.progress-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.progress-mark {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  color: var(--success);
+  font-weight: 700;
+}
+
+.progress-item.done { color: var(--ink-soft); }
+.progress-item.current { color: var(--ink); font-weight: 600; }
+.progress-item.placeholder { color: var(--ink-soft); font-style: italic; }
+
+/* the in-progress step gets a small pulsing dot instead of a check */
+.progress-item.current .progress-mark {
+  position: relative;
+}
+.progress-item.current .progress-mark::before {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: progress-pulse 1s ease-in-out infinite;
+}
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
 .sidebar {
   width: 340px;
   min-width: 340px;

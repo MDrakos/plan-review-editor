@@ -98,7 +98,10 @@ event when something happens. Handle it and wait again:
   `planreview present plan.md --session a1b2c3` (the browser reloads it in
   place) and `wait` again. **Always follow a submit with either `present` (to
   continue) or `stop` (if you're truly done) — until you do, the reviewer's
-  page shows a "reworking" spinner. Never leave it hanging.**
+  page shows a "reworking" spinner. Never leave it hanging.** For a multi-step
+  rework, call `planreview progress "<step>" --session a1b2c3` as you go (e.g.
+  "Applying comment 2 of 5", "Reworking the storage section") — the reviewer
+  sees these live in place of a bare spinner, and they clear on `present`.
 - `{"type":"approve",…}` — the user approved and is **done reviewing**. Same
   bundle shape as `submit` (`comments`/`choices`/`note`), which may be empty.
   Apply any feedback it carries, then run `planreview stop --session a1b2c3`

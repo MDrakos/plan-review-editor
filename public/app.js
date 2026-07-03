@@ -29,6 +29,7 @@ const submitBtn = document.getElementById('submit-btn');
 const chatListEl = document.getElementById('chat-list');
 const chatFormEl = document.getElementById('chat-form');
 const chatInputEl = document.getElementById('chat-input');
+const progressListEl = document.getElementById('progress-list');
 
 // ---------- state ----------
 
@@ -37,6 +38,7 @@ const state = {
   version: 0,
   comments: [], // {id, quote, text, ts}
   choices: {}, // choiceId -> value (string) or values (string[]) when multi
+  progress: [], // {text, ts} rework steps, shown in the working overlay
 };
 
 let pendingRange = null;
@@ -105,6 +107,8 @@ async function fetchState() {
   hideTyping();
   chatListEl.innerHTML = '';
   for (const msg of s.chat || []) appendChatMessage(msg);
+  state.progress = s.progress || [];
+  renderProgress();
 }
 
 // ---------- chat ----------
@@ -144,6 +148,40 @@ function hideTyping() {
   }
 }
 
+// ---------- rework progress ----------
+//
+// While the agent reworks (status 'working'), it can report steps that show
+// up as a live checklist in the overlay: earlier steps are ✓ done, the latest
+// is the one in progress. Cleared when the reworked document arrives.
+
+function renderProgress() {
+  const items = state.progress || [];
+  progressListEl.innerHTML = '';
+  if (!items.length) {
+    // The list lives inside the working overlay, so this is only ever seen
+    // during a rework — a placeholder until the agent reports its first step.
+    const li = document.createElement('li');
+    li.className = 'progress-item placeholder';
+    li.textContent = 'Progress will show up here as the agent works…';
+    progressListEl.appendChild(li);
+    return;
+  }
+  items.forEach((p, i) => {
+    const current = i === items.length - 1;
+    const li = document.createElement('li');
+    li.className = `progress-item ${current ? 'current' : 'done'}`;
+    const mark = document.createElement('span');
+    mark.className = 'progress-mark';
+    if (!current) mark.textContent = '✓';
+    const txt = document.createElement('span');
+    txt.className = 'progress-text';
+    txt.textContent = p.text;
+    li.append(mark, txt);
+    progressListEl.appendChild(li);
+  });
+  progressListEl.scrollTop = progressListEl.scrollHeight;
+}
+
 chatFormEl.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = chatInputEl.value.trim();
@@ -180,7 +218,18 @@ function connectEvents() {
     fabEl.hidden = true;
     fetchState();
   });
-  es.addEventListener('status', (e) => setStatus(JSON.parse(e.data).status));
+  es.addEventListener('progress', (e) => {
+    state.progress.push(JSON.parse(e.data));
+    renderProgress();
+  });
+  es.addEventListener('status', (e) => {
+    const status = JSON.parse(e.data).status;
+    if (status === 'working') {
+      state.progress = []; // a fresh rework round — clear last round's steps
+      renderProgress();
+    }
+    setStatus(status);
+  });
 }
 
 // ---------- choice blocks ----------
@@ -525,6 +574,8 @@ async function submitReview() {
   }).catch(() => null);
   if (!res || !res.ok) return flashSubmitError();
   overallNoteEl.value = '';
+  state.progress = [];
+  renderProgress();
   setStatus('working');
 }
 
