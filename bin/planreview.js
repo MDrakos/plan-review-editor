@@ -98,7 +98,16 @@ const commands = {
   async start(args) {
     const file = args.find((a) => !a.startsWith('--'));
     await ensureServer();
-    await request('POST', '/agent/reset');
+    try {
+      await request('POST', '/agent/reset');
+    } catch {
+      // leftover server from an older version of this tool (no /agent/reset
+      // endpoint) — replace it with a fresh process instead of failing
+      await request('POST', '/agent/stop').catch(() => {});
+      await sleep(500);
+      await ensureServer();
+      await request('POST', '/agent/reset');
+    }
     let presented = null;
     if (file) presented = await request('POST', '/agent/present', { path: resolveDoc(file) });
     if (!args.includes('--no-open')) {
