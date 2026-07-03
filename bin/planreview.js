@@ -136,6 +136,7 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--session') opts.session = argv[++i];
     else if (a === '--timeout') opts.timeout = Number(argv[++i]);
+    else if (a === '--warn-after') opts.warnAfter = Number(argv[++i]);
     else if (a === '--no-open') opts.noOpen = true;
     else if (a.startsWith('--')) opts[a.slice(2)] = true;
     else positionals.push(a);
@@ -177,31 +178,61 @@ const commands = {
     console.log(JSON.stringify({ ok: true, id, ...out }));
   },
 
-  // Blocks until the reviewer produces the next event for this session.
-  // Long-poll connections that drop mid-wait (sleep, proxy, etc.) are retried;
-  // a dead server or a vanished session is not.
-  // --timeout <seconds> makes it return {"type":"timeout"} instead of blocking
-  // forever, so agents with shell time limits can poll in a loop.
+  // Blocks until the reviewer produces the next real event for this session.
+  // The reviewer has NO time limit — a long doc can take as long as it takes.
+  // Internally this polls the server in short windows and loops straight past
+  // the server's "nothing yet" replies, so from the caller's side it just
+  // blocks until something happens. Dropped connections are retried; a dead
+  // server or a vanished session is not.
+  //
+  // --timeout <seconds>  return {"type":"timeout"} after this long instead of
+  //                      blocking, so an agent whose shell caps command time
+  //                      can return cleanly and re-run `wait` in a loop.
+  // --warn-after <sec>   print a one-line "still waiting" note to stderr once
+  //                      the wait passes this (default 300s / 5m). Informational
+  //                      only — never a cutoff, and never shown to the reviewer.
   async wait(argv) {
     const { opts } = parseArgs(argv);
     const id = requireSession(opts, 'wait');
-    const seconds = opts.timeout;
-    if (seconds !== undefined && (!Number.isFinite(seconds) || seconds <= 0))
+    const hardCap = opts.timeout; // seconds, optional graceful-return budget
+    if (hardCap !== undefined && (!Number.isFinite(hardCap) || hardCap <= 0))
       throw new Error('usage: planreview wait --session <id> [--timeout <seconds>]');
-    let pathname = scoped('/agent/wait', id);
-    if (seconds > 0) pathname += `&timeout=${Math.round(seconds * 1000)}`;
+    const warnAfter = opts.warnAfter !== undefined ? opts.warnAfter : 300;
+    const windowMs = Number(process.env.PLANREVIEW_POLL_MS) || 50000;
+    const start = Date.now();
+    let warned = false;
     for (;;) {
+      const elapsed = Date.now() - start;
+      let poll = windowMs;
+      if (hardCap !== undefined) {
+        const remaining = hardCap * 1000 - elapsed;
+        if (remaining <= 0) return console.log(JSON.stringify({ type: 'timeout' }));
+        poll = Math.min(windowMs, remaining);
+      }
+      let event;
       try {
-        const event = await request('GET', pathname);
-        console.log(JSON.stringify(event));
-        return;
+        event = await request('GET', `${scoped('/agent/wait', id)}&timeout=${Math.round(poll)}`);
       } catch (err) {
         if (/no such session/i.test(err.message))
           throw new Error(`no such session: ${id} (it may have ended)`);
         if (err.code === 'ECONNREFUSED') throw new Error('server is not running');
         await sleep(500);
         if (!(await serverAlive())) throw new Error('server is not running');
+        continue;
       }
+      if (event.type === 'timeout') {
+        // nothing from the reviewer yet — keep polling (no limit)
+        if (!warned && warnAfter > 0 && Date.now() - start >= warnAfter * 1000) {
+          warned = true;
+          const mins = Math.round((Date.now() - start) / 60000);
+          process.stderr.write(
+            `planreview: still waiting for the reviewer (~${mins}m) — no time limit; expected for long docs.\n`
+          );
+        }
+        continue;
+      }
+      console.log(JSON.stringify(event));
+      return;
     }
   },
 
@@ -272,8 +303,10 @@ function usage() {
   start <file.md> [--no-open]        create an isolated session, present the plan, open a tab;
                                      prints {"id":…} — pass that id to every later command
   present <file.md> --session <id>   (re)present a plan into an existing session
-  wait --session <id> [--timeout s]  block until the next reviewer event, print it as JSON;
-                                     with --timeout, print {"type":"timeout"} if nothing happens
+  wait --session <id>                block until the reviewer's next event (no time limit),
+       [--timeout s] [--warn-after s]  print it as JSON. --timeout returns {"type":"timeout"}
+                                     after s seconds (for shell-capped agents that re-loop);
+                                     --warn-after notes a long wait on stderr (default 300s)
   say <message> --session <id>       send a chat message to the reviewer
   status --session <id>              print session status
   list                               list all open sessions

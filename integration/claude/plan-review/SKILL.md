@@ -63,19 +63,25 @@ waiting.
 
 ## 3. The event loop
 
-With your session id in hand, repeatedly run (substituting the real id):
+With your session id in hand, block for the reviewer's next action:
 
 ```sh
-planreview wait --session a1b2c3 --timeout 90
+planreview wait --session a1b2c3
 ```
 
-The 90s poll window stays under default shell time limits. If the shell
-kills the command anyway, nothing is lost — events queue on the server —
-so just run `wait` again. Each call prints one JSON event. Handle it and
-loop:
+This **polls indefinitely** — the reviewer has no time limit, so a long
+document can take as long as they need. Keep waiting; **never** end your turn
+or assume they're done just because time has passed. Each call prints one JSON
+event when something happens. Handle it and wait again:
 
-- `{"type":"timeout"}` — nothing happened yet. Run `wait` again. Do not end
-  your turn; the user is still reviewing.
+- If your shell caps how long a command may run and kills `wait`, nothing is
+  lost — events queue on the server — so just run it again. To avoid the kill,
+  add `--timeout <seconds>` (a bit under your shell's limit); it then returns
+  `{"type":"timeout"}` at that point and you simply re-run `wait`.
+- After ~5 minutes a one-line "still waiting" note prints to stderr. It's
+  informational (the reviewer isn't shown it and isn't rushed) — keep waiting.
+- `{"type":"timeout"}` — only appears if you passed `--timeout`; nothing
+  happened in that window. Run `wait` again. Do not end your turn.
 - `{"type":"chat","text":…}` — the user said something in the sidebar. It
   may be unrelated to the document; answer it (do real work if needed) with
   `planreview say "<answer>" --session a1b2c3`, then `wait` again.

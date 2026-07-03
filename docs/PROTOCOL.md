@@ -33,7 +33,7 @@ that needs the agent's attention arrives as one JSON event:
 resp=$(planreview start plan.md)         # -> {"id":"a1b2c3", …}; opens browser
 id=a1b2c3                                 # capture the session id from resp
 loop:
-  event=$(planreview wait --session $id) # blocks until the reviewer acts
+  event=$(planreview wait --session $id) # blocks (no time limit) until the reviewer acts
   case $event.type in
     chat)    reply with `planreview say "…" --session $id`, then wait again
     submit)  rework plan.md using the bundle,
@@ -114,11 +114,13 @@ The reviewer ended the session without an explicit approval. Run
 
 ### `timeout`
 
-Only returned when waiting with `planreview wait --session <id> --timeout
-<seconds>` (or `GET /agent/wait?session=<id>&timeout=<ms>`): nothing happened
-within the window. Not a reviewer action — just call `wait` again. This lets
-agents whose shells impose a per-command time limit poll in a loop instead of
-blocking forever.
+`planreview wait` polls indefinitely by default — the reviewer has no time
+limit — so it normally only returns on a real event. Pass `--timeout <seconds>`
+to make it return `{ "type": "timeout" }` after that long instead; agents whose
+shell caps command duration use this to return cleanly and re-run `wait` in a
+loop. It's not a reviewer action — just call `wait` again. (Internally the CLI
+long-polls `GET /agent/wait?session=<id>&timeout=<ms>` in short windows and
+loops past the server's own `timeout` replies.)
 
 ```json
 { "type": "timeout" }

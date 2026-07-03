@@ -20,7 +20,12 @@ const os = require('os');
 const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
-const env = { ...process.env, PLANREVIEW_PORT: String(PORT), PLANREVIEW_IDLE_MS: '1500' };
+const env = {
+  ...process.env,
+  PLANREVIEW_PORT: String(PORT),
+  PLANREVIEW_IDLE_MS: '1500',
+  PLANREVIEW_POLL_MS: '400', // short internal poll window so tests can exercise the wait loop
+};
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -244,6 +249,29 @@ async function main() {
   const reApprove = await browser(`/api/approve?session=${ap.id}`, {});
   check('cannot approve again once done', reApprove.status === 409, `status=${reApprove.status}`);
   await cli('stop', '--session', ap.id);
+
+  console.log('no time limit: wait blocks past poll windows until the reviewer acts');
+  const np = await cli('start', docA, '--no-open');
+  // no --timeout: must keep polling (past several 400ms server windows), not give up
+  const blocking = cli('wait', '--session', np.id);
+  await sleep(1300); // longer than several poll windows — a bounded wait would have returned
+  await browser(`/api/chat?session=${np.id}`, { text: 'after a long pause' });
+  const blockedEv = await blocking;
+  check(
+    'wait with no --timeout keeps polling and returns the real event',
+    blockedEv.type === 'chat' && blockedEv.text === 'after a long pause'
+  );
+  // --warn-after surfaces a "still waiting" note on stderr but keeps waiting
+  const warnWait = cliRaw('wait', '--session', np.id, '--warn-after', '0.3');
+  await sleep(1300);
+  await browser(`/api/chat?session=${np.id}`, { text: 'second' });
+  const warnRes = await warnWait;
+  check(
+    'a long wait warns on stderr yet still delivers the event',
+    /still waiting/.test(warnRes.stderr) && /"type":"chat"/.test(warnRes.stdout),
+    JSON.stringify(warnRes)
+  );
+  await cli('stop', '--session', np.id);
 
   console.log('guard: a session id is required, unknown ids are rejected');
   const guard = await cli('start', docB, '--no-open'); // keep the server up
