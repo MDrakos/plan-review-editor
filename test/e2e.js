@@ -21,6 +21,7 @@ const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
 const { render, renderDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
+const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
 const env = {
   ...process.env,
   PLANREVIEW_PORT: String(PORT),
@@ -113,6 +114,48 @@ async function main() {
     '# Plan A\n\nBody of plan A.\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n'
   );
   fs.writeFileSync(docB, '# Plan B\n\nBody of plan B — a totally separate document.\n');
+
+  console.log('working-overlay liveness: elapsed formatting + staleness threshold (pure)');
+  // FM-6: minutes:seconds with a zero-padded seconds field
+  check(
+    'formatElapsed renders m:ss with zero-padded seconds',
+    liveness.formatElapsed(0) === '0:00' &&
+      liveness.formatElapsed(5000) === '0:05' &&
+      liveness.formatElapsed(48000) === '0:48' &&
+      liveness.formatElapsed(65000) === '1:05' &&
+      liveness.formatElapsed(600000) === '10:00',
+    `${liveness.formatElapsed(65000)} / ${liveness.formatElapsed(5000)}`
+  );
+  // FM-5: a negative/skewed delta clamps to zero rather than showing "-1:59"/NaN
+  check(
+    'formatElapsed clamps a negative delta to 0:00',
+    liveness.formatElapsed(-5000) === '0:00' && liveness.formatElapsed(NaN) === '0:00',
+    `${liveness.formatElapsed(-5000)} / ${liveness.formatElapsed(NaN)}`
+  );
+  // FM-4: while fresh (below threshold) there is no hint at all
+  check(
+    'stalenessHint stays null below the threshold',
+    liveness.stalenessHint(0, 40000) === null &&
+      liveness.stalenessHint(39999, 40000) === null,
+    JSON.stringify(liveness.stalenessHint(39999, 40000))
+  );
+  // FM-7: at/after the threshold a muted, non-alarming advisory appears with the count
+  check(
+    'stalenessHint fires at the threshold with an advisory message',
+    liveness.stalenessHint(40000, 40000) === 'No updates for 40 s — the agent may be stuck.' &&
+      liveness.stalenessHint(62000, 40000) === 'No updates for 62 s — the agent may be stuck.',
+    JSON.stringify(liveness.stalenessHint(40000, 40000))
+  );
+  // the threshold has a sane default so callers can omit it
+  check(
+    'stalenessHint exposes a default threshold (~30-45s)',
+    typeof liveness.STALE_THRESHOLD_MS === 'number' &&
+      liveness.STALE_THRESHOLD_MS >= 30000 &&
+      liveness.STALE_THRESHOLD_MS <= 45000 &&
+      liveness.stalenessHint(liveness.STALE_THRESHOLD_MS) !== null &&
+      liveness.stalenessHint(0) === null,
+    `default=${liveness.STALE_THRESHOLD_MS}`
+  );
 
   console.log('safeguard: a server running stale code is restarted on start');
   // occupy the port with a server that reports old code + no active sessions
