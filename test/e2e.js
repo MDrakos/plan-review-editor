@@ -446,6 +446,27 @@ async function main() {
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
   check('client highlights + can dismiss doc changes', /data-changed/.test(app.body) && /changes-dismissed/.test(app.body));
   check('client collapses already-answered questions', /choice-summary/.test(app.body) && /'answered'/.test(app.body));
+  // working-overlay liveness: the pure helpers are served as their own asset,
+  // the client wires a timer that starts on 'working' and resets on progress,
+  // and the overlay markup + script are present on the review page.
+  const liv = await text('/liveness.js');
+  check(
+    'liveness helpers are served and expose the pure API',
+    liv.ok && /formatElapsed/.test(liv.body) && /stalenessHint/.test(liv.body) && /window\.Liveness/.test(liv.body)
+  );
+  check(
+    'client runs an elapsed timer while working and resets it on progress',
+    /startWorkingTimer/.test(app.body) &&
+      /stopWorkingTimer/.test(app.body) &&
+      /noteAgentSignal/.test(app.body) &&
+      /window\.Liveness/.test(app.body)
+  );
+  check(
+    'review page loads the liveness asset and carries the overlay timer/hint markup',
+    /src="\/liveness\.js"/.test(appPage.body) &&
+      /id="working-elapsed"/.test(appPage.body) &&
+      /id="working-stale"/.test(appPage.body)
+  );
 
   await cli('stop', '--session', guard.id);
 

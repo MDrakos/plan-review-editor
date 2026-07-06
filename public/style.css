@@ -239,6 +239,27 @@ html, body {
 .overlay-card p { margin: 6px 0 0; font-weight: 600; }
 .overlay-hint { color: var(--ink-soft); font-size: 13px; font-weight: 400 !important; }
 
+/* live elapsed timer next to "Reworking the plan…" — muted, tabular digits so
+   the width doesn't jitter as it ticks */
+.working-elapsed {
+  color: var(--ink-soft);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+/* staleness advisory under the spinner: muted and non-alarming by design — it's
+   a soft "maybe stuck" cue, not an error. Kept quiet so a healthy silent rework
+   that trips it doesn't look like a failure. */
+.working-stale {
+  margin: 10px 0 0;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 400 !important;
+  font-style: italic;
+}
+
 .spinner {
   width: 28px;
   height: 28px;

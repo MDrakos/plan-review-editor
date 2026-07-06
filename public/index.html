@@ -23,8 +23,9 @@
       <div id="working-overlay" class="overlay" hidden>
         <div class="overlay-card">
           <div class="spinner"></div>
-          <p>Reworking the plan…</p>
+          <p>Reworking the plan… <span id="working-elapsed" class="working-elapsed"></span></p>
           <ul id="progress-list" class="progress-list"></ul>
+          <p id="working-stale" class="working-stale" hidden></p>
           <p class="overlay-hint">The new version will load here automatically. Chat stays open. If the agent has already moved on, click <strong>End session</strong> above.</p>
         </div>
       </div>
@@ -89,6 +90,7 @@
     </div>
   </div>
 
+  <script src="/liveness.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
