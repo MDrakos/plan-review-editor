@@ -210,6 +210,88 @@ html, body {
 /* when dismissed, the wrapper collapses to a plain passthrough */
 .doc.changes-dismissed [data-changed] { display: contents; }
 
+/* ---------- version diff (add / remove / change) ---------- */
+
+.diff-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: 760px;
+  margin: 0 auto 16px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.diff-bar-label { font-weight: 600; color: var(--ink); }
+.diff-field { display: inline-flex; align-items: center; gap: 3px; color: var(--ink-soft); }
+.diff-arrow { color: var(--ink-soft); }
+
+.diff-bar select {
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.diff-bar select:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.diff-bar .btn { padding: 4px 12px; }
+
+.diff-legend { display: inline-flex; gap: 12px; margin-left: auto; align-items: center; }
+.diff-key { display: inline-flex; align-items: center; gap: 5px; }
+.diff-key::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.diff-key.add::before { background: var(--change-bar); }
+.diff-key.change::before { background: var(--warn); }
+.diff-key.remove::before { background: var(--danger); }
+
+.diff-error { margin-left: auto; color: var(--danger); font-size: 13px; }
+
+/* Annotated blocks in the diff view — the same left-border callout shape as the
+   per-round highlight, colour-coded by kind. The negative left margin offsets
+   the border + padding so inner text stays aligned with unchanged blocks. */
+.doc [data-diff] {
+  border-radius: 0 4px 4px 0;
+  padding: 8px 14px;
+  margin: 0.8em 0 0.8em -17px;
+}
+.doc [data-diff] > :first-child { margin-top: 0; }
+.doc [data-diff] > :last-child { margin-bottom: 0; }
+
+.doc [data-diff="add"] {
+  background: var(--change-bg);
+  border-left: 3px solid var(--change-bar);
+}
+
+.doc [data-diff="remove"] {
+  background: var(--danger-soft);
+  border-left: 3px solid var(--danger);
+}
+.doc [data-diff="remove"] > * { opacity: 0.72; } /* de-emphasise deleted content */
+
+/* a change wraps the old (removed) and new (added) block together */
+.doc [data-diff="change"] {
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+}
+.doc [data-diff="change"] .diff-removed { opacity: 0.7; }
+.doc [data-diff="change"] .diff-removed > *,
+.doc [data-diff="change"] .diff-added > * { margin: 0.3em 0; }
+.doc [data-diff="change"] .diff-removed > :first-child { margin-top: 0; }
+.doc [data-diff="change"] .diff-added > :last-child { margin-bottom: 0; }
+
 /* ---------- working overlay ---------- */
 
 .overlay {

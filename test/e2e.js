@@ -21,7 +21,7 @@ const vm = require('vm');
 const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
-const { render, renderDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
+const { render, renderDiff, renderVersionDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
 const env = {
   ...process.env,
@@ -332,6 +332,55 @@ async function main() {
     `marks=${marks}`
   );
 
+  console.log('version diff: annotated add / remove / change markers (incl. removals)');
+  // Beta removed, Gamma modified in place, New added — each isolated by survivors
+  const vFrom = '# T\n\nIntro.\n\nBeta.\n\nMiddle.\n\nGamma.\n\nOutro.\n';
+  const vTo = '# T\n\nIntro.\n\nMiddle.\n\nGamma edited.\n\nOutro.\n\nNew.\n';
+  const vd = renderVersionDiff(vFrom, vTo).html;
+  check(
+    'a removed block is marked with a removal marker (the headline gap this closes)',
+    /<div data-diff="remove"><p>Beta\.<\/p><\/div>/.test(vd),
+    vd
+  );
+  check('an added block is marked added', /<div data-diff="add"><p>New\.<\/p><\/div>/.test(vd), vd);
+  check(
+    'a modified same-kind block is marked changed, wrapping old + new in the CSS-load-bearing shape',
+    /<div data-diff="change"><div class="diff-removed"><p>Gamma\.<\/p><\/div><div class="diff-added"><p>Gamma edited\.<\/p><\/div><\/div>/.test(vd),
+    vd
+  );
+  check(
+    'unchanged blocks stay unmarked in the version diff',
+    /<h1>T<\/h1>/.test(vd) && /<p>Intro\.<\/p>/.test(vd) && /<p>Middle\.<\/p>/.test(vd) && /<p>Outro\.<\/p>/.test(vd)
+  );
+  check('identical versions produce no diff markers', !/data-diff/.test(renderVersionDiff(vFrom, vFrom).html));
+  check(
+    'the version diff and the per-round highlight stay independent',
+    !/data-changed/.test(vd) && !/data-diff/.test(reRender.html)
+  );
+  check('empty-to-empty and full-removal diffs never throw', renderVersionDiff('', '').html === '' &&
+    /data-diff="remove"/.test(renderVersionDiff('# T\n\nGone.\n', '# T\n').html));
+  // a table and a choice both render as <div…> blocks — they must NOT be mistaken
+  // for an in-place edit of one another (would misreport a delete+insert as a change)
+  const crossKind = renderVersionDiff(
+    '# T\n\n| a | b |\n| - | - |\n| 1 | 2 |\n',
+    '# T\n\n```choice\nid: q\nprompt: Pick\noptions:\n  - A\n  - B\n```\n'
+  ).html;
+  check(
+    'cross-kind div blocks diff as remove+add, not a false change',
+    /data-diff="remove"/.test(crossKind) && /data-diff="add"/.test(crossKind) && !/data-diff="change"/.test(crossKind),
+    crossKind
+  );
+  // a RUN of removes + an add must stay clean (no misleading B→C "change") — the
+  // coalesce is deliberately limited to an isolated remove→add pair
+  const runDiff = renderVersionDiff('# T\n\nAaa.\n\nBbb.\n\nCcc.\n', '# T\n\nDdd.\n').html;
+  check(
+    'a run of removes plus an add is not collapsed into a bogus change',
+    (runDiff.match(/data-diff="remove"/g) || []).length === 3 &&
+      /data-diff="add"><p>Ddd\./.test(runDiff) &&
+      !/data-diff="change"/.test(runDiff),
+    runDiff
+  );
+
   console.log('isolation: two agents, two sessions, zero cross-contamination');
   const a = await cli('start', docA, '--no-open');
   const b = await cli('start', docB, '--no-open');
@@ -477,6 +526,126 @@ async function main() {
   );
   await cli('stop', '--session', q.id);
 
+  console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
+  const dv = path.join(dir, 'planreview-e2e-versions.md');
+  fs.writeFileSync(dv, '# Ring\n\nKeep one.\n\nDrop me.\n\nKeep two.\n');
+  const vs = await cli('start', dv, '--no-open'); // v1
+  const vid = vs.id;
+  fs.writeFileSync(dv, '# Ring\n\nKeep one.\n\nKeep two.\n'); // v2: remove "Drop me."
+  await cli('present', dv, '--session', vid);
+  fs.writeFileSync(dv, '# Ring\n\nKeep one.\n\nKeep two.\n\nBrand new.\n'); // v3: add a block
+  await cli('present', dv, '--session', vid);
+
+  const vstate = await browser(`/api/state?session=${vid}`);
+  check(
+    '/api/state exposes the retained version list',
+    Array.isArray(vstate.data.doc.versions) && vstate.data.doc.versions.join(',') === '1,2,3',
+    JSON.stringify(vstate.data.doc.versions)
+  );
+
+  const dDefault = await browser(`/api/diff?session=${vid}`);
+  check(
+    'default /api/diff compares current vs previous',
+    dDefault.ok &&
+      dDefault.data.from === 2 &&
+      dDefault.data.to === 3 &&
+      /data-diff="add"><p>Brand new\./.test(dDefault.data.html),
+    JSON.stringify({ from: dDefault.data && dDefault.data.from, to: dDefault.data && dDefault.data.to })
+  );
+
+  // arbitrary pair (v1 -> v3), NOT current-vs-previous: the removal from v1->v2 must still surface
+  const dPair = await browser(`/api/diff?session=${vid}&from=1&to=3`);
+  check(
+    'arbitrary retained pair compares, including a removal across the span',
+    dPair.ok &&
+      dPair.data.from === 1 &&
+      dPair.data.to === 3 &&
+      /<div data-diff="remove"><p>Drop me\.<\/p><\/div>/.test(dPair.data.html) &&
+      /data-diff="add"><p>Brand new\./.test(dPair.data.html),
+    dPair.data && dPair.data.html
+  );
+
+  const dBad = await browser(`/api/diff?session=${vid}&from=99&to=3`);
+  check(
+    'diff against a non-retained version 400s with the available list',
+    dBad.status === 400 && Array.isArray(dBad.data.versions),
+    JSON.stringify(dBad)
+  );
+
+  // malformed (non-integer) params are a clean 400, never a 500 or an "undefined" page
+  const dMalformed = await browser(`/api/diff?session=${vid}&from=abc&to=3`);
+  check(
+    'a malformed from= is a 400 (never 500 / undefined render)',
+    dMalformed.status === 400 && Array.isArray(dMalformed.data.versions),
+    JSON.stringify(dMalformed)
+  );
+  const dFloat = await browser(`/api/diff?session=${vid}&from=1.5&to=3`);
+  check('a non-integer from= is rejected (integer versions only)', dFloat.status === 400, JSON.stringify(dFloat));
+
+  // default `from` is derived from `to` (the version just before it), not the
+  // second-newest overall — ?to=2 must diff 1→2, not 2→2
+  const dDeriveFrom = await browser(`/api/diff?session=${vid}&to=2`);
+  check(
+    'omitting from defaults to the version immediately before to',
+    dDeriveFrom.ok && dDeriveFrom.data.from === 1 && dDeriveFrom.data.to === 2,
+    JSON.stringify({ from: dDeriveFrom.data && dDeriveFrom.data.from, to: dDeriveFrom.data && dDeriveFrom.data.to })
+  );
+
+  // from == to is a harmless empty diff over HTTP (200, no markers)
+  const dSame = await browser(`/api/diff?session=${vid}&from=2&to=2`);
+  check(
+    'from == to returns 200 with no diff markers',
+    dSame.ok && dSame.data.from === 2 && dSame.data.to === 2 && !/data-diff/.test(dSame.data.html),
+    JSON.stringify({ status: dSame.status, from: dSame.data && dSame.data.from })
+  );
+
+  // a reversed pick (from > to) is a valid reverse diff, not a crash: the block
+  // added in v3 shows as removed when diffing 3 -> 1
+  const dRev = await browser(`/api/diff?session=${vid}&from=3&to=1`);
+  check(
+    'a reversed from>to pair yields a valid reverse diff (200)',
+    dRev.ok && dRev.data.from === 3 && dRev.data.to === 1 && /data-diff="remove"><p>Brand new\./.test(dRev.data.html),
+    dRev.data && dRev.data.html
+  );
+  await cli('stop', '--session', vid);
+
+  const rv = path.join(dir, 'planreview-e2e-ring.md');
+  fs.writeFileSync(rv, '# Ring2\n\nline 0.\n');
+  const rs = await cli('start', rv, '--no-open'); // v1
+  const rid = rs.id;
+  for (let k = 1; k <= 11; k++) {
+    fs.writeFileSync(rv, `# Ring2\n\nline ${k}.\n`);
+    await cli('present', rv, '--session', rid); // -> v12
+  }
+  const rstate = await browser(`/api/state?session=${rid}`);
+  check(
+    'the version ring keeps at most the last 10 versions (bound is documented + enforced)',
+    rstate.data.doc.version === 12 &&
+      rstate.data.doc.versions.length === 10 &&
+      rstate.data.doc.versions[0] === 3 &&
+      rstate.data.doc.versions[9] === 12,
+    JSON.stringify(rstate.data.doc.versions)
+  );
+  const aged = await browser(`/api/diff?session=${rid}&from=1&to=12`);
+  check('a diff against an aged-out version 400s', aged.status === 400, JSON.stringify(aged));
+  await cli('stop', '--session', rid);
+
+  // version history is per-session: one session's versions/diffs never surface in another
+  const isoA = await cli('start', dv, '--no-open'); // A: v1
+  await cli('present', dv, '--session', isoA.id); // A: v2
+  const isoB = await cli('start', rv, '--no-open'); // B: v1 only
+  const isoAState = await browser(`/api/state?session=${isoA.id}`);
+  const isoBState = await browser(`/api/state?session=${isoB.id}`);
+  check(
+    'each session keeps its own version history (no cross-session leak)',
+    isoAState.data.doc.versions.join(',') === '1,2' && isoBState.data.doc.versions.join(',') === '1',
+    JSON.stringify({ A: isoAState.data.doc.versions, B: isoBState.data.doc.versions })
+  );
+  const isoBDiff = await browser(`/api/diff?session=${isoB.id}&from=1&to=2`);
+  check("B can't diff a version only A has", isoBDiff.status === 400, JSON.stringify(isoBDiff));
+  await cli('stop', '--session', isoA.id);
+  await cli('stop', '--session', isoB.id);
+
   console.log('no time limit: wait blocks past poll windows until the reviewer acts');
   const np = await cli('start', docA, '--no-open');
   // no --timeout: must keep polling (past several 400ms server windows), not give up
@@ -580,6 +749,7 @@ async function main() {
       /id="working-elapsed"/.test(appPage.body) &&
       /id="working-stale"/.test(appPage.body)
   );
+  check('client offers a version-diff selector', /\/api\/diff/.test(app.body) && /diffing/.test(app.body));
 
   await cli('stop', '--session', guard.id);
 

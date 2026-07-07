@@ -35,12 +35,21 @@ const workingStaleEl = document.getElementById('working-stale');
 const changesBar = document.getElementById('changes-bar');
 const changesLabel = document.getElementById('changes-label');
 const changesDismiss = document.getElementById('changes-dismiss');
+const diffBar = document.getElementById('diff-bar');
+const diffFromEl = document.getElementById('diff-from');
+const diffToEl = document.getElementById('diff-to');
+const diffShowBtn = document.getElementById('diff-show');
+const diffCloseBtn = document.getElementById('diff-close');
+const diffLegend = document.getElementById('diff-legend');
+const diffErrorEl = document.getElementById('diff-error');
 
 // ---------- state ----------
 
 const state = {
   status: 'idle',
   version: 0,
+  versions: [], // retained version numbers available to diff between
+  diffing: false, // true while the doc pane shows a version diff (read-only)
   comments: [], // {id, quote, text, ts}
   choices: {}, // choiceId -> value (string) or values (string[]) when multi
   progress: [], // {text, ts} rework steps, shown in the working overlay
@@ -92,12 +101,18 @@ document.getElementById('end-btn').addEventListener('click', async () => {
 });
 
 function renderDoc(doc) {
+  // Rendering the live document means we are NOT in the diff view — reset it, so
+  // a reworked doc arriving mid-diff (or any state resync) lands cleanly on the
+  // current version rather than leaving a half-open diff.
+  resetDiffView();
   docTitleEl.textContent = doc.title || '';
   document.title = doc.title ? `${doc.title} — Plan Review` : 'Plan Review';
   docEl.innerHTML =
     doc.html || '<p class="empty">Waiting for the agent to present a plan…</p>';
   state.version = doc.version;
+  state.versions = doc.versions || [];
   updateChangesBar();
+  populateVersionSelects();
 }
 
 // Blocks changed since the last cycle carry a data-changed attribute (added by
@@ -115,6 +130,90 @@ changesDismiss.addEventListener('click', () => {
   docEl.classList.add('changes-dismissed');
   changesBar.hidden = true;
 });
+
+// ---------- version diff ("show changes since v N") ----------
+//
+// The reviewer can compare any two RETAINED versions (see the server's version
+// ring). Picking a from/to pair and hitting "Show changes" fetches an annotated
+// diff — add / remove / change markers, including removals — and swaps it into
+// the doc pane read-only; "Back to current" restores the live document. This is
+// separate from the dismissible per-round highlight above, which is untouched.
+
+function resetDiffView() {
+  state.diffing = false;
+  diffLegend.hidden = true;
+  diffErrorEl.hidden = true;
+  diffShowBtn.hidden = false;
+  diffCloseBtn.hidden = true;
+}
+
+function populateVersionSelects() {
+  const versions = state.versions || [];
+  // need at least two retained versions to have something to compare
+  if (versions.length < 2) {
+    diffBar.hidden = true;
+    return;
+  }
+  const keepFrom = diffFromEl.value;
+  const keepTo = diffToEl.value;
+  const asStr = versions.map(String);
+  const opts = versions.map((v) => `<option value="${v}">${v}</option>`).join('');
+  diffFromEl.innerHTML = opts;
+  diffToEl.innerHTML = opts;
+  // keep the reviewer's pick if still valid; else default previous → current
+  diffFromEl.value = asStr.includes(keepFrom) ? keepFrom : asStr[asStr.length - 2];
+  diffToEl.value = asStr.includes(keepTo) ? keepTo : asStr[asStr.length - 1];
+  if (!state.diffing) diffBar.hidden = false;
+  updateDiffShowState();
+}
+
+function updateDiffShowState() {
+  diffShowBtn.disabled = diffFromEl.value === diffToEl.value;
+}
+
+async function showDiff() {
+  const from = diffFromEl.value;
+  const to = diffToEl.value;
+  if (from === to) return;
+  diffErrorEl.hidden = true;
+  let data;
+  try {
+    const res = await fetch(
+      api(`/api/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
+    );
+    data = await res.json();
+    if (!res.ok) throw new Error((data && data.error) || 'diff unavailable');
+  } catch (err) {
+    // Surface the error in the diff bar (textContent, never innerHTML) and leave
+    // the live document intact — never strand the reviewer on an error string
+    // with no way back.
+    diffErrorEl.textContent = `Couldn't load that diff: ${err.message}`;
+    diffErrorEl.hidden = false;
+    return;
+  }
+  // entering a read-only diff: drop any in-progress comment affordances
+  dismissComposer();
+  fabEl.hidden = true;
+  changesBar.hidden = true; // the per-round highlight doesn't apply to a diff
+  state.diffing = true;
+  docEl.innerHTML = /data-diff/.test(data.html || '')
+    ? data.html
+    : '<p class="empty">No changes between these versions.</p>';
+  diffLegend.hidden = false;
+  diffShowBtn.hidden = true;
+  diffCloseBtn.hidden = false;
+}
+
+// Restore the live document. fetchState re-renders the current doc (via
+// renderDoc → resetDiffView) and re-anchors comment highlights.
+function exitDiff() {
+  fetchState();
+}
+
+diffShowBtn.addEventListener('click', showDiff);
+diffCloseBtn.addEventListener('click', exitDiff);
+diffFromEl.addEventListener('change', updateDiffShowState);
+diffToEl.addEventListener('change', updateDiffShowState);
 
 async function fetchState() {
   let s;
@@ -404,6 +503,7 @@ function selectionInDoc() {
 
 document.addEventListener('mouseup', (e) => {
   if (state.status !== 'reviewing') return;
+  if (state.diffing) return; // the diff view is read-only — no commenting on it
   if (composerEl.contains(e.target) || fabEl.contains(e.target)) return;
   // let the selection settle before reading it
   setTimeout(() => {

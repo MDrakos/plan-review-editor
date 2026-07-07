@@ -244,4 +244,116 @@ function renderDiff(markdown, prevBlocks) {
   return { html, blocks };
 }
 
-module.exports = { render, renderDiff, escapeHtml };
+// ---------- version diff (add / remove / change) ----------
+//
+// `markChanges` above is the per-round highlight: it marks added/changed blocks
+// only, using order-insensitive multiset matching, and never reports removals.
+// The version diff below is the removal-aware counterpart used by "show changes
+// since v N". It stays block-level (same granularity — no line/word diff) but
+// aligns the two block arrays with an LCS so removed blocks can be slotted back
+// in at the position they were dropped. `markChanges` is deliberately left
+// untouched so the existing dismissible per-round highlight keeps working
+// exactly as before.
+
+// The block's opening tag, including its attributes (e.g. `<p>`,
+// `<div class="table-wrap">`, `<div class="choice-block" data-choice-id="x" …>`).
+// Used as a "same kind of block" signature: a modified paragraph keeps `<p>`, a
+// re-edited choice block keeps the same opening (its id is in the attributes),
+// but a table (`<div class="table-wrap">`) and a choice (`<div class="choice-block"…>`)
+// differ — so cross-kind blocks are never mistaken for an edit of one another.
+function blockKind(block) {
+  const s = String(block);
+  const gt = s.indexOf('>');
+  return gt === -1 ? s : s.slice(0, gt + 1);
+}
+
+// A lone `remove` immediately followed by a lone `add` of the same kind is a
+// modified block, not an unrelated delete + insert — collapse the pair into a
+// single `change` op carrying both the old and new block. Kept deliberately
+// conservative: it only fires for an *isolated* remove→add pair (not one buried
+// in a run of removes or adds), so churn like "delete A, delete B, add C" stays
+// as clean removes + an add rather than a misleading B→C "change". Purely
+// presentational — both blocks are still shown either way.
+function coalesceChanges(ops) {
+  const out = [];
+  for (let k = 0; k < ops.length; k++) {
+    const cur = ops[k];
+    const nxt = ops[k + 1];
+    const isolated =
+      (k === 0 || ops[k - 1].type !== 'remove') &&
+      (k + 2 >= ops.length || ops[k + 2].type !== 'add');
+    if (
+      cur.type === 'remove' &&
+      nxt &&
+      nxt.type === 'add' &&
+      isolated &&
+      blockKind(cur.block) === blockKind(nxt.block)
+    ) {
+      out.push({ type: 'change', block: nxt.block, old: cur.block });
+      k++; // consume the paired add
+    } else {
+      out.push(cur);
+    }
+  }
+  return out;
+}
+
+// Align two arrays of rendered block strings with a longest-common-subsequence
+// walk (blocks compared by exact string equality) and emit an ordered op list:
+// `keep` (unchanged), `add` (only in `to`), `remove` (only in `from`), and,
+// after coalescing, `change` (a same-kind block modified in place). Removed
+// blocks land at the position they occupied, i.e. between surviving blocks.
+function diffBlocks(fromBlocks, toBlocks) {
+  const n = fromBlocks.length;
+  const m = toBlocks.length;
+  // lcs[i][j] = LCS length of fromBlocks[i:] and toBlocks[j:]
+  const lcs = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] =
+        fromBlocks[i] === toBlocks[j]
+          ? lcs[i + 1][j + 1] + 1
+          : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (fromBlocks[i] === toBlocks[j]) {
+      ops.push({ type: 'keep', block: toBlocks[j] });
+      i++;
+      j++;
+    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+      ops.push({ type: 'remove', block: fromBlocks[i] });
+      i++;
+    } else {
+      ops.push({ type: 'add', block: toBlocks[j] });
+      j++;
+    }
+  }
+  while (i < n) ops.push({ type: 'remove', block: fromBlocks[i++] });
+  while (j < m) ops.push({ type: 'add', block: toBlocks[j++] });
+  return coalesceChanges(ops);
+}
+
+// Render `toMarkdown` annotated against `fromMarkdown`: added/changed blocks and
+// (unlike the per-round highlight) removed blocks are all marked. Returns
+// { html }. Emits `data-diff="add|remove|change"` wrappers; a change wraps the
+// old (removed) block and the new (added) block together.
+function renderVersionDiff(fromMarkdown, toMarkdown) {
+  const fromBlocks = renderBlocks(fromMarkdown);
+  const toBlocks = renderBlocks(toMarkdown);
+  const html = diffBlocks(fromBlocks, toBlocks)
+    .map((op) => {
+      if (op.type === 'add') return `<div data-diff="add">${op.block}</div>`;
+      if (op.type === 'remove') return `<div data-diff="remove">${op.block}</div>`;
+      if (op.type === 'change')
+        return `<div data-diff="change"><div class="diff-removed">${op.old}</div><div class="diff-added">${op.block}</div></div>`;
+      return op.block; // keep
+    })
+    .join('\n');
+  return { html };
+}
+
+module.exports = { render, renderDiff, renderVersionDiff, escapeHtml };
