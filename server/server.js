@@ -242,13 +242,12 @@ function restoreSessions() {
       if (data.review && typeof data.review === 'object') s.review = data.review;
       // A restored review must have the exact shapes the merge/render code assumes.
       if (!Array.isArray(s.review.comments)) s.review.comments = [];
-      if (!s.review.choices || typeof s.review.choices !== 'object' || Array.isArray(s.review.choices))
-        s.review.choices = {};
+      if (!isReviewerMap(s.review.choices)) s.review.choices = {};
       // Migrate a pre-004 flat choice value ({choiceId: option|options[]}) to the
       // per-reviewer shape { reviewerId: option }, keeping the legacy answer under
       // 'anonymous' rather than dropping it on the first post-upgrade merge/render.
       for (const [cid, v] of Object.entries(s.review.choices)) {
-        if (!v || typeof v !== 'object' || Array.isArray(v)) s.review.choices[cid] = { anonymous: v };
+        if (!isReviewerMap(v)) s.review.choices[cid] = { anonymous: v };
       }
       if (Array.isArray(data.submissions)) s.submissions = data.submissions;
       if (Array.isArray(data.chat)) s.chat = data.chat;
@@ -407,21 +406,29 @@ function authorId(c) {
 }
 
 // The reviewer id a POST claims for itself (top-level, per the design). Determines
-// which comments in the body this POST is authoritative over.
+// which comments in the body this POST is authoritative over. Derived from authorOf
+// so the two can't drift: same trimming, and a blank/whitespace id folds to the
+// synthetic 'anonymous' merge key rather than a stray "   " key.
 function posterIdOf(body) {
-  return (body && typeof body.reviewerId === 'string' && body.reviewerId) || 'anonymous';
+  return (authorOf(body) || {}).id || 'anonymous';
 }
 
 // The author object for a chat/reply from a POST body: {id, name?} when the body
 // carries a reviewerId, else null (an un-identified message stays un-attributed and
-// renders exactly as it did before this feature). NOTE: posterIdOf/authorId fold a
-// missing id to the string 'anonymous' (a real merge key); authorOf returns null
-// (omit the field) — the two differ deliberately by call site (merge vs. display).
+// renders exactly as it did before this feature). posterIdOf builds on this but folds
+// a missing id to the string 'anonymous' (a real merge key); authorOf omits the field.
 function authorOf(body) {
   const id = body && typeof body.reviewerId === 'string' ? body.reviewerId.trim() : '';
   if (!id) return null;
   const name = body && typeof body.reviewerName === 'string' ? body.reviewerName.trim() : '';
   return name ? { id, name } : { id };
+}
+
+// A value shaped like a per-reviewer choice map ({ reviewerId: option }): a plain,
+// non-null, non-array object. Used to guard the nested-choices shape against a legacy
+// scalar/array (pre-004 file) at every read site so none can drift.
+function isReviewerMap(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
 }
 
 // Reconcile ONE browser comment against the server's copy: union replies, and keep
@@ -501,7 +508,7 @@ function mergeComments(prev, incoming, posterId) {
 function mergeChoices(prev, incoming, posterId) {
   const out = {};
   for (const [choiceId, byReviewer] of Object.entries(prev || {})) {
-    if (!byReviewer || typeof byReviewer !== 'object' || Array.isArray(byReviewer)) continue;
+    if (!isReviewerMap(byReviewer)) continue;
     const kept = {};
     for (const [rid, opt] of Object.entries(byReviewer)) if (rid !== posterId) kept[rid] = opt;
     if (Object.keys(kept).length) out[choiceId] = kept;

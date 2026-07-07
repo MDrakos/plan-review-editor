@@ -178,6 +178,7 @@ async function driveLivenessWiring() {
   const getEl = (id) => (els[id] || (els[id] = makeEl()));
 
   let es = null;
+  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
   const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [] };
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
@@ -190,7 +191,7 @@ async function driveLivenessWiring() {
     },
     location: { pathname: '/s/abc' },
     EventSource: function () { es = { onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
-    fetch: () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }),
+    fetch: () => { fetchCalls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }); },
     setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
     clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
     setTimeout: () => 0, clearTimeout: () => {},
@@ -264,6 +265,19 @@ async function driveLivenessWiring() {
   check('liveness: a fresh rework round restarts the timer at 0:00', timers.length === 1 && elapsed.textContent === '0:00');
   fire('status', { status: 'ended' }); // terminal state must look exactly as before: no timer, no cue
   check('liveness: a terminal state stops the timer and clears the cue', timers.length === 0 && elapsed.textContent === '' && stale.hidden === true);
+
+  // review-delta echo suppression (functional, not just regex): a PEER's delta must
+  // trigger a re-sync (fetchState → GET /api/state); this tab's OWN echo must not (or a
+  // flipped ===/!== would spin every tab in a self-refetch loop / never show peers).
+  const myId = vm.runInContext('reviewer.id', ctx);
+  const beforePeer = fetchCalls;
+  fire('review', { author: { id: 'some-peer-id' } });
+  await flush();
+  check('review: a peer delta triggers a re-sync (fetchState)', fetchCalls > beforePeer, `Δ=${fetchCalls - beforePeer}`);
+  const beforeOwn = fetchCalls;
+  fire('review', { author: { id: myId } });
+  await flush();
+  check('review: this tab ignores its own echo (no re-sync)', fetchCalls === beforeOwn, `Δ=${fetchCalls - beforeOwn}`);
 }
 
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
@@ -653,6 +667,52 @@ async function persistenceChecks() {
     await stop(legacyId);
     await sleep(300);
     fs.rmSync(stateDir6b, { recursive: true, force: true });
+
+    // ----- P6c: a submitted bundle is de-aliased from live session objects -----
+    // mergeComments returns peer comments by reference; reviewBundle structuredClones the
+    // result so a later /agent/reply (which mutates s.review.comments[i].replies in place)
+    // can't reach back and rewrite an already-recorded submission. Prove the clone holds.
+    console.log('persistence: a recorded submission is not mutated by a later /agent/reply (structuredClone guard)');
+    await killP();
+    const stateDir6c = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-alias-'));
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6c });
+    check('persist: server up (de-alias case)', await waitHealth(true));
+    const al = await p('/agent/start', { path: doc });
+    const alId = al.data.id;
+    // A owns comment k (lives in s.review.comments). B submits — so k is a PEER comment in
+    // B's bundle, which mergeComments preserves BY REFERENCE; only reviewBundle's
+    // structuredClone de-aliases it. Then /agent/reply mutates the live k in place. A
+    // progress ping forces a persist flush (/agent/reply itself doesn't persist).
+    await p(`/api/review-state?session=${alId}`, {
+      reviewerId: 'A',
+      comments: [{ id: 'k', quote: 'Alpha paragraph.', text: 'watch me', author: { id: 'A' } }],
+      choices: {},
+    });
+    await p(`/api/submit?session=${alId}`, { reviewerId: 'B', comments: [], choices: {}, note: 'snapshot' });
+    await p(`/agent/reply?session=${alId}`, { commentId: 'k', text: 'a late agent reply' });
+    await p(`/agent/progress?session=${alId}`, { text: 'flush' }); // progress persists; reply alone does not
+    // Read the file from THIS phase's state dir (the shared waitFile targets `stateDir`).
+    let aliasFile = null;
+    for (let i = 0; i < 80; i++) {
+      try {
+        aliasFile = JSON.parse(fs.readFileSync(path.join(stateDir6c, `${alId}.json`), 'utf8'));
+      } catch {
+        aliasFile = null;
+      }
+      const rep = aliasFile && (aliasFile.review.comments[0] || {}).replies;
+      if (rep && rep.length === 1 && (aliasFile.submissions || []).length === 1) break;
+      await sleep(50);
+    }
+    const submittedK = aliasFile.submissions[0].comments.find((c) => c.id === 'k');
+    check(
+      'a later /agent/reply mutates the live review but NOT the already-recorded submission',
+      submittedK && !submittedK.replies && // the structuredClone snapshot never gained the reply
+        aliasFile.review.comments[0].replies[0].text === 'a late agent reply', // the live copy did
+      JSON.stringify({ submitted: submittedK, live: aliasFile.review.comments[0].replies })
+    );
+    await stop(alId);
+    await sleep(300);
+    fs.rmSync(stateDir6c, { recursive: true, force: true });
 
     // ----- P7: a restored-but-stale session is reaped by the sweep + file deleted -----
     console.log('persistence: a restored-but-stale session is reaped by the abandon sweep');
@@ -1229,6 +1289,16 @@ async function main() {
     'an un-identified chat message omits author (renders exactly as today)',
     anon && anon.role === 'reviewer' && !anon.author,
     JSON.stringify(anon)
+  );
+  // A whitespace-only reviewerId must normalize to 'anonymous' consistently across chat
+  // (author omitted) AND review-state (the ownership/choice key), not a stray '   ' key.
+  await browser(`/api/review-state?session=${ch.id}`, { reviewerId: '   ', comments: [], choices: { pick: 'A1' } });
+  const wsState = await browser(`/api/state?session=${ch.id}`);
+  check(
+    'a whitespace-only reviewerId folds to the anonymous choice key (not a stray "   " key)',
+    wsState.data.review.choices.pick && wsState.data.review.choices.pick.anonymous === 'A1' &&
+      wsState.data.review.choices.pick['   '] === undefined,
+    JSON.stringify(wsState.data.review.choices)
   );
   await cli('stop', '--session', ch.id);
 
