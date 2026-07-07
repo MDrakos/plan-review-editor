@@ -23,6 +23,7 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
 const { render, renderDiff, renderVersionDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
+const { quoteAnchors } = require(path.join(__dirname, '..', 'server', 'anchor'));
 const env = {
   ...process.env,
   PLANREVIEW_PORT: String(PORT),
@@ -95,6 +96,40 @@ async function openEventStream(id) {
     }
   })();
   return { close: () => controller.abort() };
+}
+
+// like openEventStream, but parses SSE frames into {event, data} so a test can
+// assert what the server broadcast (used for the comment-reply path).
+async function captureEvents(id) {
+  const controller = new AbortController();
+  const res = await fetch(`${BASE}/events?session=${id}`, { signal: controller.signal });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const events = [];
+  let buf = '';
+  (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const ev = {};
+          for (const line of frame.split('\n')) {
+            if (line.startsWith('event: ')) ev.event = line.slice(7);
+            else if (line.startsWith('data: ')) ev.data = line.slice(6);
+          }
+          if (ev.event) events.push(ev);
+        }
+      }
+    } catch {
+      /* aborted */
+    }
+  })();
+  return { events, close: () => controller.abort() };
 }
 
 let failures = 0;
@@ -381,6 +416,26 @@ async function main() {
     runDiff
   );
 
+  console.log('anchor mirror: the server-side quote test matches what the browser would highlight');
+  check('FX-1 a quote present in the rendered doc anchors', quoteAnchors('keep Redis', render('We will keep Redis.')) === true);
+  check('FX-2 a quote absent from the doc does not anchor', quoteAnchors('gone text', render('We will keep Redis.')) === false);
+  check('FX-3 an escaped ampersand round-trips', quoteAnchors('a & b', render('x a & b y')) === true);
+  // source '&lt;tag&gt;' → html '&amp;lt;tag&amp;gt;' → browser DOM text '&lt;tag&gt;'. Decoding &amp; LAST
+  // must reproduce that literal; decoding it first would over-decode to '<tag>' and diverge.
+  check(
+    'FM-5 decode order (& last) handles a double-escaped entity like the browser',
+    quoteAnchors('&lt;tag&gt;', render('shows &lt;tag&gt; literally')) === true,
+    render('shows &lt;tag&gt; literally')
+  );
+  check('FM-6 an empty quote never anchors', quoteAnchors('', render('anything at all')) === false);
+  const prevForDiff = renderDiff('# T\n\nOld body here.\n', null).blocks;
+  const changedHtml = renderDiff('# T\n\nWe will keep Redis.\n', prevForDiff).html;
+  check(
+    'FM-17 a quote inside a changed (data-changed) block still anchors',
+    /data-changed/.test(changedHtml) && quoteAnchors('keep Redis', changedHtml) === true,
+    changedHtml
+  );
+
   console.log('isolation: two agents, two sessions, zero cross-contamination');
   const a = await cli('start', docA, '--no-open');
   const b = await cli('start', docB, '--no-open');
@@ -510,18 +565,21 @@ async function main() {
   );
   await cli('stop', '--session', pr.id);
 
-  console.log('answered questions persist across cycles (not re-asked); comments still reset');
+  console.log('answered questions persist across cycles; an un-anchored comment is archived, never dropped');
   const q = await cli('start', docA, '--no-open');
   await browser(`/api/review-state?session=${q.id}`, {
-    comments: [{ id: 'x', quote: 'q', text: 't' }],
+    comments: [{ id: 'x', quote: 'q', text: 't' }], // quote 'q' does not occur in docA — will not re-anchor
     choices: { pick: 'A1' },
   });
   fs.appendFileSync(docA, '\n(another revision)\n');
   await cli('present', docA, '--session', q.id);
   const cyc = await browser(`/api/state?session=${q.id}`);
   check(
-    'a re-present keeps prior answers but clears comments',
-    cyc.data.review.choices.pick === 'A1' && cyc.data.review.comments.length === 0,
+    'a re-present keeps prior answers and archives an un-anchored comment (never drops it)',
+    cyc.data.review.choices.pick === 'A1' &&
+      cyc.data.review.comments.length === 1 &&
+      cyc.data.review.comments[0].id === 'x' &&
+      cyc.data.review.comments[0].archived === true,
     JSON.stringify(cyc.data.review)
   );
   await cli('stop', '--session', q.id);
@@ -646,6 +704,143 @@ async function main() {
   await cli('stop', '--session', isoA.id);
   await cli('stop', '--session', isoB.id);
 
+  console.log('comment threads: the agent replies to a specific comment; threads persist and ride along');
+  const docT = path.join(dir, 'planreview-e2e-threads.md');
+  fs.writeFileSync(docT, '# Threaded Plan\n\nWe will keep Redis for the limiter.\n');
+  const th = await cli('start', docT, '--no-open');
+  await browser(`/api/review-state?session=${th.id}`, {
+    comments: [{ id: 'k', quote: 'keep Redis', text: 'why not in-process?' }],
+    choices: {},
+  });
+
+  // (criterion 1) the agent replies to that specific comment via the CLI
+  const replyRes = await cli('reply', 'k', 'Because the limiter is process-local.', '--session', th.id);
+  check(
+    'agent reply returns the stored reply, targeted at the comment id',
+    replyRes.ok === true && replyRes.commentId === 'k' && replyRes.reply && replyRes.reply.role === 'agent' &&
+      replyRes.reply.text === 'Because the limiter is process-local.',
+    JSON.stringify(replyRes)
+  );
+  const afterReply = await browser(`/api/state?session=${th.id}`);
+  const kc = (afterReply.data.review.comments || []).find((c) => c.id === 'k');
+  check(
+    'the reply is threaded under the comment, not in the global chat',
+    !!kc && Array.isArray(kc.replies) && kc.replies.length === 1 &&
+      kc.replies[0].role === 'agent' && afterReply.data.chat.length === 0,
+    JSON.stringify(afterReply.data.review)
+  );
+  check(
+    'posting an agent reply does not change the session status (state machine unchanged)',
+    afterReply.data.status === 'reviewing',
+    afterReply.data.status
+  );
+  const noPhantom = await cli('wait', '--session', th.id, '--timeout', '1');
+  check('an agent reply enqueues no agent event (no phantom submit/chat)', noPhantom.type === 'timeout', JSON.stringify(noPhantom));
+
+  // (SSE) a comment-reply event is broadcast to the session's tabs, and survives embedded newlines (TM-2)
+  const cap = await captureEvents(th.id);
+  await sleep(120);
+  await browser(`/agent/reply?session=${th.id}`, { commentId: 'k', text: 'Line one.\n\nLine two.' });
+  await sleep(200);
+  cap.close();
+  const crFrame = cap.events.find((e) => e.event === 'comment-reply');
+  const crData = crFrame ? JSON.parse(crFrame.data) : null;
+  check(
+    'comment-reply SSE frame carries {commentId, reply} and survives embedded newlines',
+    !!crData && crData.commentId === 'k' && crData.reply.role === 'agent' &&
+      crData.reply.text === 'Line one.\n\nLine two.',
+    JSON.stringify(cap.events.map((e) => e.event))
+  );
+
+  // validation: empty text, missing id, and unknown/cross-session ids are rejected (no silent no-op)
+  const emptyReply = await browser(`/agent/reply?session=${th.id}`, { commentId: 'k', text: '   ' });
+  check('an empty reply is rejected (400)', emptyReply.status === 400, `status=${emptyReply.status}`);
+  const missingId = await browser(`/agent/reply?session=${th.id}`, { text: 'no id' });
+  check('a reply with no comment id is rejected (400)', missingId.status === 400, `status=${missingId.status}`);
+  const noComment = await browser(`/agent/reply?session=${th.id}`, { commentId: 'nope', text: 'hi' });
+  check('a reply to an unknown comment id 404s', noComment.status === 404, `status=${noComment.status}`);
+  const badCli = await cliRaw('reply', 'nope', 'hi', '--session', th.id);
+  check('the CLI surfaces an unknown-comment reply error', badCli.code === 2 && /no such comment/i.test(badCli.stderr), badCli.stderr);
+
+  // (isolation, TM-3) a reply cannot target a comment id living in another session
+  const other = await cli('start', docB, '--no-open');
+  const cross = await browser(`/agent/reply?session=${other.id}`, { commentId: 'k', text: 'leak?' });
+  check('a reply cannot reach a comment id from another session (404)', cross.status === 404, `status=${cross.status}`);
+  await cli('stop', '--session', other.id);
+
+  // (FMEA merge race) a stale browser sync that raced the SSE must not drop the agent's replies
+  await browser(`/api/review-state?session=${th.id}`, {
+    comments: [{ id: 'k', quote: 'keep Redis', text: 'why not in-process?' }], // no replies — the racing sync
+    choices: {},
+  });
+  const merged = await browser(`/api/state?session=${th.id}`);
+  const km = merged.data.review.comments.find((c) => c.id === 'k');
+  check(
+    'review-state merge preserves agent replies against a stale browser sync',
+    km && km.replies && km.replies.length === 2 && km.replies.every((r) => r.role === 'agent'),
+    JSON.stringify(km)
+  );
+
+  // (criterion 2) a reviewer follow-up reply rides along in the next submit bundle
+  await browser(`/api/review-state?session=${th.id}`, {
+    comments: [{
+      id: 'k', quote: 'keep Redis', text: 'why not in-process?',
+      replies: [{ role: 'reviewer', text: 'ok, but document the tradeoff', ts: Date.now() }],
+    }],
+    choices: {},
+  });
+  const preSubmit = await browser(`/api/state?session=${th.id}`);
+  const waitSub = cli('wait', '--session', th.id, '--timeout', '5');
+  await sleep(200);
+  await browser(`/api/submit?session=${th.id}`, { comments: preSubmit.data.review.comments, choices: {}, note: '' });
+  const threadSubEv = await waitSub;
+  const subK = (threadSubEv.comments || []).find((c) => c.id === 'k');
+  check(
+    'the submit bundle carries the full thread, including the reviewer follow-up',
+    threadSubEv.type === 'submit' && subK && Array.isArray(subK.replies) &&
+      subK.replies.some((r) => r.role === 'reviewer' && /document the tradeoff/.test(r.text)) &&
+      subK.replies.some((r) => r.role === 'agent'),
+    JSON.stringify(subK)
+  );
+
+  // (criterion 4 — survival) an anchored comment survives a re-present with its thread intact
+  fs.appendFileSync(docT, '\nStill: we will keep Redis for now.\n'); // 'keep Redis' still present
+  await cli('present', docT, '--session', th.id);
+  const survived = await browser(`/api/state?session=${th.id}`);
+  const ks = survived.data.review.comments.find((c) => c.id === 'k');
+  check(
+    'an anchored comment survives a re-present, thread intact and not archived',
+    survived.data.status === 'reviewing' && ks && !ks.archived &&
+      Array.isArray(ks.replies) && ks.replies.length === 3,
+    JSON.stringify(ks)
+  );
+
+  // (criterion 4 — the un-anchored case is explicit) present a doc where the quote is gone
+  const docT2 = path.join(dir, 'planreview-e2e-threads-v2.md');
+  fs.writeFileSync(docT2, '# Threaded Plan v2\n\nWe switched to an in-process limiter.\n');
+  await cli('present', docT2, '--session', th.id);
+  const archived = await browser(`/api/state?session=${th.id}`);
+  const ka = archived.data.review.comments.find((c) => c.id === 'k');
+  check(
+    'a comment whose quote vanished is archived but keeps its thread (never dropped)',
+    ka && ka.archived === true && Array.isArray(ka.replies) && ka.replies.length === 3,
+    JSON.stringify(ka)
+  );
+  // FM-8: the agent can still reply to an archived comment; stored, archival preserved
+  const archReply = await cli('reply', 'k', 'For the record, we changed course.', '--session', th.id);
+  check('the agent can reply to an archived comment', archReply.ok === true && archReply.reply.role === 'agent', JSON.stringify(archReply));
+  // FM-2: a well-behaved browser sync echoes the archived comment back — it must not be dropped
+  const beforeEcho = await browser(`/api/state?session=${th.id}`);
+  await browser(`/api/review-state?session=${th.id}`, { comments: beforeEcho.data.review.comments, choices: {} });
+  const afterEcho = await browser(`/api/state?session=${th.id}`);
+  const ke = afterEcho.data.review.comments.find((c) => c.id === 'k');
+  check(
+    'a sync that echoes an archived comment preserves it and its thread (no silent drop, no reply dup)',
+    ke && ke.archived === true && Array.isArray(ke.replies) && ke.replies.length === 4,
+    JSON.stringify(ke)
+  );
+  await cli('stop', '--session', th.id);
+
   console.log('no time limit: wait blocks past poll windows until the reviewer acts');
   const np = await cli('start', docA, '--no-open');
   // no --timeout: must keep polling (past several 400ms server windows), not give up
@@ -750,6 +945,11 @@ async function main() {
       /id="working-stale"/.test(appPage.body)
   );
   check('client offers a version-diff selector', /\/api\/diff/.test(app.body) && /diffing/.test(app.body));
+  check(
+    'client threads agent replies under comments (comment-reply listener + thread render)',
+    /'comment-reply'/.test(app.body) && /renderThread/.test(app.body) && /comment-thread/.test(app.body)
+  );
+  check('client surfaces un-anchored comments in a distinct archived section', /archived/.test(app.body));
 
   await cli('stop', '--session', guard.id);
 
