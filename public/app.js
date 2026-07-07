@@ -225,7 +225,10 @@ function renderProgress() {
 // /agent/progress event. Absence of progress is a soft staleness proxy (a
 // healthy agent can rework silently), so the hint stays deliberately low-key.
 
-const STALE_THRESHOLD_MS = window.Liveness.STALE_THRESHOLD_MS;
+// The staleness threshold lives in window.Liveness (single source of truth);
+// stalenessHint() defaults to it, so this file never redeclares the constant —
+// two classic <script>s share one global scope, and a duplicate top-level
+// `const` would throw "already declared" and take the whole page down.
 let workingTimer = null; // interval ticking the elapsed/staleness display
 let workingStartTs = 0; // when this rework spell began (client clock)
 let lastSignalTs = 0; // last sign of life: entering 'working' or a progress event
@@ -259,7 +262,7 @@ function tickWorking() {
 }
 
 function updateStaleHint() {
-  const hint = window.Liveness.stalenessHint(Date.now() - lastSignalTs, STALE_THRESHOLD_MS);
+  const hint = window.Liveness.stalenessHint(Date.now() - lastSignalTs);
   workingStaleEl.textContent = hint || '';
   workingStaleEl.hidden = !hint;
 }

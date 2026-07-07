@@ -16,6 +16,7 @@ const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const vm = require('vm');
 
 const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -156,6 +157,28 @@ async function main() {
       liveness.stalenessHint(0) === null,
     `default=${liveness.STALE_THRESHOLD_MS}`
   );
+
+  // liveness.js and app.js load as two plain <script>s that share ONE global
+  // lexical scope. A top-level `const`/`let` declared in both throws "already
+  // been declared" at parse time and takes the whole page down. Reproduce the
+  // shared scope with vm: load both into one context and fail only on that
+  // collision (app.js's own runtime ReferenceErrors for document/location are
+  // expected here and ignored — we're only guarding the redeclaration class).
+  {
+    const ctx = vm.createContext({ window: {} });
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'liveness.js'), 'utf8'), ctx, {
+      filename: 'liveness.js',
+    });
+    let collision = null;
+    try {
+      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8'), ctx, {
+        filename: 'app.js',
+      });
+    } catch (e) {
+      if (/already been declared/.test(e.message)) collision = e.message;
+    }
+    check('liveness.js + app.js share no colliding top-level binding', collision === null, collision);
+  }
 
   console.log('safeguard: a server running stale code is restarted on start');
   // occupy the port with a server that reports old code + no active sessions
