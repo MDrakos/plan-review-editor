@@ -1167,6 +1167,26 @@ async function main() {
   );
   await cli('stop', '--session', cfid);
 
+  console.log('multi-reviewer: reviewer chat carries an author, role stays "reviewer"');
+  const ch = await cli('start', docA, '--no-open');
+  await browser(`/api/chat?session=${ch.id}`, { text: 'who owns this?', reviewerId: 'A', reviewerName: 'Ada' });
+  await browser(`/api/chat?session=${ch.id}`, { text: 'anon here' }); // no identity
+  const chState = await browser(`/api/state?session=${ch.id}`);
+  const attributed = chState.data.chat.find((m) => m.text === 'who owns this?');
+  const anon = chState.data.chat.find((m) => m.text === 'anon here');
+  check(
+    'a reviewer chat message carries author {id,name} and keeps role "reviewer"',
+    attributed && attributed.role === 'reviewer' && attributed.author &&
+      attributed.author.id === 'A' && attributed.author.name === 'Ada',
+    JSON.stringify(attributed)
+  );
+  check(
+    'an un-identified chat message omits author (renders exactly as today)',
+    anon && anon.role === 'reviewer' && !anon.author,
+    JSON.stringify(anon)
+  );
+  await cli('stop', '--session', ch.id);
+
   console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
   const dv = path.join(dir, 'planreview-e2e-versions.md');
   fs.writeFileSync(dv, '# Ring\n\nKeep one.\n\nDrop me.\n\nKeep two.\n');

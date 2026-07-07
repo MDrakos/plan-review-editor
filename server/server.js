@@ -396,6 +396,18 @@ function posterIdOf(body) {
   return (body && typeof body.reviewerId === 'string' && body.reviewerId) || 'anonymous';
 }
 
+// The author object for a chat/reply from a POST body: {id, name?} when the body
+// carries a reviewerId, else null (an un-identified message stays un-attributed and
+// renders exactly as it did before this feature). NOTE: posterIdOf/authorId fold a
+// missing id to the string 'anonymous' (a real merge key); authorOf returns null
+// (omit the field) — the two differ deliberately by call site (merge vs. display).
+function authorOf(body) {
+  const id = body && typeof body.reviewerId === 'string' ? body.reviewerId.trim() : '';
+  if (!id) return null;
+  const name = body && typeof body.reviewerName === 'string' ? body.reviewerName.trim() : '';
+  return name ? { id, name } : { id };
+}
+
 // Reconcile ONE browser comment against the server's copy: union replies, and keep
 // the server-authoritative archived flag (the browser can clobber neither). This is
 // the per-comment step lifted out of the old mergeComments so mergeComments can
@@ -684,11 +696,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const text = String(body.text || '').trim();
       if (!text) return sendJson(res, 400, { error: 'empty message' });
-      const msg = { role: 'reviewer', text, ts: Date.now() };
+      const author = authorOf(body);
+      const msg = { role: 'reviewer', text, ts: Date.now(), ...(author ? { author } : {}) };
       s.chat.push(msg);
       touch(s);
       broadcast(s, 'chat', msg);
-      enqueueAgentEvent(s, { type: 'chat', text, ts: msg.ts });
+      enqueueAgentEvent(s, { type: 'chat', text, ts: msg.ts, ...(author ? { author } : {}) });
       persist(s);
       return sendJson(res, 200, { ok: true });
     }
