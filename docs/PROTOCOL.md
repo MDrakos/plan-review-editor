@@ -162,6 +162,33 @@ reworked doc, the reviewer isn't re-asked — their previous pick shows collapse
 with a "Change" option — and `submit`/`approve` still report the current value
 for every answered `id`.
 
+## Version history and diffs
+
+Every `present` (and the initial `start`) bumps the document version and records
+that version's **markdown source** in a per-session ring. The ring is bounded:
+only the **last 10 versions** are retained (override with
+`PLANREVIEW_VERSION_HISTORY`); older versions age out and can no longer be
+diffed. Only the source is kept — diffs are re-rendered on demand, so memory
+stays capped no matter how many rework rounds run.
+
+The reviewer's browser can compare any two retained versions via
+`GET /api/diff?session=<id>&from=<v>&to=<v>`. Both bounds are optional: `to`
+defaults to the current version and `from` to the version just before it. The
+response is an annotated single-document render with block-level markers —
+`data-diff="add"`, `data-diff="remove"` (the deletions the per-round highlight
+never showed), and `data-diff="change"` (a same-kind block modified in place,
+carrying both old and new). A version outside the ring (aged out, unknown, or
+malformed) returns `400` with the list of versions still comparable:
+
+```json
+{ "from": 1, "to": 3, "html": "…", "versions": [1, 2, 3], "current": 3 }
+```
+
+The retained version numbers are also surfaced on `/api/state` as
+`doc.versions`, so the browser can populate its version picker. This is entirely
+separate from the dismissible per-round changed-block highlight (`present` still
+marks blocks changed since the previous version); the two never interfere.
+
 ## HTTP reference
 
 Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
@@ -175,7 +202,8 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/admin/shutdown` | CLI | shut the whole server down (used to restart a server running stale code) |
 | GET | `/api/sessions` | both | list open sessions (`planreview list`) |
 | POST | `/agent/start` | CLI | create a session and present a document; returns its `id` |
-| GET | `/api/state?session=` | browser | full session state (doc, review, chat, progress, status, clients) |
+| GET | `/api/state?session=` | browser | full session state (doc — incl. `doc.versions` — review, chat, progress, status, clients) |
+| GET | `/api/diff?session=` | browser | annotated diff between two retained versions (`&from=`/`&to=` optional); 400s outside the retention ring |
 | GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `progress`, `status` |
 | POST | `/api/review-state?session=` | browser | persist in-progress comments/choices |
 | POST | `/api/chat?session=` | browser | reviewer chat message (queued for the agent) |
