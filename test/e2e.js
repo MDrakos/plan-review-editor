@@ -948,7 +948,7 @@ async function main() {
     'submit delivers comments, note, and a free-text Other choice value',
     subEv.type === 'submit' &&
       subEv.comments.length === 1 &&
-      subEv.choices.pick === 'a custom third option' &&
+      subEv.choices.pick.anonymous === 'a custom third option' &&
       subEv.note === 'almost there'
   );
   const stWorking = await cli('status', '--session', id);
@@ -1186,6 +1186,121 @@ async function main() {
     JSON.stringify(anon)
   );
   await cli('stop', '--session', ch.id);
+
+  console.log('multi-reviewer: submit consolidates every reviewer\'s comments + per-reviewer choices');
+  const sb = await cli('start', docA, '--no-open');
+  const sbid = sb.id;
+  // A syncs a comment + a choice via review-state (the shared draft).
+  await browser(`/api/review-state?session=${sbid}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'a1', quote: 'Body of plan A.', text: 'A says', author: { id: 'A', name: 'Ada' } }],
+    choices: { pick: 'A1' },
+  });
+  // B submits, posting its OWN body (b1 + B's flat pick). The bundle must carry BOTH
+  // reviewers' comments and BOTH reviewers' choice entries.
+  const sbWait = cli('wait', '--session', sbid, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${sbid}`, {
+    reviewerId: 'B',
+    comments: [{ id: 'b1', quote: 'Body of plan A.', text: 'B says', author: { id: 'B', name: 'Ben' } }],
+    choices: { pick: 'A2' },
+    note: 'consolidated',
+  });
+  const sbEv = await sbWait;
+  check(
+    'the submit bundle consolidates all reviewers\' comments (no loss), each attributed',
+    sbEv.type === 'submit' &&
+      sbEv.comments.length === 2 &&
+      sbEv.comments.some((c) => c.id === 'a1' && c.author.id === 'A') &&
+      sbEv.comments.some((c) => c.id === 'b1' && c.author.id === 'B'),
+    JSON.stringify(sbEv.comments)
+  );
+  check(
+    'the submit bundle carries the full per-reviewer choice map (the conflict survives)',
+    sbEv.choices.pick && sbEv.choices.pick.A === 'A1' && sbEv.choices.pick.B === 'A2' && sbEv.note === 'consolidated',
+    JSON.stringify(sbEv.choices)
+  );
+  // The submit must NOT have mutated the shared draft (mirror today's behavior): the
+  // draft still holds only A's synced comment, not B's submitted one.
+  const sbDraft = await browser(`/api/state?session=${sbid}`);
+  check(
+    'submit leaves the shared review draft unmutated (no side effect on s.review)',
+    sbDraft.data.review.comments.length === 1 && sbDraft.data.review.comments[0].id === 'a1',
+    JSON.stringify(sbDraft.data.review.comments)
+  );
+  await cli('stop', '--session', sbid);
+
+  console.log('single-reviewer regression: one reviewer behaves exactly as before (union = just theirs)');
+  const one = await cli('start', docA, '--no-open');
+  const oneWait = cli('wait', '--session', one.id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${one.id}`, {
+    reviewerId: 'solo',
+    comments: [{ id: 's1', quote: 'Body of plan A.', text: 'solo note', author: { id: 'solo' } }],
+    choices: { pick: 'A1' },
+    note: 'ship',
+  });
+  const oneEv = await oneWait;
+  check(
+    'single reviewer: bundle is exactly their one comment + a one-entry choice map',
+    oneEv.type === 'submit' &&
+      oneEv.comments.length === 1 &&
+      oneEv.comments[0].id === 's1' &&
+      Object.keys(oneEv.choices.pick).length === 1 &&
+      oneEv.choices.pick.solo === 'A1',
+    JSON.stringify({ comments: oneEv.comments, choices: oneEv.choices })
+  );
+  await cli('stop', '--session', one.id);
+
+  console.log('multi-reviewer: two concurrent submits do not double-enqueue (check-then-act race)');
+  const rc = await cli('start', docA, '--no-open');
+  // Fire two submits at the same instant. The status guard must let exactly one
+  // through; the loser gets a 409 (FM-3) — never two 'submit' events for one round.
+  const [r1, r2] = await Promise.all([
+    browser(`/api/submit?session=${rc.id}`, { reviewerId: 'A', comments: [], choices: {}, note: 'one' }),
+    browser(`/api/submit?session=${rc.id}`, { reviewerId: 'B', comments: [], choices: {}, note: 'two' }),
+  ]);
+  check(
+    'FM-3: exactly one concurrent submit wins; the other 409s',
+    r1.ok !== r2.ok && (r1.status === 409 || r2.status === 409),
+    JSON.stringify({ r1: r1.status, r2: r2.status })
+  );
+  const rcEv1 = await cli('wait', '--session', rc.id, '--timeout', '3');
+  const rcEv2 = await cli('wait', '--session', rc.id, '--timeout', '1');
+  check(
+    'FM-3: only ONE submit event was enqueued (agent reworks once)',
+    rcEv1.type === 'submit' && rcEv2.type === 'timeout',
+    JSON.stringify({ e1: rcEv1.type, e2: rcEv2.type })
+  );
+  await cli('stop', '--session', rc.id);
+
+  console.log('multi-reviewer: a re-present carries every reviewer\'s comments + choices forward');
+  const carryDoc = path.join(dir, 'planreview-e2e-carry.md');
+  fs.writeFileSync(carryDoc, '# Carry\n\nShared body line.\n');
+  const cy = await cli('start', carryDoc, '--no-open');
+  await browser(`/api/review-state?session=${cy.id}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'ca', quote: 'Shared body line.', text: 'A note', author: { id: 'A', name: 'Ada' } }],
+    choices: { pick: 'A1' },
+  });
+  await browser(`/api/review-state?session=${cy.id}`, {
+    reviewerId: 'B',
+    comments: [{ id: 'cb', quote: 'Shared body line.', text: 'B note', author: { id: 'B', name: 'Ben' } }],
+    choices: { pick: 'A2' },
+  });
+  fs.writeFileSync(carryDoc, '# Carry\n\nShared body line.\n\nA reworked addition.\n');
+  await cli('present', carryDoc, '--session', cy.id);
+  const carried = await browser(`/api/state?session=${cy.id}`);
+  check(
+    'DSM-3: loadDoc carries BOTH reviewers\' attributed comments + per-reviewer choices across a re-present',
+    carried.data.review.comments.length === 2 &&
+      carried.data.review.comments.some((c) => c.id === 'ca' && c.author.id === 'A' && !c.archived) &&
+      carried.data.review.comments.some((c) => c.id === 'cb' && c.author.id === 'B' && !c.archived) &&
+      carried.data.review.choices.pick.A === 'A1' &&
+      carried.data.review.choices.pick.B === 'A2',
+    JSON.stringify(carried.data.review)
+  );
+  await cli('stop', '--session', cy.id);
 
   console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
   const dv = path.join(dir, 'planreview-e2e-versions.md');

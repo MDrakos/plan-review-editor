@@ -351,10 +351,26 @@ function loadDoc(s, docPath) {
 // Normalize a review bundle from a browser POST (shared by submit + approve).
 // Comments carry their full reply threads through verbatim, so the agent sees
 // the whole conversation (the reviewer's follow-ups included).
-function reviewBundle(s, body) {
+function reviewBundle(s, body, posterId) {
+  // CONSOLIDATE: the submitter's posted body is merged over the shared review (every
+  // peer's already-synced comments + the full per-reviewer choice map) into a throwaway
+  // snapshot — so nothing is lost — WITHOUT mutating s.review (the draft's carry-forward
+  // behavior is unchanged). structuredClone de-aliases the snapshot from live session
+  // objects (e.g. a later /agent/reply mutating a comment's replies must not rewrite a
+  // historical submission).
+  const comments = mergeComments(
+    s.review.comments,
+    Array.isArray(body.comments) ? body.comments : [],
+    posterId
+  );
+  const choices = mergeChoices(
+    s.review.choices,
+    body.choices && typeof body.choices === 'object' ? body.choices : {},
+    posterId
+  );
   return {
-    comments: Array.isArray(body.comments) ? body.comments : [],
-    choices: body.choices && typeof body.choices === 'object' ? body.choices : {},
+    comments: structuredClone(comments),
+    choices: structuredClone(choices),
     note: typeof body.note === 'string' ? body.note : '',
     docVersion: s.doc.version,
     submittedAt: new Date().toISOString(),
@@ -745,9 +761,13 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && (pathname === '/api/submit' || pathname === '/api/approve')) {
       const approve = pathname === '/api/approve';
       const verb = approve ? 'approve' : 'submit';
+      const body = await readBody(req);
+      // Guard AFTER the await, then mutate synchronously — closes the check-then-act
+      // race where two reviewers submitting at once both pass a pre-await guard and
+      // each enqueue a round (FM-3). reviewBundle below performs no I/O / await.
       if (s.status !== 'reviewing')
         return sendJson(res, 409, { error: `cannot ${verb} while ${s.status}` });
-      const bundle = reviewBundle(s, await readBody(req));
+      const bundle = reviewBundle(s, body, posterIdOf(body));
       s.submissions.push(bundle);
       s.progress = []; // start the rework round with a clean progress log
       s.status = approve ? 'done' : 'working';
