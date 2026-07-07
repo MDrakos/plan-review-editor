@@ -1142,8 +1142,14 @@ async function main() {
     cfState2.data.review.choices.pick.A === 'A2' && cfState2.data.review.choices.pick.B === 'A2',
     JSON.stringify(cfState2.data.review.choices)
   );
-  await sleep(150);
-  const reviewDeltas = cfEvents.events.filter((e) => e.event === 'review');
+  // Poll until all three deltas have arrived over SSE, rather than a fixed sleep —
+  // the third frame's arrival time is what makes lastDelta correct (avoids flakiness).
+  let reviewDeltas = [];
+  for (let i = 0; i < 40; i++) {
+    reviewDeltas = cfEvents.events.filter((e) => e.event === 'review');
+    if (reviewDeltas.length >= 3) break;
+    await sleep(25);
+  }
   check(
     'review-state broadcasts a "review" SSE delta carrying merged comments + choices + author',
     reviewDeltas.length >= 3 &&
@@ -1710,6 +1716,10 @@ async function main() {
   check(
     'stylesheet styles the attribution UI (author badge + choice conflict)',
     /author-badge/.test(css.body) && /choice-disagree/.test(css.body)
+  );
+  check(
+    'client live-syncs on a peer "review" delta and ignores its own echo by author id',
+    /addEventListener\('review'/.test(app.body) && /author\.id === reviewer\.id/.test(app.body)
   );
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));

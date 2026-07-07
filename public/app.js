@@ -488,6 +488,14 @@ function connectEvents() {
     (c.replies || (c.replies = [])).push(reply);
     renderComments();
   });
+  // another reviewer changed the shared review (a comment or a choice pick): re-sync
+  // from the server so their comment/pick renders live. Ignore our own echo — we are
+  // the source of truth for our in-flight edits and must not clobber the composer.
+  es.addEventListener('review', (e) => {
+    const d = JSON.parse(e.data);
+    if (d.author && d.author.id === reviewer.id) return; // our own change — already local
+    fetchState();
+  });
   // a reworked document arrived: reload it in place and start a fresh review
   es.addEventListener('doc', () => {
     dismissComposer();
