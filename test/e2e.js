@@ -16,11 +16,13 @@ const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const vm = require('vm');
 
 const PORT = 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
 const { render, renderDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
+const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
 const env = {
   ...process.env,
   PLANREVIEW_PORT: String(PORT),
@@ -104,6 +106,115 @@ function check(name, cond, detail) {
   }
 }
 
+// Exercise the working-overlay liveness WIRING the way a browser would: load the
+// real public/liveness.js + public/app.js as two classic scripts into one shared
+// scope (a hand-rolled, zero-dep DOM shim with a controllable clock), then drive
+// the SSE lifecycle and assert what the reviewer sees. This is the only layer
+// that catches (a) two <script>s colliding on a top-level `const`, which takes
+// the whole page down, and (b) timer start/stop/reset bugs that structural regex
+// checks can't see. No DOM library — just the handful of globals app.js touches.
+async function driveLivenessWiring() {
+  let now = 1_000_000; // fake clock (ms); app.js reads Date.now()
+  let timers = [];
+  let tid = 1;
+  const pump = () => { for (const t of [...timers]) t.fn(); }; // one tick of every live interval
+
+  const makeEl = () => ({
+    textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
+    className: '', dataset: {}, style: {},
+    classList: { add() {}, remove() {}, contains: () => false },
+    addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
+    append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
+    scrollIntoView() {}, focus() {}, setSelectionRange() {},
+    querySelector: () => makeEl(), querySelectorAll: () => [], contains: () => false,
+    getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), cloneRange() { return this; },
+  });
+  const els = {};
+  const getEl = (id) => (els[id] || (els[id] = makeEl()));
+
+  let es = null;
+  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [] };
+  const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
+
+  const ctx = vm.createContext({
+    window: {},
+    document: {
+      getElementById: getEl, querySelector: () => makeEl(), querySelectorAll: () => [], addEventListener() {},
+      createElement: () => makeEl(), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({}) }),
+      createTreeWalker: () => ({ nextNode: () => null, currentNode: null }), title: '',
+    },
+    location: { pathname: '/s/abc' },
+    EventSource: function () { es = { onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
+    fetch: () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }),
+    setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
+    clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
+    setTimeout: () => 0, clearTimeout: () => {},
+    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true,
+    JSON, Math, Number, String, Array, Object, Boolean, console, Promise, encodeURIComponent, decodeURIComponent,
+  });
+
+  const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
+  load('liveness.js');
+  let loadErr = null;
+  try {
+    load('app.js'); // two classic scripts, one scope: a colliding top-level `const` throws here
+  } catch (e) {
+    loadErr = e;
+  }
+  // A redeclaration SyntaxError means the page is dead in the browser. Runtime
+  // ReferenceErrors (document/location under our shim) are fine — instantiation
+  // succeeded, which is all this assertion is about.
+  const collided = loadErr && /already been declared/.test(loadErr.message);
+  check('liveness.js + app.js load together with no top-level identifier collision', !collided, loadErr && loadErr.message);
+  if (collided) return; // nothing more to drive — the page wouldn't have loaded
+
+  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  await flush(); // boot fetchState() settles → status 'reviewing'
+  const overlay = getEl('working-overlay'), elapsed = getEl('working-elapsed'), stale = getEl('working-stale');
+
+  check('liveness: idle/reviewing shows no timer and a hidden overlay', overlay.hidden === true && timers.length === 0);
+
+  fire('status', { status: 'working' });
+  check('liveness: entering working shows the overlay and paints 0:00 at once', overlay.hidden === false && elapsed.textContent === '0:00', elapsed.textContent);
+  check('liveness: exactly one timer runs while working', timers.length === 1, String(timers.length));
+
+  fire('status', { status: 'working' }); // a re-broadcast must not start a second timer
+  check('liveness: a re-broadcast working event does not duplicate the timer', timers.length === 1, String(timers.length));
+
+  now += 5000; pump();
+  check('liveness: elapsed ticks up (0:05) and stays fresh below threshold', elapsed.textContent === '0:05' && stale.hidden === true, elapsed.textContent);
+
+  now += 40000; pump(); // 45s since the last sign of life
+  check(
+    'liveness: past the threshold a muted advisory appears with the count',
+    elapsed.textContent === '0:45' && stale.hidden === false && stale.textContent === 'No updates for 45 s — the agent may be stuck.',
+    JSON.stringify({ e: elapsed.textContent, h: stale.hidden, t: stale.textContent })
+  );
+
+  fire('progress', { text: 'Rewriting section', ts: 0 }); // a sign of life clears the advisory, timer keeps running
+  check('liveness: a progress event clears the advisory and keeps the timer', stale.hidden === true && stale.textContent === '' && timers.length === 1, JSON.stringify({ h: stale.hidden, n: timers.length }));
+
+  now += 3000; pump();
+  check('liveness: elapsed keeps climbing (0:48) but stays fresh after progress', elapsed.textContent === '0:48' && stale.hidden === true, elapsed.textContent);
+
+  now += 41000; pump();
+  check('liveness: silence past the threshold again re-shows the advisory', stale.hidden === false, JSON.stringify(stale.textContent));
+  fakeState.status = 'reviewing';
+  fire('doc', {}); // reworked doc arrives → present → reviewing
+  await flush();
+  check(
+    'liveness: the reworked document loading stops the timer and clears the cue',
+    timers.length === 0 && elapsed.textContent === '' && stale.hidden === true && stale.textContent === '',
+    JSON.stringify({ n: timers.length, e: elapsed.textContent, h: stale.hidden })
+  );
+
+  fakeState.status = 'working';
+  fire('status', { status: 'working' });
+  check('liveness: a fresh rework round restarts the timer at 0:00', timers.length === 1 && elapsed.textContent === '0:00');
+  fire('status', { status: 'ended' }); // terminal state must look exactly as before: no timer, no cue
+  check('liveness: a terminal state stops the timer and clears the cue', timers.length === 0 && elapsed.textContent === '' && stale.hidden === true);
+}
+
 async function main() {
   const dir = os.tmpdir();
   const docA = path.join(dir, 'planreview-e2e-a.md');
@@ -113,6 +224,51 @@ async function main() {
     '# Plan A\n\nBody of plan A.\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n'
   );
   fs.writeFileSync(docB, '# Plan B\n\nBody of plan B — a totally separate document.\n');
+
+  console.log('working-overlay liveness: elapsed formatting + staleness threshold (pure)');
+  // FM-6: minutes:seconds with a zero-padded seconds field
+  check(
+    'formatElapsed renders m:ss with zero-padded seconds',
+    liveness.formatElapsed(0) === '0:00' &&
+      liveness.formatElapsed(5000) === '0:05' &&
+      liveness.formatElapsed(48000) === '0:48' &&
+      liveness.formatElapsed(65000) === '1:05' &&
+      liveness.formatElapsed(600000) === '10:00',
+    `${liveness.formatElapsed(65000)} / ${liveness.formatElapsed(5000)}`
+  );
+  // FM-5: a negative/skewed delta clamps to zero rather than showing "-1:59"/NaN
+  check(
+    'formatElapsed clamps a negative delta to 0:00',
+    liveness.formatElapsed(-5000) === '0:00' && liveness.formatElapsed(NaN) === '0:00',
+    `${liveness.formatElapsed(-5000)} / ${liveness.formatElapsed(NaN)}`
+  );
+  // FM-4: while fresh (below threshold) there is no hint at all
+  check(
+    'stalenessHint stays null below the threshold',
+    liveness.stalenessHint(0, 40000) === null &&
+      liveness.stalenessHint(39999, 40000) === null,
+    JSON.stringify(liveness.stalenessHint(39999, 40000))
+  );
+  // FM-7: at/after the threshold a muted, non-alarming advisory appears with the count
+  check(
+    'stalenessHint fires at the threshold with an advisory message',
+    liveness.stalenessHint(40000, 40000) === 'No updates for 40 s — the agent may be stuck.' &&
+      liveness.stalenessHint(62000, 40000) === 'No updates for 62 s — the agent may be stuck.',
+    JSON.stringify(liveness.stalenessHint(40000, 40000))
+  );
+  // the threshold has a sane default so callers can omit it
+  check(
+    'stalenessHint exposes a default threshold (~30-45s)',
+    typeof liveness.STALE_THRESHOLD_MS === 'number' &&
+      liveness.STALE_THRESHOLD_MS >= 30000 &&
+      liveness.STALE_THRESHOLD_MS <= 45000 &&
+      liveness.stalenessHint(liveness.STALE_THRESHOLD_MS) !== null &&
+      liveness.stalenessHint(0) === null,
+    `default=${liveness.STALE_THRESHOLD_MS}`
+  );
+
+  console.log('working-overlay liveness: overlay timer/hint lifecycle (real app.js in a DOM shim)');
+  await driveLivenessWiring();
 
   console.log('safeguard: a server running stale code is restarted on start');
   // occupy the port with a server that reports old code + no active sessions
@@ -403,6 +559,27 @@ async function main() {
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
   check('client highlights + can dismiss doc changes', /data-changed/.test(app.body) && /changes-dismissed/.test(app.body));
   check('client collapses already-answered questions', /choice-summary/.test(app.body) && /'answered'/.test(app.body));
+  // working-overlay liveness: the pure helpers are served as their own asset,
+  // the client wires a timer that starts on 'working' and resets on progress,
+  // and the overlay markup + script are present on the review page.
+  const liv = await text('/liveness.js');
+  check(
+    'liveness helpers are served and expose the pure API',
+    liv.ok && /formatElapsed/.test(liv.body) && /stalenessHint/.test(liv.body) && /window\.Liveness/.test(liv.body)
+  );
+  check(
+    'client runs an elapsed timer while working and resets it on progress',
+    /startWorkingTimer/.test(app.body) &&
+      /stopWorkingTimer/.test(app.body) &&
+      /noteAgentSignal/.test(app.body) &&
+      /window\.Liveness/.test(app.body)
+  );
+  check(
+    'review page loads the liveness asset and carries the overlay timer/hint markup',
+    /src="\/liveness\.js"/.test(appPage.body) &&
+      /id="working-elapsed"/.test(appPage.body) &&
+      /id="working-stale"/.test(appPage.body)
+  );
 
   await cli('stop', '--session', guard.id);
 

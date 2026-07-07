@@ -279,6 +279,9 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname === '/app.js') {
       return sendFile(res, 'app.js', 'text/javascript; charset=utf-8');
     }
+    if (method === 'GET' && pathname === '/liveness.js') {
+      return sendFile(res, 'liveness.js', 'text/javascript; charset=utf-8');
+    }
     if (method === 'GET' && pathname === '/style.css') {
       return sendFile(res, 'style.css', 'text/css; charset=utf-8');
     }

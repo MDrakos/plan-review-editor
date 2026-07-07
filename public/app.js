@@ -30,6 +30,8 @@ const chatListEl = document.getElementById('chat-list');
 const chatFormEl = document.getElementById('chat-form');
 const chatInputEl = document.getElementById('chat-input');
 const progressListEl = document.getElementById('progress-list');
+const workingElapsedEl = document.getElementById('working-elapsed');
+const workingStaleEl = document.getElementById('working-stale');
 const changesBar = document.getElementById('changes-bar');
 const changesLabel = document.getElementById('changes-label');
 const changesDismiss = document.getElementById('changes-dismiss');
@@ -59,12 +61,22 @@ const STATUS_LABEL = {
 };
 
 function setStatus(status) {
+  const wasWorking = state.status === 'working';
   state.status = status;
   statusPill.dataset.status = status;
   statusPill.textContent = STATUS_LABEL[status] || status;
   document.getElementById('working-overlay').hidden = status !== 'working';
   document.getElementById('done-overlay').hidden = status !== 'done';
   document.getElementById('ended-overlay').hidden = status !== 'ended';
+  // Liveness cue: run the elapsed timer only while working. Start it on the
+  // transition into 'working' (not on every setStatus, so re-broadcasts don't
+  // reset it); stop and clear it the moment we leave — which is also how the
+  // hint clears when the reworked document loads (present → 'reviewing').
+  if (status === 'working') {
+    if (!wasWorking) startWorkingTimer();
+  } else if (wasWorking) {
+    stopWorkingTimer();
+  }
   // 'done' and 'ended' are both terminal — the review is over either way
   const terminal = status === 'done' || status === 'ended';
   document.getElementById('end-btn').disabled = terminal;
@@ -202,6 +214,59 @@ function renderProgress() {
   progressListEl.scrollTop = progressListEl.scrollHeight;
 }
 
+// ---------- working-overlay liveness ----------
+//
+// While the agent reworks, the spinner alone can't tell "still thinking" from
+// "silently died." So the overlay shows a live elapsed timer, and if no sign of
+// life arrives for a while it adds a muted, advisory "may be stuck" line. Purely
+// a client-side cue driven off SSE events — it never touches session status.
+//
+// Signs of life we can observe client-side: entering 'working', and each
+// /agent/progress event. Absence of progress is a soft staleness proxy (a
+// healthy agent can rework silently), so the hint stays deliberately low-key.
+
+// The staleness threshold lives in window.Liveness (single source of truth);
+// stalenessHint() defaults to it, so this file never redeclares the constant —
+// two classic <script>s share one global scope, and a duplicate top-level
+// `const` would throw "already declared" and take the whole page down.
+let workingTimer = null; // interval ticking the elapsed/staleness display
+let workingStartTs = 0; // when this rework spell began (client clock)
+let lastSignalTs = 0; // last sign of life: entering 'working' or a progress event
+
+function startWorkingTimer() {
+  workingStartTs = Date.now();
+  lastSignalTs = workingStartTs;
+  tickWorking(); // paint 0:00 immediately rather than leaving a blank first second
+  clearInterval(workingTimer);
+  workingTimer = setInterval(tickWorking, 1000);
+}
+
+function stopWorkingTimer() {
+  clearInterval(workingTimer);
+  workingTimer = null;
+  workingElapsedEl.textContent = '';
+  workingStaleEl.hidden = true;
+  workingStaleEl.textContent = '';
+}
+
+// A progress event means the agent is alive: reset the staleness clock and drop
+// any advisory that was showing.
+function noteAgentSignal() {
+  lastSignalTs = Date.now();
+  updateStaleHint();
+}
+
+function tickWorking() {
+  workingElapsedEl.textContent = window.Liveness.formatElapsed(Date.now() - workingStartTs);
+  updateStaleHint();
+}
+
+function updateStaleHint() {
+  const hint = window.Liveness.stalenessHint(Date.now() - lastSignalTs);
+  workingStaleEl.textContent = hint || '';
+  workingStaleEl.hidden = !hint;
+}
+
 chatFormEl.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = chatInputEl.value.trim();
@@ -241,6 +306,7 @@ function connectEvents() {
   es.addEventListener('progress', (e) => {
     state.progress.push(JSON.parse(e.data));
     renderProgress();
+    noteAgentSignal(); // a progress event = the agent is alive; reset staleness
   });
   es.addEventListener('status', (e) => {
     const status = JSON.parse(e.data).status;
