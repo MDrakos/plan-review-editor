@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { renderDiff, renderVersionDiff } = require('./markdown');
+const { quoteAnchors } = require('./anchor');
 const { codeVersion } = require('./version');
 
 const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
@@ -168,16 +169,27 @@ function loadDoc(s, docPath) {
   // version diff), capped at the last VERSION_HISTORY — older versions age out.
   s.doc.history.push({ version: s.doc.version, title: s.doc.title, markdown });
   if (s.doc.history.length > VERSION_HISTORY) s.doc.history.shift();
-  // Fresh comments each round, but keep prior answers — the reviewer shouldn't
-  // have to re-answer a question they already decided (the UI shows those
-  // collapsed with a "Change" option).
-  s.review = { comments: [], choices: s.review.choices || {} };
+  // Carry comments (and their reply threads) forward across rounds so a
+  // conversation can outlive one cycle: a comment survives as long as its quote
+  // still anchors in the reworked document; otherwise it's flagged `archived`
+  // and shown collapsed by the client — never silently dropped. Answers are kept
+  // for the same reason (the UI collapses answered questions with a "Change").
+  // Archived comments accumulate unbounded across many rounds; that's an
+  // accepted trade-off for a localhost single-user tool that idle-shuts-down —
+  // capping the list could drop a thread the reviewer still cares about.
+  const carried = (s.review.comments || []).map((c) => ({
+    ...c,
+    archived: !quoteAnchors(c.quote, html),
+  }));
+  s.review = { comments: carried, choices: s.review.choices || {} };
   s.progress = []; // the reworked doc is here — the previous round's steps are done
   s.status = 'reviewing';
   touch(s);
 }
 
 // Normalize a review bundle from a browser POST (shared by submit + approve).
+// Comments carry their full reply threads through verbatim, so the agent sees
+// the whole conversation (the reviewer's follow-ups included).
 function reviewBundle(s, body) {
   return {
     comments: Array.isArray(body.comments) ? body.comments : [],
@@ -186,6 +198,45 @@ function reviewBundle(s, body) {
     docVersion: s.doc.version,
     submittedAt: new Date().toISOString(),
   };
+}
+
+// Union two reply lists, de-duplicating identical replies (same role+ts+text)
+// and ordering by timestamp. This is what makes an agent reply appended
+// server-side (POST /agent/reply) survive a browser sync that raced the SSE
+// broadcast, and keeps a reply the browser already has from doubling. Array
+// .sort is stable, so equal-ts replies keep insertion order (prev before new).
+function mergeReplies(prev, incoming) {
+  const seen = new Set();
+  const out = [];
+  for (const r of [...(prev || []), ...(incoming || [])]) {
+    if (!r || typeof r.text !== 'string') continue;
+    const key = `${r.role}|${r.ts}|${r.text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  out.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  return out;
+}
+
+// Reconcile the browser's comment array with the server's. The browser owns the
+// set of comments (create / edit / delete / order); the server owns each
+// comment's `archived` flag (set at re-present) and any agent replies appended
+// out-of-band. So take the incoming comments, but union each one's replies with
+// the server's copy and re-apply the server's archived flag — the browser can't
+// clobber either.
+function mergeComments(prev, incoming) {
+  const prevById = new Map((prev || []).map((c) => [c.id, c]));
+  return (incoming || []).map((c) => {
+    const p = prevById.get(c.id);
+    const replies = mergeReplies(p && p.replies, c.replies);
+    const merged = { ...c };
+    if (replies.length) merged.replies = replies;
+    else delete merged.replies;
+    delete merged.archived; // server-authoritative — never trust the browser's copy
+    if (p && p.archived) merged.archived = true;
+    return merged;
+  });
 }
 
 function readBody(req) {
@@ -417,7 +468,10 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && pathname === '/api/review-state') {
       const body = await readBody(req);
-      if (Array.isArray(body.comments)) s.review.comments = body.comments;
+      // Merge, don't overwrite: preserves agent replies (and the server's
+      // archived flag) against a browser sync that raced the comment-reply SSE.
+      if (Array.isArray(body.comments))
+        s.review.comments = mergeComments(s.review.comments, body.comments);
       if (body.choices && typeof body.choices === 'object') s.review.choices = body.choices;
       touch(s);
       return sendJson(res, 200, { ok: true });
@@ -488,6 +542,25 @@ const server = http.createServer(async (req, res) => {
       touch(s);
       broadcast(s, 'chat', msg);
       return sendJson(res, 200, { ok: true });
+    }
+
+    // Reply to a SPECIFIC inline comment (vs /agent/say, which is the global,
+    // un-anchored chat). Appends to that comment's thread and broadcasts a
+    // comment-reply so open tabs render it in place. Does NOT touch status or
+    // enqueue an agent event — a reply is not a review round.
+    if (method === 'POST' && pathname === '/agent/reply') {
+      const body = await readBody(req);
+      const commentId = typeof body.commentId === 'string' ? body.commentId : '';
+      const text = String(body.text || '').trim();
+      if (!commentId) return sendJson(res, 400, { error: 'missing "commentId"' });
+      if (!text) return sendJson(res, 400, { error: 'empty message' });
+      const comment = s.review.comments.find((c) => c.id === commentId);
+      if (!comment) return sendJson(res, 404, { error: `no such comment: ${commentId}` });
+      const reply = { role: 'agent', text, ts: Date.now() };
+      (comment.replies || (comment.replies = [])).push(reply);
+      touch(s);
+      broadcast(s, 'comment-reply', { commentId, reply });
+      return sendJson(res, 200, { ok: true, commentId, reply });
     }
 
     // A rework step, shown live in the "reworking" overlay so the reviewer sees

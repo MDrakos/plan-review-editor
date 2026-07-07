@@ -87,6 +87,8 @@ async function ensureServer() {
 }
 
 const say = (id, text) => request('POST', `/agent/say?session=${id}`, { text });
+const reply = (id, commentId, text) =>
+  request('POST', `/agent/reply?session=${id}`, { commentId, text });
 const progress = (id, text) => request('POST', `/agent/progress?session=${id}`, { text });
 const present = (id, file) => request('POST', `/agent/present?session=${id}`, { path: file });
 
@@ -161,6 +163,16 @@ async function main() {
     if (ev.type === 'submit') {
       const n = ev.comments.length;
       console.log(`  📝 review submitted — ${n} comment(s)${ev.note ? `, note: "${ev.note}"` : ''}`);
+      // answer the first inline comment in place, so it threads under that
+      // comment instead of landing in the global chat
+      if (n) {
+        await reply(
+          id,
+          ev.comments[0].id,
+          "Good point — here's my thinking on this specific line; reply back if it still needs work."
+        );
+        console.log('  🤖 replied inline under your first comment');
+      }
       if (!reworked) {
         const steps = [
           `Reading your ${n} comment${n === 1 ? '' : 's'} and choices`,

@@ -50,7 +50,7 @@ const state = {
   version: 0,
   versions: [], // retained version numbers available to diff between
   diffing: false, // true while the doc pane shows a version diff (read-only)
-  comments: [], // {id, quote, text, ts}
+  comments: [], // {id, quote, text, ts, replies?: [{role:'agent'|'reviewer', text, ts}], archived?}
   choices: {}, // choiceId -> value (string) or values (string[]) when multi
   progress: [], // {text, ts} rework steps, shown in the working overlay
 };
@@ -232,7 +232,9 @@ async function fetchState() {
   setStatus(s.status);
   state.comments = (s.review && s.review.comments) || [];
   state.choices = (s.review && s.review.choices) || {};
-  for (const c of state.comments) anchorByQuote(c.quote, c.id);
+  // Only active comments anchor into the document; archived ones (their quote is
+  // gone from the reworked plan) have nothing to highlight and live collapsed.
+  for (const c of state.comments) if (!c.archived) anchorByQuote(c.quote, c.id);
   renderComments();
   bindChoices();
   hideTyping();
@@ -395,6 +397,14 @@ function connectEvents() {
       hideTyping(); // the reply is here
       appendChatMessage(msg);
     }
+  });
+  // the agent replied to a specific comment: thread it under that comment
+  es.addEventListener('comment-reply', (e) => {
+    const { commentId, reply } = JSON.parse(e.data);
+    const c = state.comments.find((x) => x.id === commentId);
+    if (!c) return; // not in this tab's set yet — a later fetchState will hydrate it
+    (c.replies || (c.replies = [])).push(reply);
+    renderComments();
   });
   // a reworked document arrived: reload it in place and start a fresh review
   es.addEventListener('doc', () => {
@@ -567,7 +577,9 @@ function saveComment() {
 // ---------- comment panel ----------
 
 function renderComments() {
-  commentCountEl.textContent = String(state.comments.length);
+  const active = state.comments.filter((c) => !c.archived);
+  const archived = state.comments.filter((c) => c.archived);
+  commentCountEl.textContent = String(active.length);
   updateSubmitButton();
   commentListEl.innerHTML = '';
   if (!state.comments.length) {
@@ -575,9 +587,67 @@ function renderComments() {
       '<p class="hint">Select text in the document to leave a comment.</p>';
     return;
   }
-  for (const c of state.comments) {
+  for (const c of active) {
     commentListEl.appendChild(c.id === editingId ? editCard(c) : viewCard(c));
   }
+  // A comment whose quote no longer appears in the reworked plan can't anchor.
+  // Rather than drop it (and its thread), keep it in a collapsed, distinct
+  // section so the conversation is never silently lost.
+  if (archived.length) commentListEl.appendChild(archivedSection(archived));
+}
+
+function archivedSection(archived) {
+  const details = document.createElement('details');
+  details.className = 'archived-comments';
+  const summary = document.createElement('summary');
+  const n = archived.length;
+  summary.textContent = `${n} unanchored comment${n === 1 ? '' : 's'} — text no longer in the plan`;
+  details.appendChild(summary);
+  for (const c of archived) details.appendChild(viewCard(c));
+  return details;
+}
+
+// The reply thread under a comment: each reply as a small bubble, plus (for an
+// active comment while reviewing) a box for the reviewer to follow up. Reply
+// text is untrusted (agent- or reviewer-authored) so it is set via textContent,
+// never innerHTML.
+function renderThread(c) {
+  const thread = document.createElement('div');
+  thread.className = 'comment-thread';
+  for (const r of c.replies || []) {
+    const reply = document.createElement('div');
+    reply.className = `reply ${r.role === 'agent' ? 'agent' : 'reviewer'}`;
+    reply.textContent = r.text;
+    thread.appendChild(reply);
+  }
+  if (!c.archived && state.status === 'reviewing') thread.appendChild(replyForm(c));
+  return thread;
+}
+
+function replyForm(c) {
+  const form = document.createElement('form');
+  form.className = 'reply-form';
+  // a click inside the thread must not scroll/flash the document highlight
+  form.addEventListener('click', (e) => e.stopPropagation());
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'Reply…';
+  input.autocomplete = 'off';
+  const btn = document.createElement('button');
+  btn.type = 'submit';
+  btn.className = 'btn';
+  btn.textContent = 'Reply';
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    (c.replies || (c.replies = [])).push({ role: 'reviewer', text, ts: Date.now() });
+    renderComments(); // the follow-up rides along in the next submit bundle
+    syncReview();
+  });
+  form.append(input, btn);
+  return form;
 }
 
 function iconBtn(glyph, title, onClick) {
@@ -591,17 +661,23 @@ function iconBtn(glyph, title, onClick) {
 
 function viewCard(c) {
   const card = document.createElement('div');
-  card.className = 'comment-card';
+  card.className = c.archived ? 'comment-card archived' : 'comment-card';
   card.dataset.cid = c.id;
 
   const actions = document.createElement('div');
   actions.className = 'card-actions';
+  // An archived comment's text is gone from the plan, so there's nothing to edit
+  // in place — only offer to dismiss it.
+  if (!c.archived) {
+    actions.append(
+      iconBtn('✎', 'Edit comment', (e) => {
+        e.stopPropagation();
+        beginEdit(c.id);
+      })
+    );
+  }
   actions.append(
-    iconBtn('✎', 'Edit comment', (e) => {
-      e.stopPropagation();
-      beginEdit(c.id);
-    }),
-    iconBtn('✕', 'Delete comment', (e) => {
+    iconBtn('✕', c.archived ? 'Dismiss comment' : 'Delete comment', (e) => {
       e.stopPropagation();
       deleteComment(c.id);
     })
@@ -612,8 +688,10 @@ function viewCard(c) {
   const body = document.createElement('p');
   body.textContent = c.text;
 
-  card.append(actions, quote, body);
-  card.addEventListener('click', () => flashHighlight(c.id));
+  card.append(actions, quote, body, renderThread(c));
+  card.addEventListener('click', () => {
+    if (!c.archived) flashHighlight(c.id);
+  });
   return card;
 }
 
@@ -717,13 +795,12 @@ const submitMenu = document.getElementById('submit-menu');
 let submitMode = 'submit'; // 'submit' | 'approve'
 
 function updateSubmitButton() {
+  const n = state.comments.filter((c) => !c.archived).length;
   if (submitMode === 'approve') {
     submitBtn.textContent = 'Approve & finish';
     submitBtn.classList.add('approve');
   } else {
-    submitBtn.textContent = state.comments.length
-      ? `Submit review (${state.comments.length})`
-      : 'Submit review';
+    submitBtn.textContent = n ? `Submit review (${n})` : 'Submit review';
     submitBtn.classList.remove('approve');
   }
   const locked = state.status !== 'reviewing';
