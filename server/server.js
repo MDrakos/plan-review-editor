@@ -240,6 +240,16 @@ function restoreSessions() {
       if (data.doc && typeof data.doc === 'object') s.doc = { ...s.doc, ...data.doc };
       if (!Array.isArray(s.doc.history)) s.doc.history = []; // handlers assume it exists
       if (data.review && typeof data.review === 'object') s.review = data.review;
+      // A restored review must have the exact shapes the merge/render code assumes.
+      if (!Array.isArray(s.review.comments)) s.review.comments = [];
+      if (!s.review.choices || typeof s.review.choices !== 'object' || Array.isArray(s.review.choices))
+        s.review.choices = {};
+      // Migrate a pre-004 flat choice value ({choiceId: option|options[]}) to the
+      // per-reviewer shape { reviewerId: option }, keeping the legacy answer under
+      // 'anonymous' rather than dropping it on the first post-upgrade merge/render.
+      for (const [cid, v] of Object.entries(s.review.choices)) {
+        if (!v || typeof v !== 'object' || Array.isArray(v)) s.review.choices[cid] = { anonymous: v };
+      }
       if (Array.isArray(data.submissions)) s.submissions = data.submissions;
       if (Array.isArray(data.chat)) s.chat = data.chat;
       if (Array.isArray(data.progress)) s.progress = data.progress;
@@ -438,6 +448,27 @@ function mergeComments(prev, incoming, posterId) {
     if (authorId(c) !== posterId || emitted.has(c.id)) continue;
     out.push(reconcileComment(prevById.get(c.id), c)); // brand-new poster comment
     emitted.add(c.id);
+  }
+  return out;
+}
+
+// Per-reviewer choice map: { choiceId: { reviewerId: option } }. A POST carries the
+// poster's OWN flat picks ({ choiceId: option }); we replace ONLY the poster's entries
+// (a divergent pick by reviewer B never overwrites reviewer A's) and drop any of the
+// poster's prior picks it no longer sends (a deselect). A prev entry that isn't a plain
+// object — e.g. a pre-004 persisted `{choiceId: <string>}` — is dropped rather than
+// mangled: a one-time loss only for a session already open across the upgrade.
+function mergeChoices(prev, incoming, posterId) {
+  const out = {};
+  for (const [choiceId, byReviewer] of Object.entries(prev || {})) {
+    if (!byReviewer || typeof byReviewer !== 'object' || Array.isArray(byReviewer)) continue;
+    const kept = {};
+    for (const [rid, opt] of Object.entries(byReviewer)) if (rid !== posterId) kept[rid] = opt;
+    if (Object.keys(kept).length) out[choiceId] = kept;
+  }
+  for (const [choiceId, opt] of Object.entries(incoming || {})) {
+    if (opt === undefined || opt === null || opt === '' || (Array.isArray(opt) && opt.length === 0)) continue;
+    (out[choiceId] || (out[choiceId] = {}))[posterId] = opt;
   }
   return out;
 }
@@ -678,8 +709,17 @@ const server = http.createServer(async (req, res) => {
       // server's archived flag) against a browser sync that only owns its author's set.
       if (Array.isArray(body.comments))
         s.review.comments = mergeComments(s.review.comments, body.comments, posterId);
-      if (body.choices && typeof body.choices === 'object') s.review.choices = body.choices;
+      // Per-reviewer choices: record only the poster's picks; peers' picks survive.
+      if (body.choices && typeof body.choices === 'object')
+        s.review.choices = mergeChoices(s.review.choices, body.choices, posterId);
       touch(s);
+      // Live sync: fan the merged review out so other tabs render peers' comments and
+      // choice picks. The poster ignores its own echo by author.id (see the client).
+      broadcast(s, 'review', {
+        comments: s.review.comments,
+        choices: s.review.choices,
+        author: { id: posterId },
+      });
       persist(s);
       return sendJson(res, 200, { ok: true });
     }

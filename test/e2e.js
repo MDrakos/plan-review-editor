@@ -377,7 +377,7 @@ async function persistenceChecks() {
       before &&
         before.submissions.length === 1 &&
         before.doc.version === 1 &&
-        before.review.choices.pick === 'Two' &&
+        before.review.choices.pick.anonymous === 'Two' &&
         Array.isArray(before.doc.blocks),
       JSON.stringify(before && { v: before.doc && before.doc.version, sub: before.submissions.length })
     );
@@ -394,7 +394,7 @@ async function persistenceChecks() {
         restored.data.doc.title === 'Persisted Plan' &&
         restored.data.doc.version === 1 &&
         restored.data.review.comments.length === 1 &&
-        restored.data.review.choices.pick === 'Two' &&
+        restored.data.review.choices.pick.anonymous === 'Two' &&
         restored.data.chat.some((c) => c.role === 'reviewer' && c.text === 'a question during review') &&
         restored.data.chat.some((c) => c.role === 'agent' && c.text === 'an agent reply') &&
         restored.data.progress.length === 1,
@@ -611,6 +611,42 @@ async function persistenceChecks() {
     await stop(preId);
     await sleep(300);
     fs.rmSync(stateDir6, { recursive: true, force: true });
+
+    // ----- P6b: a pre-004 legacy choice shape migrates on restore -----
+    console.log('persistence: a pre-004 flat choice value migrates to the per-reviewer shape on restore');
+    await killP();
+    const stateDir6b = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-legacy-'));
+    const legacyId = 'legacy1';
+    fs.writeFileSync(
+      path.join(stateDir6b, `${legacyId}.json`),
+      JSON.stringify({
+        id: legacyId,
+        status: 'reviewing',
+        doc: { path: null, title: 'Legacy', html: '<p>Hi</p>', version: 1, blocks: ['<p>Hi</p>'], history: [] },
+        // OLD shape: choices is { choiceId: option } / { choiceId: options[] }, NOT nested.
+        review: { comments: [], choices: { single: 'Two', multi: ['A', 'B'] } },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b });
+    check('persist: server up (legacy-migration case)', await waitHealth(true));
+    const migrated = await p(`/api/state?session=${legacyId}`);
+    check(
+      'a pre-004 flat choice value migrates to { reviewerId: option } under anonymous (answer preserved, not garbage)',
+      migrated.status === 200 &&
+        migrated.data.review.choices.single &&
+        migrated.data.review.choices.single.anonymous === 'Two' &&
+        Array.isArray(migrated.data.review.choices.multi.anonymous) &&
+        migrated.data.review.choices.multi.anonymous.join(',') === 'A,B',
+      JSON.stringify(migrated.data.review.choices)
+    );
+    await stop(legacyId);
+    await sleep(300);
+    fs.rmSync(stateDir6b, { recursive: true, force: true });
 
     // ----- P7: a restored-but-stale session is reaped by the sweep + file deleted -----
     console.log('persistence: a restored-but-stale session is reaped by the abandon sweep');
@@ -996,7 +1032,7 @@ async function main() {
   const cyc = await browser(`/api/state?session=${q.id}`);
   check(
     'a re-present keeps prior answers and archives an un-anchored comment (never drops it)',
-    cyc.data.review.choices.pick === 'A1' &&
+    cyc.data.review.choices.pick.anonymous === 'A1' &&
       cyc.data.review.comments.length === 1 &&
       cyc.data.review.comments[0].id === 'x' &&
       cyc.data.review.comments[0].archived === true,
@@ -1075,6 +1111,61 @@ async function main() {
     JSON.stringify({ status: mrBad.status, comments: mrState4.data.review.comments })
   );
   await cli('stop', '--session', mrid);
+
+  console.log('multi-reviewer: per-reviewer choices surface conflict; review-state broadcasts a delta');
+  const cf = await cli('start', docA, '--no-open');
+  const cfid = cf.id;
+  const cfEvents = await captureEvents(cfid); // capture the SSE stream for this session
+  await sleep(100);
+  // A picks A1, B picks A2 for the same choice — a divergence.
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  const cfState = await browser(`/api/state?session=${cfid}`);
+  check(
+    'choices are per-reviewer: the map holds BOTH divergent picks, neither overwritten',
+    cfState.data.review.choices.pick &&
+      cfState.data.review.choices.pick.A === 'A1' &&
+      cfState.data.review.choices.pick.B === 'A2',
+    JSON.stringify(cfState.data.review.choices)
+  );
+  // A changes its own pick to A2 — only A's entry moves; B's stays.
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'A', comments: [], choices: { pick: 'A2' } });
+  const cfState2 = await browser(`/api/state?session=${cfid}`);
+  check(
+    'a reviewer changing its own pick does not touch a peer\'s',
+    cfState2.data.review.choices.pick.A === 'A2' && cfState2.data.review.choices.pick.B === 'A2',
+    JSON.stringify(cfState2.data.review.choices)
+  );
+  await sleep(150);
+  const reviewDeltas = cfEvents.events.filter((e) => e.event === 'review');
+  check(
+    'review-state broadcasts a "review" SSE delta carrying merged comments + choices + author',
+    reviewDeltas.length >= 3 &&
+      reviewDeltas.every((e) => {
+        const d = JSON.parse(e.data);
+        return d.author && typeof d.author.id === 'string' && 'comments' in d && 'choices' in d;
+      }),
+    JSON.stringify(reviewDeltas.map((e) => e.data))
+  );
+  const lastDelta = JSON.parse(reviewDeltas[reviewDeltas.length - 1].data);
+  check(
+    'the delta author id identifies the poster (so a tab can ignore its own echo)',
+    lastDelta.author.id === 'A' && lastDelta.choices.pick.A === 'A2' && lastDelta.choices.pick.B === 'A2',
+    JSON.stringify(lastDelta)
+  );
+  cfEvents.close();
+  // DSM-16: a deselect (A posts a choices map WITHOUT `pick`) clears only A's entry;
+  // B's pick survives. The deselect protocol is communicated purely by key-absence.
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'A', comments: [], choices: {} });
+  const cfDeselect = await browser(`/api/state?session=${cfid}`);
+  check(
+    'DSM-16: a reviewer deselecting drops only its own pick; the peer\'s remains',
+    cfDeselect.data.review.choices.pick &&
+      cfDeselect.data.review.choices.pick.A === undefined &&
+      cfDeselect.data.review.choices.pick.B === 'A2',
+    JSON.stringify(cfDeselect.data.review.choices)
+  );
+  await cli('stop', '--session', cfid);
 
   console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
   const dv = path.join(dir, 'planreview-e2e-versions.md');
