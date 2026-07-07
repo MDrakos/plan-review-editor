@@ -106,6 +106,115 @@ function check(name, cond, detail) {
   }
 }
 
+// Exercise the working-overlay liveness WIRING the way a browser would: load the
+// real public/liveness.js + public/app.js as two classic scripts into one shared
+// scope (a hand-rolled, zero-dep DOM shim with a controllable clock), then drive
+// the SSE lifecycle and assert what the reviewer sees. This is the only layer
+// that catches (a) two <script>s colliding on a top-level `const`, which takes
+// the whole page down, and (b) timer start/stop/reset bugs that structural regex
+// checks can't see. No DOM library — just the handful of globals app.js touches.
+async function driveLivenessWiring() {
+  let now = 1_000_000; // fake clock (ms); app.js reads Date.now()
+  let timers = [];
+  let tid = 1;
+  const pump = () => { for (const t of [...timers]) t.fn(); }; // one tick of every live interval
+
+  const makeEl = () => ({
+    textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
+    className: '', dataset: {}, style: {},
+    classList: { add() {}, remove() {}, contains: () => false },
+    addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
+    append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
+    scrollIntoView() {}, focus() {}, setSelectionRange() {},
+    querySelector: () => makeEl(), querySelectorAll: () => [], contains: () => false,
+    getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), cloneRange() { return this; },
+  });
+  const els = {};
+  const getEl = (id) => (els[id] || (els[id] = makeEl()));
+
+  let es = null;
+  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [] };
+  const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
+
+  const ctx = vm.createContext({
+    window: {},
+    document: {
+      getElementById: getEl, querySelector: () => makeEl(), querySelectorAll: () => [], addEventListener() {},
+      createElement: () => makeEl(), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({}) }),
+      createTreeWalker: () => ({ nextNode: () => null, currentNode: null }), title: '',
+    },
+    location: { pathname: '/s/abc' },
+    EventSource: function () { es = { onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
+    fetch: () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }),
+    setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
+    clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
+    setTimeout: () => 0, clearTimeout: () => {},
+    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true,
+    JSON, Math, Number, String, Array, Object, Boolean, console, Promise, encodeURIComponent, decodeURIComponent,
+  });
+
+  const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
+  load('liveness.js');
+  let loadErr = null;
+  try {
+    load('app.js'); // two classic scripts, one scope: a colliding top-level `const` throws here
+  } catch (e) {
+    loadErr = e;
+  }
+  // A redeclaration SyntaxError means the page is dead in the browser. Runtime
+  // ReferenceErrors (document/location under our shim) are fine — instantiation
+  // succeeded, which is all this assertion is about.
+  const collided = loadErr && /already been declared/.test(loadErr.message);
+  check('liveness.js + app.js load together with no top-level identifier collision', !collided, loadErr && loadErr.message);
+  if (collided) return; // nothing more to drive — the page wouldn't have loaded
+
+  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  await flush(); // boot fetchState() settles → status 'reviewing'
+  const overlay = getEl('working-overlay'), elapsed = getEl('working-elapsed'), stale = getEl('working-stale');
+
+  check('liveness: idle/reviewing shows no timer and a hidden overlay', overlay.hidden === true && timers.length === 0);
+
+  fire('status', { status: 'working' });
+  check('liveness: entering working shows the overlay and paints 0:00 at once', overlay.hidden === false && elapsed.textContent === '0:00', elapsed.textContent);
+  check('liveness: exactly one timer runs while working', timers.length === 1, String(timers.length));
+
+  fire('status', { status: 'working' }); // a re-broadcast must not start a second timer
+  check('liveness: a re-broadcast working event does not duplicate the timer', timers.length === 1, String(timers.length));
+
+  now += 5000; pump();
+  check('liveness: elapsed ticks up (0:05) and stays fresh below threshold', elapsed.textContent === '0:05' && stale.hidden === true, elapsed.textContent);
+
+  now += 40000; pump(); // 45s since the last sign of life
+  check(
+    'liveness: past the threshold a muted advisory appears with the count',
+    elapsed.textContent === '0:45' && stale.hidden === false && stale.textContent === 'No updates for 45 s — the agent may be stuck.',
+    JSON.stringify({ e: elapsed.textContent, h: stale.hidden, t: stale.textContent })
+  );
+
+  fire('progress', { text: 'Rewriting section', ts: 0 }); // a sign of life clears the advisory, timer keeps running
+  check('liveness: a progress event clears the advisory and keeps the timer', stale.hidden === true && stale.textContent === '' && timers.length === 1, JSON.stringify({ h: stale.hidden, n: timers.length }));
+
+  now += 3000; pump();
+  check('liveness: elapsed keeps climbing (0:48) but stays fresh after progress', elapsed.textContent === '0:48' && stale.hidden === true, elapsed.textContent);
+
+  now += 41000; pump();
+  check('liveness: silence past the threshold again re-shows the advisory', stale.hidden === false, JSON.stringify(stale.textContent));
+  fakeState.status = 'reviewing';
+  fire('doc', {}); // reworked doc arrives → present → reviewing
+  await flush();
+  check(
+    'liveness: the reworked document loading stops the timer and clears the cue',
+    timers.length === 0 && elapsed.textContent === '' && stale.hidden === true && stale.textContent === '',
+    JSON.stringify({ n: timers.length, e: elapsed.textContent, h: stale.hidden })
+  );
+
+  fakeState.status = 'working';
+  fire('status', { status: 'working' });
+  check('liveness: a fresh rework round restarts the timer at 0:00', timers.length === 1 && elapsed.textContent === '0:00');
+  fire('status', { status: 'ended' }); // terminal state must look exactly as before: no timer, no cue
+  check('liveness: a terminal state stops the timer and clears the cue', timers.length === 0 && elapsed.textContent === '' && stale.hidden === true);
+}
+
 async function main() {
   const dir = os.tmpdir();
   const docA = path.join(dir, 'planreview-e2e-a.md');
@@ -158,27 +267,8 @@ async function main() {
     `default=${liveness.STALE_THRESHOLD_MS}`
   );
 
-  // liveness.js and app.js load as two plain <script>s that share ONE global
-  // lexical scope. A top-level `const`/`let` declared in both throws "already
-  // been declared" at parse time and takes the whole page down. Reproduce the
-  // shared scope with vm: load both into one context and fail only on that
-  // collision (app.js's own runtime ReferenceErrors for document/location are
-  // expected here and ignored — we're only guarding the redeclaration class).
-  {
-    const ctx = vm.createContext({ window: {} });
-    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'liveness.js'), 'utf8'), ctx, {
-      filename: 'liveness.js',
-    });
-    let collision = null;
-    try {
-      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8'), ctx, {
-        filename: 'app.js',
-      });
-    } catch (e) {
-      if (/already been declared/.test(e.message)) collision = e.message;
-    }
-    check('liveness.js + app.js share no colliding top-level binding', collision === null, collision);
-  }
+  console.log('working-overlay liveness: overlay timer/hint lifecycle (real app.js in a DOM shim)');
+  await driveLivenessWiring();
 
   console.log('safeguard: a server running stale code is restarted on start');
   // occupy the port with a server that reports old code + no active sessions
