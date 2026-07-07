@@ -1116,6 +1116,39 @@ async function main() {
       mrState4.data.review.comments.every((c) => c && typeof c.id === 'string'),
     JSON.stringify({ status: mrBad.status, comments: mrState4.data.review.comments })
   );
+  // A re-creates a1 (it was deleted above) so there's a peer comment for B to reply to.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'a1', quote: 'Body of plan A.', text: 'from A', author: { id: 'A', name: 'Ada' } }],
+    choices: {},
+  });
+  // A reply is open to any reviewer (issue 002 threads): B replies to A's comment by
+  // syncing A's comment with a B-authored reply appended. The reply must survive even
+  // though B doesn't own the comment — B's browser holds a1 (author A) via live sync.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [
+      {
+        id: 'a1',
+        quote: 'Body of plan A.',
+        text: 'from A',
+        author: { id: 'A', name: 'Ada' },
+        replies: [{ role: 'reviewer', text: 'B replies to A', ts: 111, author: { id: 'B', name: 'Ben' } }],
+      },
+      { id: 'b1', quote: 'Body of plan A.', text: 'still here', author: { id: 'B' } },
+    ],
+    choices: {},
+  });
+  const mrReply = await browser(`/api/state?session=${mrid}`);
+  const a1WithReply = mrReply.data.review.comments.find((c) => c.id === 'a1');
+  check(
+    'a reviewer\'s reply to a PEER\'s comment survives (not dropped by author-scoping)',
+    a1WithReply &&
+      a1WithReply.text === 'from A' && // A's body untouched
+      Array.isArray(a1WithReply.replies) &&
+      a1WithReply.replies.some((r) => r.text === 'B replies to A' && r.author && r.author.id === 'B'),
+    JSON.stringify(a1WithReply)
+  );
   await cli('stop', '--session', mrid);
 
   console.log('multi-reviewer: per-reviewer choices surface conflict; review-state broadcasts a delta');
@@ -1720,6 +1753,10 @@ async function main() {
   check(
     'client live-syncs on a peer "review" delta and ignores its own echo by author id',
     /addEventListener\('review'/.test(app.body) && /author\.id === reviewer\.id/.test(app.body)
+  );
+  check(
+    'client gates edit/delete to the comment owner (peer comments are read-only)',
+    /function ownComment\(/.test(app.body) && /if \(!c\.archived && own\)/.test(app.body)
   );
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));

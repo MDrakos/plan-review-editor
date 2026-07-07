@@ -732,6 +732,14 @@ function authorLabel(a) {
   return a.id ? a.id.slice(0, 8) : 'anonymous';
 }
 
+// Whether this tab may edit/delete a comment: only its own (the server enforces the
+// same rule, so offering edit/delete on a peer's comment would just optimistically
+// apply then silently revert on the next sync). An authorless comment (anonymous /
+// pre-004) is treated as own, matching single-reviewer behavior.
+function ownComment(c) {
+  return !c.author || c.author.id === reviewer.id;
+}
+
 // A small colored badge naming an author (used on comment cards, replies, chat).
 function authorBadge(a) {
   const badge = document.createElement('span');
@@ -837,9 +845,13 @@ function viewCard(c) {
   actions.className = 'card-actions';
   // Attribute the card to its author (color-coded) so reviewers can tell who said what.
   if (c.author) actions.appendChild(authorBadge(c.author));
+  // Edit/Delete are offered only for this reviewer's OWN comments — the server rejects
+  // edits/deletes to a peer's comment, so showing the controls would just invite a
+  // no-op. A peer's comment is read-only here (but its reply thread stays open to all).
+  const own = ownComment(c);
   // An archived comment's text is gone from the plan, so there's nothing to edit
   // in place — only offer to dismiss it.
-  if (!c.archived) {
+  if (!c.archived && own) {
     actions.append(
       iconBtn('✎', 'Edit comment', (e) => {
         e.stopPropagation();
@@ -847,12 +859,14 @@ function viewCard(c) {
       })
     );
   }
-  actions.append(
-    iconBtn('✕', c.archived ? 'Dismiss comment' : 'Delete comment', (e) => {
-      e.stopPropagation();
-      deleteComment(c.id);
-    })
-  );
+  if (own) {
+    actions.append(
+      iconBtn('✕', c.archived ? 'Dismiss comment' : 'Delete comment', (e) => {
+        e.stopPropagation();
+        deleteComment(c.id);
+      })
+    );
+  }
 
   const quote = document.createElement('blockquote');
   quote.textContent = truncate(c.quote, 120);

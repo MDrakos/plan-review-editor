@@ -459,6 +459,7 @@ function mergeComments(prev, incoming, posterId) {
   const cleanIncoming = (incoming || []).filter(ok);
   const cleanPrev = (prev || []).filter(ok);
   const mine = new Map(cleanIncoming.filter((c) => authorId(c) === posterId).map((c) => [c.id, c]));
+  const incomingById = new Map(cleanIncoming.map((c) => [c.id, c]));
   const prevById = new Map(cleanPrev.map((c) => [c.id, c]));
   const emitted = new Set();
   const out = [];
@@ -468,7 +469,18 @@ function mergeComments(prev, incoming, posterId) {
       if (!inc) continue; // the poster deleted their own comment
       out.push(reconcileComment(p, inc));
     } else {
-      out.push(p); // another reviewer's comment — never touched by this poster
+      // A peer's comment: the poster can't edit or delete it (body stays authoritative),
+      // but replies are open to everyone (issue 002 threads) — so union any replies the
+      // poster added to this thread onto the server's copy; mergeReplies only ADDS, never
+      // removes, so a peer can't clobber existing replies. Without this, a reply left on
+      // another reviewer's comment would be silently dropped.
+      const inc = incomingById.get(p.id);
+      if (inc && Array.isArray(inc.replies) && inc.replies.length) {
+        const replies = mergeReplies(p.replies, inc.replies);
+        out.push(replies.length ? { ...p, replies } : p);
+      } else {
+        out.push(p);
+      }
     }
     emitted.add(p.id);
   }
