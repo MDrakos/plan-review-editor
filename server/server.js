@@ -106,7 +106,7 @@ function removeSession(s) {
   }
   s.sse.clear();
   sessions.delete(s.id);
-  deleteSession(s); // cancel any pending flush + delete the file (no resurrection)
+  deletePersisted(s); // cancel any pending flush + delete the file (no resurrection)
   armIdleShutdownIfEmpty();
 }
 
@@ -188,7 +188,7 @@ function persist(s) {
 // delete the file. Called from removeSession — the single teardown path shared
 // by /agent/stop and the abandon sweep. Clearing the timer is safe even with
 // persistence off; the unlink is skipped when off.
-function deleteSession(s) {
+function deletePersisted(s) {
   const timer = persistTimers.get(s.id);
   if (timer) {
     clearTimeout(timer);
@@ -232,8 +232,10 @@ function restoreSessions() {
       if (!data || typeof data.id !== 'string') throw new Error('missing session id');
       const s = blankSession(data.id);
       if (typeof data.status === 'string') s.status = data.status;
-      if (data.doc) s.doc = data.doc;
-      if (data.review) s.review = data.review;
+      // Object fields fall back to blankSession's defaults if a hand-edited file
+      // has them as the wrong type — restore a usable session, never a booby-trap.
+      if (data.doc && typeof data.doc === 'object') s.doc = data.doc;
+      if (data.review && typeof data.review === 'object') s.review = data.review;
       if (Array.isArray(data.submissions)) s.submissions = data.submissions;
       if (Array.isArray(data.chat)) s.chat = data.chat;
       if (Array.isArray(data.progress)) s.progress = data.progress;
@@ -637,6 +639,7 @@ const server = http.createServer(async (req, res) => {
       s.chat.push(msg);
       touch(s);
       broadcast(s, 'chat', msg);
+      persist(s); // agent chat is persisted state too — mirror /api/chat so it survives a restart
       return sendJson(res, 200, { ok: true });
     }
 

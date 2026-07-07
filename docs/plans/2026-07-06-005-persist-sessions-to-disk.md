@@ -40,7 +40,7 @@ Add near the other env config: `PERSIST` (default on, `PLANREVIEW_PERSIST=0` off
 `STATE_DIR` (`PLANREVIEW_STATE_DIR` || `process.cwd()/.sessions`), `PERSIST_DEBOUNCE_MS`
 (default 250, env-overridable for tests: `PLANREVIEW_PERSIST_MS`).
 Helpers: `sessionFile(id)`, `ensureStateDir()`, `serialize(s)`, `writeSession(s)` (atomic),
-`persist(s)` (debounced), `deleteSession(s)` (clear timer + unlink), `restoreSessions()`.
+`persist(s)` (debounced), `deletePersisted(s)` (clear timer + unlink), `restoreSessions()`.
 
 ### T2 — `serialize(s)` persists exactly the serializable keys, never the live handles
 Test: build a session, `serialize` it, assert keys === {id,status,doc,review,submissions,chat,
@@ -92,7 +92,7 @@ paths, no new trust boundary).
   the process. Test: point `STATE_DIR` at an unwritable path, drive a mutation, assert `/health`
   still answers.
 - **FM-3 (High):** writes are **synchronous** (`writeFileSync`+`renameSync`) — no async in-flight
-  window to race `unlink`. `deleteSession` clears the pending debounce timer; the fire callback
+  window to race `unlink`. `deletePersisted` clears the pending debounce timer; the fire callback
   also gates on `sessions.has(id)`. Test: mutate then immediately stop, assert file stays absent.
 - **FM-4 (High):** `restoreSessions()` is synchronous and runs before `server.listen`. Test: a
   pre-seeded file resolves on the very first request (no spurious 404).
@@ -122,7 +122,7 @@ paths, no new trust boundary).
 **DSM:** confined to `server.js`; no new cycles. Two Maps keyed by id (`sessions`,
 `persistTimers`) with `keys(persistTimers) ⊆ keys(sessions)` — every teardown touches both.
 Ordering invariant: `restoreSessions()` before `server.listen`'s `armIdleShutdownIfEmpty()`.
-`removeSession` is the single teardown → the only `deleteSession` caller.
+`removeSession` is the single teardown → the only `deletePersisted` caller.
 
 ## Tests (final set: P1–P7 in a persistence phase appended to `test/e2e.js`)
 

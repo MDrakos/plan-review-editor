@@ -50,34 +50,42 @@ function cliRaw(...args) {
   });
 }
 
-// simulate the review UI in the browser
-async function browser(pathname, body) {
-  const res = await fetch(BASE + pathname, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    /* non-JSON (e.g. HTML page) */
-  }
-  return { status: res.status, ok: res.ok, data };
+// A tiny HTTP client bound to one base URL: a JSON request (the browser side),
+// a raw-text fetch, and a health probe. The module-level helpers below target
+// the CLI-managed server; the persistence phase builds its own against a second
+// port — so the same three shapes serve both without duplication.
+function makeClient(base) {
+  return {
+    // simulate the review UI in the browser
+    async json(pathname, body) {
+      const res = await fetch(base + pathname, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        /* non-JSON (e.g. HTML page) */
+      }
+      return { status: res.status, ok: res.ok, data };
+    },
+    async text(pathname) {
+      const res = await fetch(base + pathname);
+      return { status: res.status, ok: res.ok, body: await res.text() };
+    },
+    async alive() {
+      try {
+        return (await fetch(`${base}/health`)).ok;
+      } catch {
+        return false;
+      }
+    },
+  };
 }
 
-async function text(pathname) {
-  const res = await fetch(BASE + pathname);
-  return { status: res.status, ok: res.ok, body: await res.text() };
-}
-
-async function serverAlive() {
-  try {
-    return (await fetch(`${BASE}/health`)).ok;
-  } catch {
-    return false;
-  }
-}
+const { json: browser, text, alive: serverAlive } = makeClient(BASE);
 
 // simulate a review tab's SSE connection to one session
 async function openEventStream(id) {
@@ -241,6 +249,9 @@ async function persistenceChecks() {
     ...extra,
   });
 
+  // Same three HTTP shapes as the module-level helpers, bound to this phase's port.
+  const { json: p, text: pageText, alive: pAlive } = makeClient(PBASE);
+
   let child = null;
   function spawnP(extra) {
     child = spawn(process.execPath, [SERVER], {
@@ -251,13 +262,7 @@ async function persistenceChecks() {
   async function waitHealth(up) {
     for (let i = 0; i < 80; i++) {
       await sleep(100);
-      let ok = false;
-      try {
-        ok = (await fetch(`${PBASE}/health`)).ok;
-      } catch {
-        ok = false;
-      }
-      if (ok === up) return true;
+      if ((await pAlive()) === up) return true;
     }
     return false;
   }
@@ -268,20 +273,6 @@ async function persistenceChecks() {
     await sleep(150); // let the OS release the port before a respawn
     child = null;
   }
-  const p = async (pathname, body) => {
-    const res = await fetch(PBASE + pathname, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      /* non-JSON */
-    }
-    return { status: res.status, ok: res.ok, data };
-  };
   const stop = (id) => p(`/agent/stop?session=${id}`, {}); // POST (body forces the method)
   const fileFor = (id) => path.join(stateDir, `${id}.json`);
   const readState = (id) => {
@@ -318,14 +309,31 @@ async function persistenceChecks() {
       note: 'round one',
     });
     await p(`/api/chat?session=${id}`, { text: 'a question during review' });
+    await p(`/agent/say?session=${id}`, { text: 'an agent reply' }); // agent chat must persist too
     await p(`/agent/progress?session=${id}`, { text: 'reworking step 1' });
     const before = await waitFile(
       id,
       (st) =>
         (st.submissions || []).length === 1 &&
         (st.progress || []).length === 1 &&
-        (st.chat || []).length >= 1 &&
+        (st.chat || []).length >= 2 &&
         st.status === 'working'
+    );
+    const EXPECTED_KEYS = [
+      'chat',
+      'doc',
+      'id',
+      'progress',
+      'queue',
+      'review',
+      'status',
+      'submissions',
+      'touched',
+    ];
+    check(
+      'persist: the on-disk file is exactly the serializable allowlist (no live handles)',
+      before && JSON.stringify(Object.keys(before).sort()) === JSON.stringify(EXPECTED_KEYS),
+      JSON.stringify(before && Object.keys(before).sort())
     );
     check(
       'persist: the on-disk file captures the full session state (incl. doc.blocks)',
@@ -333,10 +341,8 @@ async function persistenceChecks() {
         before.submissions.length === 1 &&
         before.doc.version === 1 &&
         before.review.choices.pick === 'Two' &&
-        Array.isArray(before.doc.blocks) &&
-        before.sse === undefined &&
-        before.waiters === undefined,
-      JSON.stringify(before && Object.keys(before))
+        Array.isArray(before.doc.blocks),
+      JSON.stringify(before && { v: before.doc && before.doc.version, sub: before.submissions.length })
     );
 
     await killP();
@@ -352,11 +358,17 @@ async function persistenceChecks() {
         restored.data.doc.version === 1 &&
         restored.data.review.comments.length === 1 &&
         restored.data.review.choices.pick === 'Two' &&
-        restored.data.chat.length >= 1 &&
+        restored.data.chat.some((c) => c.role === 'reviewer' && c.text === 'a question during review') &&
+        restored.data.chat.some((c) => c.role === 'agent' && c.text === 'an agent reply') &&
         restored.data.progress.length === 1,
       JSON.stringify(restored.data)
     );
-    const page = await fetch(`${PBASE}/s/${id}`);
+    check(
+      'kill -9 restore: the restored session has no live clients (empty sse/waiters)',
+      restored.data.clients === 0,
+      `clients=${restored.data.clients}`
+    );
+    const page = await pageText(`/s/${id}`);
     check('kill -9 restore: /s/<id> resolves after restart', page.ok);
 
     // submissions aren't in /api/state; prove they round-tripped by re-reading the file
@@ -506,6 +518,31 @@ async function persistenceChecks() {
     await stop(w.data.id);
     await sleep(200);
     fs.rmSync(blocker, { force: true });
+
+    // ----- FM-10: after a flush fires, a later mutation re-arms and persists again -----
+    // Also covers /agent/say persistence. Deterministic: we wait for the FIRST flush to
+    // land on disk (proving its debounce timer fired and was cleared) BEFORE the second
+    // mutation, so the second write depends on the timer being re-armed — not on timing.
+    console.log('persistence: a mutation after a flush re-arms the debounce (and /agent/say persists)');
+    await killP();
+    spawnP();
+    check('persist: server up (reschedule case)', await waitHealth(true));
+    const rs = await p('/agent/start', { path: doc });
+    const rid = rs.data.id;
+    await p(`/api/chat?session=${rid}`, { text: 'first' });
+    await waitFile(rid, (st) => (st.chat || []).some((c) => c.text === 'first')); // 1st flush landed
+    // second mutation is an agent /say — exercises both the re-arm AND the say persist site
+    await p(`/agent/say?session=${rid}`, { text: 'second (agent)' });
+    const two = await waitFile(rid, (st) => (st.chat || []).some((c) => c.text === 'second (agent)'));
+    check(
+      'a mutation after the flush is persisted (timer re-armed; /agent/say writes through)',
+      two &&
+        two.chat.some((c) => c.role === 'reviewer' && c.text === 'first') &&
+        two.chat.some((c) => c.role === 'agent' && c.text === 'second (agent)'),
+      JSON.stringify(two && two.chat.map((c) => `${c.role}:${c.text}`))
+    );
+    await stop(rid);
+    await sleep(300);
 
     // ----- P6: restore completes before listen (a pre-seeded file resolves) -----
     console.log('persistence: an externally-written session file restores (restore-before-listen)');

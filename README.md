@@ -45,7 +45,12 @@ Three pieces, zero runtime dependencies:
   and browser tab). It renders markdown to HTML and bridges browser and agent.
   Browser ⇄ server uses JSON + server-sent events; agent ⇄ server uses a small
   localhost API. Because sessions share nothing, several agents can run reviews
-  at once without cross-contamination.
+  at once without cross-contamination. Each session's state is **written through
+  to disk** (`.sessions/<id>.json`, atomically + debounced), so a crash, reboot,
+  or the server's own idle/stale-code restart doesn't lose an open review — it's
+  restored on startup and the browser reconnects. Set `PLANREVIEW_PERSIST=0` to
+  disable, or `PLANREVIEW_STATE_DIR` to relocate the files (default: `.sessions/`
+  in the working directory, gitignored).
 - **`public/`** — the review UI (document pane left, comments + chat right),
   served at `/s/<id>`; `/` is an index of every open session.
 - **`bin/planreview.js`** — the CLI the agent drives. `start` mints a session
@@ -187,6 +192,7 @@ dismissible "what changed since your last review" highlight on each new round.
 - [x] End-session handoff back to the terminal
 - [x] Concurrent isolated sessions — many agents at once, one tab each
 - [x] Diff view between document versions — add/remove/change markers, incl. removals
+- [x] Persist sessions to disk so they survive a server restart
 
 Possible next steps: comment threads with agent replies, multiple reviewers on
-one plan, persisting sessions to disk.
+one plan.
