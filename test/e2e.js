@@ -10,7 +10,9 @@
 // guard, the sessions index, and the idle self-shutdown.
 //
 // Run: node test/e2e.js   (port 4799 + a short idle window so it never clashes
-// with a real session and cleans itself up fast)
+// with a real session and cleans itself up fast). Set PLANREVIEW_TEST_PORT to
+// run on a different port — useful when several git worktrees run this suite at
+// once, since a shared fixed port would otherwise collide.
 
 const { execFile, spawn } = require('child_process');
 const path = require('path');
@@ -18,7 +20,7 @@ const fs = require('fs');
 const os = require('os');
 const vm = require('vm');
 
-const PORT = 4799;
+const PORT = Number(process.env.PLANREVIEW_TEST_PORT) || 4799;
 const BASE = `http://127.0.0.1:${PORT}`;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
 const { render, renderDiff, renderVersionDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
@@ -420,6 +422,7 @@ async function main() {
   check('FX-1 a quote present in the rendered doc anchors', quoteAnchors('keep Redis', render('We will keep Redis.')) === true);
   check('FX-2 a quote absent from the doc does not anchor', quoteAnchors('gone text', render('We will keep Redis.')) === false);
   check('FX-3 an escaped ampersand round-trips', quoteAnchors('a & b', render('x a & b y')) === true);
+  check('FX-3b a quote containing a double-quote anchors (&quot; decode)', quoteAnchors('"hi"', render('he said "hi" today')) === true);
   // source '&lt;tag&gt;' → html '&amp;lt;tag&amp;gt;' → browser DOM text '&lt;tag&gt;'. Decoding &amp; LAST
   // must reproduce that literal; decoding it first would over-decode to '<tag>' and diverge.
   check(
@@ -839,6 +842,44 @@ async function main() {
     ke && ke.archived === true && Array.isArray(ke.replies) && ke.replies.length === 4,
     JSON.stringify(ke)
   );
+  // the archived flag is server-authoritative: a browser sync sending archived:false
+  // must NOT resurface an un-anchored comment as active
+  await browser(`/api/review-state?session=${th.id}`, {
+    comments: [{ id: 'k', quote: 'keep Redis', text: 'why not in-process?', archived: false }],
+    choices: {},
+  });
+  const kf = (await browser(`/api/state?session=${th.id}`)).data.review.comments.find((c) => c.id === 'k');
+  check('the browser cannot clear the server-set archived flag', kf && kf.archived === true, JSON.stringify(kf));
+  // a malformed reply in a sync (null / missing text) is skipped, not a 500, and real replies survive
+  const malformed = await browser(`/api/review-state?session=${th.id}`, {
+    comments: [{ id: 'k', quote: 'keep Redis', text: 'why not in-process?', replies: [null, { role: 'agent', text: 'valid', ts: 999 }] }],
+    choices: {},
+  });
+  const kg = (await browser(`/api/state?session=${th.id}`)).data.review.comments.find((c) => c.id === 'k');
+  check(
+    'a malformed reply is dropped without a 500, real replies intact',
+    malformed.status === 200 && kg && kg.replies.every((r) => r && typeof r.text === 'string') &&
+      kg.replies.some((r) => r.text === 'valid'),
+    JSON.stringify({ status: malformed.status, replies: kg && kg.replies })
+  );
+  // replies merge in timestamp order regardless of the order they arrive in
+  await browser(`/api/review-state?session=${th.id}`, {
+    comments: [{
+      id: 'ord', quote: 'in-process', text: 'ordering',
+      replies: [
+        { role: 'agent', text: 'third', ts: 300 },
+        { role: 'reviewer', text: 'first', ts: 100 },
+        { role: 'agent', text: 'second', ts: 200 },
+      ],
+    }],
+    choices: {},
+  });
+  const ko = (await browser(`/api/state?session=${th.id}`)).data.review.comments.find((c) => c.id === 'ord');
+  check(
+    'merged replies are ordered by timestamp',
+    ko && ko.replies.map((r) => r.text).join(',') === 'first,second,third',
+    JSON.stringify(ko && ko.replies)
+  );
   await cli('stop', '--session', th.id);
 
   console.log('no time limit: wait blocks past poll windows until the reviewer acts');
@@ -950,6 +991,10 @@ async function main() {
     /'comment-reply'/.test(app.body) && /renderThread/.test(app.body) && /comment-thread/.test(app.body)
   );
   check('client surfaces un-anchored comments in a distinct archived section', /archived/.test(app.body));
+  check(
+    'client wires the reviewer follow-up (replyForm → reviewer role → syncReview)',
+    /replyForm/.test(app.body) && /role: 'reviewer'/.test(app.body) && /syncReview\(\)/.test(app.body)
+  );
 
   await cli('stop', '--session', guard.id);
 
