@@ -1004,6 +1004,78 @@ async function main() {
   );
   await cli('stop', '--session', q.id);
 
+  console.log('multi-reviewer: comments union across authors; a poster owns only its own');
+  const mr = await cli('start', docA, '--no-open');
+  const mrid = mr.id;
+  // Reviewer A creates a comment, syncing its whole set (just A's).
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'a1', quote: 'Body of plan A.', text: 'from A', author: { id: 'A', name: 'Ada' } }],
+    choices: {},
+  });
+  // Reviewer B syncs its own set. B's browser has NOT seen A's comment yet, so B
+  // posts only [b1]. A's comment must survive (union across authors).
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [{ id: 'b1', quote: 'Body of plan A.', text: 'from B', author: { id: 'B', name: 'Ben' } }],
+    choices: {},
+  });
+  const mrState = await browser(`/api/state?session=${mrid}`);
+  const mrComments = mrState.data.review.comments;
+  check(
+    'both reviewers\' comments coexist, each attributed (B\'s sync did not clobber A\'s)',
+    mrComments.length === 2 &&
+      mrComments.some((c) => c.id === 'a1' && c.author && c.author.id === 'A') &&
+      mrComments.some((c) => c.id === 'b1' && c.author && c.author.id === 'B'),
+    JSON.stringify(mrComments)
+  );
+  // B edits its own comment and, this time, its browser HAS A's comment too (live
+  // sync) — B may not edit or drop A's, but its edit to b1 lands.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [
+      { id: 'a1', quote: 'Body of plan A.', text: 'TAMPERED', author: { id: 'A', name: 'Ada' } },
+      { id: 'b1', quote: 'Body of plan A.', text: 'from B (edited)', author: { id: 'B', name: 'Ben' } },
+    ],
+    choices: {},
+  });
+  const mrState2 = await browser(`/api/state?session=${mrid}`);
+  const a1 = mrState2.data.review.comments.find((c) => c.id === 'a1');
+  const b1 = mrState2.data.review.comments.find((c) => c.id === 'b1');
+  check(
+    'a poster owns only its own comments: B edits b1 but cannot alter A\'s a1',
+    a1 && a1.text === 'from A' && b1 && b1.text === 'from B (edited)',
+    JSON.stringify({ a1, b1 })
+  );
+  // A deletes its own comment (posts a set without a1); B's b1 is untouched.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'A',
+    comments: [],
+    choices: {},
+  });
+  const mrState3 = await browser(`/api/state?session=${mrid}`);
+  check(
+    'a poster deleting its own comment leaves peers\' comments intact',
+    mrState3.data.review.comments.length === 1 &&
+      mrState3.data.review.comments[0].id === 'b1',
+    JSON.stringify(mrState3.data.review.comments)
+  );
+  // FM-7: a malformed comment entry (null / no id) must be skipped, never 500.
+  const mrBad = await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [null, {}, { id: 'b1', quote: 'Body of plan A.', text: 'still here', author: { id: 'B' } }],
+    choices: {},
+  });
+  const mrState4 = await browser(`/api/state?session=${mrid}`);
+  check(
+    'FM-7: malformed comment entries are skipped (clean 200, not a 500)',
+    mrBad.status === 200 &&
+      mrState4.data.review.comments.filter((c) => c && c.id === 'b1').length === 1 &&
+      mrState4.data.review.comments.every((c) => c && typeof c.id === 'string'),
+    JSON.stringify({ status: mrBad.status, comments: mrState4.data.review.comments })
+  );
+  await cli('stop', '--session', mrid);
+
   console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
   const dv = path.join(dir, 'planreview-e2e-versions.md');
   fs.writeFileSync(dv, '# Ring\n\nKeep one.\n\nDrop me.\n\nKeep two.\n');
