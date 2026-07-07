@@ -13,6 +13,78 @@ function api(pathname) {
   return `${pathname}${sep}session=${encodeURIComponent(SESSION)}`;
 }
 
+// ---------- reviewer identity ----------
+//
+// Ephemeral and per-browser. reviewerId persists in localStorage so a refresh keeps
+// the same identity (and thus authorship of this tab's comments); reviewerName is an
+// optional, editable display label. No accounts, no server roster — identity rides
+// along on every mutating request as a top-level reviewerId/reviewerName and, on
+// comments/replies, an author:{id,name}. Absent identity, the server treats the
+// poster as 'anonymous' and everything behaves as it did before this feature.
+
+const REVIEWER_ID_KEY = 'pr.reviewerId';
+const REVIEWER_NAME_KEY = 'pr.reviewerName';
+
+function loadReviewerId() {
+  let id = '';
+  try {
+    id = localStorage.getItem(REVIEWER_ID_KEY) || '';
+  } catch {
+    /* storage blocked (private mode) — fall through to a fresh per-load id */
+  }
+  if (!id) {
+    id =
+      (crypto.randomUUID && crypto.randomUUID()) ||
+      `r-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      localStorage.setItem(REVIEWER_ID_KEY, id);
+    } catch {
+      /* ignore */
+    }
+  }
+  return id;
+}
+
+const reviewer = {
+  id: loadReviewerId(),
+  get name() {
+    try {
+      return localStorage.getItem(REVIEWER_NAME_KEY) || '';
+    } catch {
+      return '';
+    }
+  },
+  set name(v) {
+    try {
+      localStorage.setItem(REVIEWER_NAME_KEY, v || '');
+    } catch {
+      /* ignore */
+    }
+  },
+};
+
+// The author stamp for a comment/reply this tab creates.
+function author() {
+  return reviewer.name ? { id: reviewer.id, name: reviewer.name } : { id: reviewer.id };
+}
+
+// This tab's OWN flat picks pulled out of the nested per-reviewer choice map — the
+// shape the server expects a POST to carry (it re-nests them under reviewer.id).
+function myChoices() {
+  const out = {};
+  for (const [id, byReviewer] of Object.entries(state.choices || {})) {
+    if (byReviewer && typeof byReviewer === 'object' && byReviewer[reviewer.id] !== undefined)
+      out[id] = byReviewer[reviewer.id];
+  }
+  return out;
+}
+
+// This tab's own current pick for one choice block (undefined if it hasn't chosen).
+function myPick(id) {
+  const byReviewer = state.choices[id];
+  return byReviewer && typeof byReviewer === 'object' ? byReviewer[reviewer.id] : undefined;
+}
+
 // ---------- elements ----------
 
 const docEl = document.getElementById('doc');
@@ -51,7 +123,7 @@ const state = {
   versions: [], // retained version numbers available to diff between
   diffing: false, // true while the doc pane shows a version diff (read-only)
   comments: [], // {id, quote, text, ts, replies?: [{role:'agent'|'reviewer', text, ts}], archived?}
-  choices: {}, // choiceId -> value (string) or values (string[]) when multi
+  choices: {}, // choiceId -> { reviewerId -> value(string) | values(string[]) when multi }
   progress: [], // {text, ts} rework steps, shown in the working overlay
 };
 
@@ -378,7 +450,7 @@ chatFormEl.addEventListener('submit', async (e) => {
   await fetch(api('/api/chat'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, reviewerId: reviewer.id, reviewerName: reviewer.name }),
   }).catch(() => {});
 });
 
@@ -456,7 +528,7 @@ function bindChoices() {
     summary.append(summaryVal, changeBtn);
     block.appendChild(summary);
     const refreshSummary = () => {
-      summaryVal.textContent = answerText(state.choices[id]);
+      summaryVal.textContent = answerText(myPick(id));
     };
 
     // the value an option contributes: for "Other", whatever was typed
@@ -465,13 +537,18 @@ function bindChoices() {
 
     const sync = () => {
       const vals = boxes.filter((i) => i.checked).map(valueOf).filter((v) => v !== '');
-      state.choices[id] = multi ? vals : vals[0];
+      const pick = multi ? vals : vals[0];
+      // Write only THIS reviewer's entry into the per-reviewer map; a deselect (no
+      // pick) removes our entry so the server drops it too (peers' picks untouched).
+      const byReviewer = state.choices[id] || (state.choices[id] = {});
+      if (pick === undefined || (Array.isArray(pick) && pick.length === 0)) delete byReviewer[reviewer.id];
+      else byReviewer[reviewer.id] = pick;
       refreshSummary();
       syncReview();
     };
 
     // restore a saved answer — a value that matches no preset is an "Other" answer
-    const saved = state.choices[id];
+    const saved = myPick(id);
     for (const box of boxes) {
       if (saved !== undefined) {
         if (box.dataset.other) {
@@ -496,7 +573,7 @@ function bindChoices() {
     }
 
     refreshSummary();
-    if (hasAnswer(state.choices[id])) block.classList.add('answered'); // collapse if already answered
+    if (hasAnswer(myPick(id))) block.classList.add('answered'); // collapse if already answered
   }
 }
 
@@ -567,7 +644,7 @@ function saveComment() {
   if (!text || !pendingRange) return;
   const id = 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
   highlightRange(pendingRange, id);
-  state.comments.push({ id, quote: pendingQuote, text, ts: Date.now() });
+  state.comments.push({ id, quote: pendingQuote, text, ts: Date.now(), author: author() });
   window.getSelection().removeAllRanges();
   dismissComposer();
   renderComments();
@@ -642,7 +719,7 @@ function replyForm(c) {
     const text = input.value.trim();
     if (!text) return;
     input.value = '';
-    (c.replies || (c.replies = [])).push({ role: 'reviewer', text, ts: Date.now() });
+    (c.replies || (c.replies = [])).push({ role: 'reviewer', text, ts: Date.now(), author: author() });
     renderComments(); // the follow-up rides along in the next submit bundle
     syncReview();
   });
@@ -779,7 +856,12 @@ async function syncReview() {
   await fetch(api('/api/review-state'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ comments: state.comments, choices: state.choices }),
+    body: JSON.stringify({
+      reviewerId: reviewer.id,
+      reviewerName: reviewer.name,
+      comments: state.comments,
+      choices: myChoices(),
+    }),
   }).catch(() => {});
 }
 
@@ -837,8 +919,10 @@ submitBtn.addEventListener('click', () => (submitMode === 'approve' ? approveRev
 
 function reviewBundle() {
   return {
+    reviewerId: reviewer.id,
+    reviewerName: reviewer.name,
     comments: state.comments,
-    choices: state.choices,
+    choices: myChoices(),
     note: overallNoteEl.value.trim(),
     docVersion: state.version,
   };

@@ -194,7 +194,13 @@ async function driveLivenessWiring() {
     setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
     clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
     setTimeout: () => 0, clearTimeout: () => {},
-    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true,
+    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
+    // Browser globals the reviewer-identity module (app.js) legitimately uses.
+    crypto: { randomUUID: () => `shim-uuid-${tid++}` },
+    localStorage: (() => {
+      const m = new Map();
+      return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+    })(),
     JSON, Math, Number, String, Array, Object, Boolean, console, Promise, encodeURIComponent, decodeURIComponent,
   });
 
@@ -1675,6 +1681,22 @@ async function main() {
   );
   const app = await text('/app.js');
   check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
+  check(
+    'client mints a persistent reviewer identity (localStorage + crypto.randomUUID)',
+    /pr\.reviewerId/.test(app.body) && /crypto\.randomUUID/.test(app.body) && /localStorage/.test(app.body)
+  );
+  check(
+    'client attaches reviewerId to its mutating posts (review-state / submit / chat)',
+    /reviewerId:\s*reviewer\.id/.test(app.body)
+  );
+  check(
+    'client posts only its OWN flat choice picks (server nests them per reviewer)',
+    /function myChoices\(/.test(app.body) && /choices:\s*myChoices\(\)/.test(app.body)
+  );
+  check(
+    'client stamps new comments with an author',
+    /author:\s*author\(\)/.test(app.body)
+  );
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
   check('client highlights + can dismiss doc changes', /data-changed/.test(app.body) && /changes-dismissed/.test(app.body));
