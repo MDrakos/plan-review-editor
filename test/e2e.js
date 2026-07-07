@@ -166,7 +166,7 @@ async function driveLivenessWiring() {
 
   const makeEl = () => ({
     textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
-    className: '', dataset: {}, style: {},
+    className: '', dataset: {}, style: { setProperty() {}, removeProperty() {} },
     classList: { add() {}, remove() {}, contains: () => false },
     addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
     append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
@@ -178,6 +178,7 @@ async function driveLivenessWiring() {
   const getEl = (id) => (els[id] || (els[id] = makeEl()));
 
   let es = null;
+  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
   const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [] };
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
@@ -190,11 +191,17 @@ async function driveLivenessWiring() {
     },
     location: { pathname: '/s/abc' },
     EventSource: function () { es = { onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
-    fetch: () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }),
+    fetch: () => { fetchCalls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }); },
     setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
     clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
     setTimeout: () => 0, clearTimeout: () => {},
-    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true,
+    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
+    // Browser globals the reviewer-identity module (app.js) legitimately uses.
+    crypto: { randomUUID: () => `shim-uuid-${tid++}` },
+    localStorage: (() => {
+      const m = new Map();
+      return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+    })(),
     JSON, Math, Number, String, Array, Object, Boolean, console, Promise, encodeURIComponent, decodeURIComponent,
   });
 
@@ -258,6 +265,19 @@ async function driveLivenessWiring() {
   check('liveness: a fresh rework round restarts the timer at 0:00', timers.length === 1 && elapsed.textContent === '0:00');
   fire('status', { status: 'ended' }); // terminal state must look exactly as before: no timer, no cue
   check('liveness: a terminal state stops the timer and clears the cue', timers.length === 0 && elapsed.textContent === '' && stale.hidden === true);
+
+  // review-delta echo suppression (functional, not just regex): a PEER's delta must
+  // trigger a re-sync (fetchState → GET /api/state); this tab's OWN echo must not (or a
+  // flipped ===/!== would spin every tab in a self-refetch loop / never show peers).
+  const myId = vm.runInContext('reviewer.id', ctx);
+  const beforePeer = fetchCalls;
+  fire('review', { author: { id: 'some-peer-id' } });
+  await flush();
+  check('review: a peer delta triggers a re-sync (fetchState)', fetchCalls > beforePeer, `Δ=${fetchCalls - beforePeer}`);
+  const beforeOwn = fetchCalls;
+  fire('review', { author: { id: myId } });
+  await flush();
+  check('review: this tab ignores its own echo (no re-sync)', fetchCalls === beforeOwn, `Δ=${fetchCalls - beforeOwn}`);
 }
 
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
@@ -377,7 +397,7 @@ async function persistenceChecks() {
       before &&
         before.submissions.length === 1 &&
         before.doc.version === 1 &&
-        before.review.choices.pick === 'Two' &&
+        before.review.choices.pick.anonymous === 'Two' &&
         Array.isArray(before.doc.blocks),
       JSON.stringify(before && { v: before.doc && before.doc.version, sub: before.submissions.length })
     );
@@ -394,7 +414,7 @@ async function persistenceChecks() {
         restored.data.doc.title === 'Persisted Plan' &&
         restored.data.doc.version === 1 &&
         restored.data.review.comments.length === 1 &&
-        restored.data.review.choices.pick === 'Two' &&
+        restored.data.review.choices.pick.anonymous === 'Two' &&
         restored.data.chat.some((c) => c.role === 'reviewer' && c.text === 'a question during review') &&
         restored.data.chat.some((c) => c.role === 'agent' && c.text === 'an agent reply') &&
         restored.data.progress.length === 1,
@@ -611,6 +631,88 @@ async function persistenceChecks() {
     await stop(preId);
     await sleep(300);
     fs.rmSync(stateDir6, { recursive: true, force: true });
+
+    // ----- P6b: a pre-004 legacy choice shape migrates on restore -----
+    console.log('persistence: a pre-004 flat choice value migrates to the per-reviewer shape on restore');
+    await killP();
+    const stateDir6b = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-legacy-'));
+    const legacyId = 'legacy1';
+    fs.writeFileSync(
+      path.join(stateDir6b, `${legacyId}.json`),
+      JSON.stringify({
+        id: legacyId,
+        status: 'reviewing',
+        doc: { path: null, title: 'Legacy', html: '<p>Hi</p>', version: 1, blocks: ['<p>Hi</p>'], history: [] },
+        // OLD shape: choices is { choiceId: option } / { choiceId: options[] }, NOT nested.
+        review: { comments: [], choices: { single: 'Two', multi: ['A', 'B'] } },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b });
+    check('persist: server up (legacy-migration case)', await waitHealth(true));
+    const migrated = await p(`/api/state?session=${legacyId}`);
+    check(
+      'a pre-004 flat choice value migrates to { reviewerId: option } under anonymous (answer preserved, not garbage)',
+      migrated.status === 200 &&
+        migrated.data.review.choices.single &&
+        migrated.data.review.choices.single.anonymous === 'Two' &&
+        Array.isArray(migrated.data.review.choices.multi.anonymous) &&
+        migrated.data.review.choices.multi.anonymous.join(',') === 'A,B',
+      JSON.stringify(migrated.data.review.choices)
+    );
+    await stop(legacyId);
+    await sleep(300);
+    fs.rmSync(stateDir6b, { recursive: true, force: true });
+
+    // ----- P6c: a submitted bundle is de-aliased from live session objects -----
+    // mergeComments returns peer comments by reference; reviewBundle structuredClones the
+    // result so a later /agent/reply (which mutates s.review.comments[i].replies in place)
+    // can't reach back and rewrite an already-recorded submission. Prove the clone holds.
+    console.log('persistence: a recorded submission is not mutated by a later /agent/reply (structuredClone guard)');
+    await killP();
+    const stateDir6c = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-alias-'));
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6c });
+    check('persist: server up (de-alias case)', await waitHealth(true));
+    const al = await p('/agent/start', { path: doc });
+    const alId = al.data.id;
+    // A owns comment k (lives in s.review.comments). B submits — so k is a PEER comment in
+    // B's bundle, which mergeComments preserves BY REFERENCE; only reviewBundle's
+    // structuredClone de-aliases it. Then /agent/reply mutates the live k in place. A
+    // progress ping forces a persist flush (/agent/reply itself doesn't persist).
+    await p(`/api/review-state?session=${alId}`, {
+      reviewerId: 'A',
+      comments: [{ id: 'k', quote: 'Alpha paragraph.', text: 'watch me', author: { id: 'A' } }],
+      choices: {},
+    });
+    await p(`/api/submit?session=${alId}`, { reviewerId: 'B', comments: [], choices: {}, note: 'snapshot' });
+    await p(`/agent/reply?session=${alId}`, { commentId: 'k', text: 'a late agent reply' });
+    await p(`/agent/progress?session=${alId}`, { text: 'flush' }); // progress persists; reply alone does not
+    // Read the file from THIS phase's state dir (the shared waitFile targets `stateDir`).
+    let aliasFile = null;
+    for (let i = 0; i < 80; i++) {
+      try {
+        aliasFile = JSON.parse(fs.readFileSync(path.join(stateDir6c, `${alId}.json`), 'utf8'));
+      } catch {
+        aliasFile = null;
+      }
+      const rep = aliasFile && (aliasFile.review.comments[0] || {}).replies;
+      if (rep && rep.length === 1 && (aliasFile.submissions || []).length === 1) break;
+      await sleep(50);
+    }
+    const submittedK = aliasFile.submissions[0].comments.find((c) => c.id === 'k');
+    check(
+      'a later /agent/reply mutates the live review but NOT the already-recorded submission',
+      submittedK && !submittedK.replies && // the structuredClone snapshot never gained the reply
+        aliasFile.review.comments[0].replies[0].text === 'a late agent reply', // the live copy did
+      JSON.stringify({ submitted: submittedK, live: aliasFile.review.comments[0].replies })
+    );
+    await stop(alId);
+    await sleep(300);
+    fs.rmSync(stateDir6c, { recursive: true, force: true });
 
     // ----- P7: a restored-but-stale session is reaped by the sweep + file deleted -----
     console.log('persistence: a restored-but-stale session is reaped by the abandon sweep');
@@ -912,7 +1014,7 @@ async function main() {
     'submit delivers comments, note, and a free-text Other choice value',
     subEv.type === 'submit' &&
       subEv.comments.length === 1 &&
-      subEv.choices.pick === 'a custom third option' &&
+      subEv.choices.pick.anonymous === 'a custom third option' &&
       subEv.note === 'almost there'
   );
   const stWorking = await cli('status', '--session', id);
@@ -996,13 +1098,324 @@ async function main() {
   const cyc = await browser(`/api/state?session=${q.id}`);
   check(
     'a re-present keeps prior answers and archives an un-anchored comment (never drops it)',
-    cyc.data.review.choices.pick === 'A1' &&
+    cyc.data.review.choices.pick.anonymous === 'A1' &&
       cyc.data.review.comments.length === 1 &&
       cyc.data.review.comments[0].id === 'x' &&
       cyc.data.review.comments[0].archived === true,
     JSON.stringify(cyc.data.review)
   );
   await cli('stop', '--session', q.id);
+
+  console.log('multi-reviewer: comments union across authors; a poster owns only its own');
+  const mr = await cli('start', docA, '--no-open');
+  const mrid = mr.id;
+  // Reviewer A creates a comment, syncing its whole set (just A's).
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'a1', quote: 'Body of plan A.', text: 'from A', author: { id: 'A', name: 'Ada' } }],
+    choices: {},
+  });
+  // Reviewer B syncs its own set. B's browser has NOT seen A's comment yet, so B
+  // posts only [b1]. A's comment must survive (union across authors).
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [{ id: 'b1', quote: 'Body of plan A.', text: 'from B', author: { id: 'B', name: 'Ben' } }],
+    choices: {},
+  });
+  const mrState = await browser(`/api/state?session=${mrid}`);
+  const mrComments = mrState.data.review.comments;
+  check(
+    'both reviewers\' comments coexist, each attributed (B\'s sync did not clobber A\'s)',
+    mrComments.length === 2 &&
+      mrComments.some((c) => c.id === 'a1' && c.author && c.author.id === 'A') &&
+      mrComments.some((c) => c.id === 'b1' && c.author && c.author.id === 'B'),
+    JSON.stringify(mrComments)
+  );
+  // B edits its own comment and, this time, its browser HAS A's comment too (live
+  // sync) — B may not edit or drop A's, but its edit to b1 lands.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [
+      { id: 'a1', quote: 'Body of plan A.', text: 'TAMPERED', author: { id: 'A', name: 'Ada' } },
+      { id: 'b1', quote: 'Body of plan A.', text: 'from B (edited)', author: { id: 'B', name: 'Ben' } },
+    ],
+    choices: {},
+  });
+  const mrState2 = await browser(`/api/state?session=${mrid}`);
+  const a1 = mrState2.data.review.comments.find((c) => c.id === 'a1');
+  const b1 = mrState2.data.review.comments.find((c) => c.id === 'b1');
+  check(
+    'a poster owns only its own comments: B edits b1 but cannot alter A\'s a1',
+    a1 && a1.text === 'from A' && b1 && b1.text === 'from B (edited)',
+    JSON.stringify({ a1, b1 })
+  );
+  // A deletes its own comment (posts a set without a1); B's b1 is untouched.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'A',
+    comments: [],
+    choices: {},
+  });
+  const mrState3 = await browser(`/api/state?session=${mrid}`);
+  check(
+    'a poster deleting its own comment leaves peers\' comments intact',
+    mrState3.data.review.comments.length === 1 &&
+      mrState3.data.review.comments[0].id === 'b1',
+    JSON.stringify(mrState3.data.review.comments)
+  );
+  // FM-7: a malformed comment entry (null / no id) must be skipped, never 500.
+  const mrBad = await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [null, {}, { id: 'b1', quote: 'Body of plan A.', text: 'still here', author: { id: 'B' } }],
+    choices: {},
+  });
+  const mrState4 = await browser(`/api/state?session=${mrid}`);
+  check(
+    'FM-7: malformed comment entries are skipped (clean 200, not a 500)',
+    mrBad.status === 200 &&
+      mrState4.data.review.comments.filter((c) => c && c.id === 'b1').length === 1 &&
+      mrState4.data.review.comments.every((c) => c && typeof c.id === 'string'),
+    JSON.stringify({ status: mrBad.status, comments: mrState4.data.review.comments })
+  );
+  // A re-creates a1 (it was deleted above) so there's a peer comment for B to reply to.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'a1', quote: 'Body of plan A.', text: 'from A', author: { id: 'A', name: 'Ada' } }],
+    choices: {},
+  });
+  // A reply is open to any reviewer (issue 002 threads): B replies to A's comment by
+  // syncing A's comment with a B-authored reply appended. The reply must survive even
+  // though B doesn't own the comment — B's browser holds a1 (author A) via live sync.
+  await browser(`/api/review-state?session=${mrid}`, {
+    reviewerId: 'B',
+    comments: [
+      {
+        id: 'a1',
+        quote: 'Body of plan A.',
+        text: 'from A',
+        author: { id: 'A', name: 'Ada' },
+        replies: [{ role: 'reviewer', text: 'B replies to A', ts: 111, author: { id: 'B', name: 'Ben' } }],
+      },
+      { id: 'b1', quote: 'Body of plan A.', text: 'still here', author: { id: 'B' } },
+    ],
+    choices: {},
+  });
+  const mrReply = await browser(`/api/state?session=${mrid}`);
+  const a1WithReply = mrReply.data.review.comments.find((c) => c.id === 'a1');
+  check(
+    'a reviewer\'s reply to a PEER\'s comment survives (not dropped by author-scoping)',
+    a1WithReply &&
+      a1WithReply.text === 'from A' && // A's body untouched
+      Array.isArray(a1WithReply.replies) &&
+      a1WithReply.replies.some((r) => r.text === 'B replies to A' && r.author && r.author.id === 'B'),
+    JSON.stringify(a1WithReply)
+  );
+  await cli('stop', '--session', mrid);
+
+  console.log('multi-reviewer: per-reviewer choices surface conflict; review-state broadcasts a delta');
+  const cf = await cli('start', docA, '--no-open');
+  const cfid = cf.id;
+  const cfEvents = await captureEvents(cfid); // capture the SSE stream for this session
+  await sleep(100);
+  // A picks A1, B picks A2 for the same choice — a divergence.
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  const cfState = await browser(`/api/state?session=${cfid}`);
+  check(
+    'choices are per-reviewer: the map holds BOTH divergent picks, neither overwritten',
+    cfState.data.review.choices.pick &&
+      cfState.data.review.choices.pick.A === 'A1' &&
+      cfState.data.review.choices.pick.B === 'A2',
+    JSON.stringify(cfState.data.review.choices)
+  );
+  // A changes its own pick to A2 — only A's entry moves; B's stays.
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'A', comments: [], choices: { pick: 'A2' } });
+  const cfState2 = await browser(`/api/state?session=${cfid}`);
+  check(
+    'a reviewer changing its own pick does not touch a peer\'s',
+    cfState2.data.review.choices.pick.A === 'A2' && cfState2.data.review.choices.pick.B === 'A2',
+    JSON.stringify(cfState2.data.review.choices)
+  );
+  // Poll until all three deltas have arrived over SSE, rather than a fixed sleep —
+  // the third frame's arrival time is what makes lastDelta correct (avoids flakiness).
+  let reviewDeltas = [];
+  for (let i = 0; i < 40; i++) {
+    reviewDeltas = cfEvents.events.filter((e) => e.event === 'review');
+    if (reviewDeltas.length >= 3) break;
+    await sleep(25);
+  }
+  check(
+    'review-state broadcasts a "review" SSE delta carrying merged comments + choices + author',
+    reviewDeltas.length >= 3 &&
+      reviewDeltas.every((e) => {
+        const d = JSON.parse(e.data);
+        return d.author && typeof d.author.id === 'string' && 'comments' in d && 'choices' in d;
+      }),
+    JSON.stringify(reviewDeltas.map((e) => e.data))
+  );
+  const lastDelta = JSON.parse(reviewDeltas[reviewDeltas.length - 1].data);
+  check(
+    'the delta author id identifies the poster (so a tab can ignore its own echo)',
+    lastDelta.author.id === 'A' && lastDelta.choices.pick.A === 'A2' && lastDelta.choices.pick.B === 'A2',
+    JSON.stringify(lastDelta)
+  );
+  cfEvents.close();
+  // DSM-16: a deselect (A posts a choices map WITHOUT `pick`) clears only A's entry;
+  // B's pick survives. The deselect protocol is communicated purely by key-absence.
+  await browser(`/api/review-state?session=${cfid}`, { reviewerId: 'A', comments: [], choices: {} });
+  const cfDeselect = await browser(`/api/state?session=${cfid}`);
+  check(
+    'DSM-16: a reviewer deselecting drops only its own pick; the peer\'s remains',
+    cfDeselect.data.review.choices.pick &&
+      cfDeselect.data.review.choices.pick.A === undefined &&
+      cfDeselect.data.review.choices.pick.B === 'A2',
+    JSON.stringify(cfDeselect.data.review.choices)
+  );
+  await cli('stop', '--session', cfid);
+
+  console.log('multi-reviewer: reviewer chat carries an author, role stays "reviewer"');
+  const ch = await cli('start', docA, '--no-open');
+  await browser(`/api/chat?session=${ch.id}`, { text: 'who owns this?', reviewerId: 'A', reviewerName: 'Ada' });
+  await browser(`/api/chat?session=${ch.id}`, { text: 'anon here' }); // no identity
+  const chState = await browser(`/api/state?session=${ch.id}`);
+  const attributed = chState.data.chat.find((m) => m.text === 'who owns this?');
+  const anon = chState.data.chat.find((m) => m.text === 'anon here');
+  check(
+    'a reviewer chat message carries author {id,name} and keeps role "reviewer"',
+    attributed && attributed.role === 'reviewer' && attributed.author &&
+      attributed.author.id === 'A' && attributed.author.name === 'Ada',
+    JSON.stringify(attributed)
+  );
+  check(
+    'an un-identified chat message omits author (renders exactly as today)',
+    anon && anon.role === 'reviewer' && !anon.author,
+    JSON.stringify(anon)
+  );
+  // A whitespace-only reviewerId must normalize to 'anonymous' consistently across chat
+  // (author omitted) AND review-state (the ownership/choice key), not a stray '   ' key.
+  await browser(`/api/review-state?session=${ch.id}`, { reviewerId: '   ', comments: [], choices: { pick: 'A1' } });
+  const wsState = await browser(`/api/state?session=${ch.id}`);
+  check(
+    'a whitespace-only reviewerId folds to the anonymous choice key (not a stray "   " key)',
+    wsState.data.review.choices.pick && wsState.data.review.choices.pick.anonymous === 'A1' &&
+      wsState.data.review.choices.pick['   '] === undefined,
+    JSON.stringify(wsState.data.review.choices)
+  );
+  await cli('stop', '--session', ch.id);
+
+  console.log('multi-reviewer: submit consolidates every reviewer\'s comments + per-reviewer choices');
+  const sb = await cli('start', docA, '--no-open');
+  const sbid = sb.id;
+  // A syncs a comment + a choice via review-state (the shared draft).
+  await browser(`/api/review-state?session=${sbid}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'a1', quote: 'Body of plan A.', text: 'A says', author: { id: 'A', name: 'Ada' } }],
+    choices: { pick: 'A1' },
+  });
+  // B submits, posting its OWN body (b1 + B's flat pick). The bundle must carry BOTH
+  // reviewers' comments and BOTH reviewers' choice entries.
+  const sbWait = cli('wait', '--session', sbid, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${sbid}`, {
+    reviewerId: 'B',
+    comments: [{ id: 'b1', quote: 'Body of plan A.', text: 'B says', author: { id: 'B', name: 'Ben' } }],
+    choices: { pick: 'A2' },
+    note: 'consolidated',
+  });
+  const sbEv = await sbWait;
+  check(
+    'the submit bundle consolidates all reviewers\' comments (no loss), each attributed',
+    sbEv.type === 'submit' &&
+      sbEv.comments.length === 2 &&
+      sbEv.comments.some((c) => c.id === 'a1' && c.author.id === 'A') &&
+      sbEv.comments.some((c) => c.id === 'b1' && c.author.id === 'B'),
+    JSON.stringify(sbEv.comments)
+  );
+  check(
+    'the submit bundle carries the full per-reviewer choice map (the conflict survives)',
+    sbEv.choices.pick && sbEv.choices.pick.A === 'A1' && sbEv.choices.pick.B === 'A2' && sbEv.note === 'consolidated',
+    JSON.stringify(sbEv.choices)
+  );
+  // The submit must NOT have mutated the shared draft (mirror today's behavior): the
+  // draft still holds only A's synced comment, not B's submitted one.
+  const sbDraft = await browser(`/api/state?session=${sbid}`);
+  check(
+    'submit leaves the shared review draft unmutated (no side effect on s.review)',
+    sbDraft.data.review.comments.length === 1 && sbDraft.data.review.comments[0].id === 'a1',
+    JSON.stringify(sbDraft.data.review.comments)
+  );
+  await cli('stop', '--session', sbid);
+
+  console.log('single-reviewer regression: one reviewer behaves exactly as before (union = just theirs)');
+  const one = await cli('start', docA, '--no-open');
+  const oneWait = cli('wait', '--session', one.id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${one.id}`, {
+    reviewerId: 'solo',
+    comments: [{ id: 's1', quote: 'Body of plan A.', text: 'solo note', author: { id: 'solo' } }],
+    choices: { pick: 'A1' },
+    note: 'ship',
+  });
+  const oneEv = await oneWait;
+  check(
+    'single reviewer: bundle is exactly their one comment + a one-entry choice map',
+    oneEv.type === 'submit' &&
+      oneEv.comments.length === 1 &&
+      oneEv.comments[0].id === 's1' &&
+      Object.keys(oneEv.choices.pick).length === 1 &&
+      oneEv.choices.pick.solo === 'A1',
+    JSON.stringify({ comments: oneEv.comments, choices: oneEv.choices })
+  );
+  await cli('stop', '--session', one.id);
+
+  console.log('multi-reviewer: two concurrent submits do not double-enqueue (check-then-act race)');
+  const rc = await cli('start', docA, '--no-open');
+  // Fire two submits at the same instant. The status guard must let exactly one
+  // through; the loser gets a 409 (FM-3) — never two 'submit' events for one round.
+  const [r1, r2] = await Promise.all([
+    browser(`/api/submit?session=${rc.id}`, { reviewerId: 'A', comments: [], choices: {}, note: 'one' }),
+    browser(`/api/submit?session=${rc.id}`, { reviewerId: 'B', comments: [], choices: {}, note: 'two' }),
+  ]);
+  check(
+    'FM-3: exactly one concurrent submit wins; the other 409s',
+    r1.ok !== r2.ok && (r1.status === 409 || r2.status === 409),
+    JSON.stringify({ r1: r1.status, r2: r2.status })
+  );
+  const rcEv1 = await cli('wait', '--session', rc.id, '--timeout', '3');
+  const rcEv2 = await cli('wait', '--session', rc.id, '--timeout', '1');
+  check(
+    'FM-3: only ONE submit event was enqueued (agent reworks once)',
+    rcEv1.type === 'submit' && rcEv2.type === 'timeout',
+    JSON.stringify({ e1: rcEv1.type, e2: rcEv2.type })
+  );
+  await cli('stop', '--session', rc.id);
+
+  console.log('multi-reviewer: a re-present carries every reviewer\'s comments + choices forward');
+  const carryDoc = path.join(dir, 'planreview-e2e-carry.md');
+  fs.writeFileSync(carryDoc, '# Carry\n\nShared body line.\n');
+  const cy = await cli('start', carryDoc, '--no-open');
+  await browser(`/api/review-state?session=${cy.id}`, {
+    reviewerId: 'A',
+    comments: [{ id: 'ca', quote: 'Shared body line.', text: 'A note', author: { id: 'A', name: 'Ada' } }],
+    choices: { pick: 'A1' },
+  });
+  await browser(`/api/review-state?session=${cy.id}`, {
+    reviewerId: 'B',
+    comments: [{ id: 'cb', quote: 'Shared body line.', text: 'B note', author: { id: 'B', name: 'Ben' } }],
+    choices: { pick: 'A2' },
+  });
+  fs.writeFileSync(carryDoc, '# Carry\n\nShared body line.\n\nA reworked addition.\n');
+  await cli('present', carryDoc, '--session', cy.id);
+  const carried = await browser(`/api/state?session=${cy.id}`);
+  check(
+    'DSM-3: loadDoc carries BOTH reviewers\' attributed comments + per-reviewer choices across a re-present',
+    carried.data.review.comments.length === 2 &&
+      carried.data.review.comments.some((c) => c.id === 'ca' && c.author.id === 'A' && !c.archived) &&
+      carried.data.review.comments.some((c) => c.id === 'cb' && c.author.id === 'B' && !c.archived) &&
+      carried.data.review.choices.pick.A === 'A1' &&
+      carried.data.review.choices.pick.B === 'A2',
+    JSON.stringify(carried.data.review)
+  );
+  await cli('stop', '--session', cy.id);
 
   console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
   const dv = path.join(dir, 'planreview-e2e-versions.md');
@@ -1377,6 +1790,44 @@ async function main() {
   );
   const app = await text('/app.js');
   check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
+  check(
+    'client mints a persistent reviewer identity (localStorage + crypto.randomUUID)',
+    /pr\.reviewerId/.test(app.body) && /crypto\.randomUUID/.test(app.body) && /localStorage/.test(app.body)
+  );
+  check(
+    'client attaches reviewerId to its mutating posts (review-state / submit / chat)',
+    /reviewerId:\s*reviewer\.id/.test(app.body)
+  );
+  check(
+    'client posts only its OWN flat choice picks (server nests them per reviewer)',
+    /function myChoices\(/.test(app.body) && /choices:\s*myChoices\(\)/.test(app.body)
+  );
+  check(
+    'client stamps new comments with an author',
+    /author:\s*author\(\)/.test(app.body)
+  );
+  check(
+    'client renders comment author badges with an id-derived color',
+    /author-badge/.test(app.body) && /function authorColor\(/.test(app.body)
+  );
+  check(
+    'client shows per-option who-picked badges and a muted disagree hint on choices',
+    /choice-picks/.test(app.body) && /choice-disagree/.test(app.body)
+  );
+  check('client shows the reviewer name on chat lines', /chat-author/.test(app.body));
+  check('review page carries the "you are <name>" identity affordance', /id="identity"/.test(appPage.body));
+  check(
+    'stylesheet styles the attribution UI (author badge + choice conflict)',
+    /author-badge/.test(css.body) && /choice-disagree/.test(css.body)
+  );
+  check(
+    'client live-syncs on a peer "review" delta and ignores its own echo by author id',
+    /addEventListener\('review'/.test(app.body) && /author\.id === reviewer\.id/.test(app.body)
+  );
+  check(
+    'client gates edit/delete to the comment owner (peer comments are read-only)',
+    /function ownComment\(/.test(app.body) && /if \(!c\.archived && own\)/.test(app.body)
+  );
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
   check('client highlights + can dismiss doc changes', /data-changed/.test(app.body) && /changes-dismissed/.test(app.body));

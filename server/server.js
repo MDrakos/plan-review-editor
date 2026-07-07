@@ -240,6 +240,15 @@ function restoreSessions() {
       if (data.doc && typeof data.doc === 'object') s.doc = { ...s.doc, ...data.doc };
       if (!Array.isArray(s.doc.history)) s.doc.history = []; // handlers assume it exists
       if (data.review && typeof data.review === 'object') s.review = data.review;
+      // A restored review must have the exact shapes the merge/render code assumes.
+      if (!Array.isArray(s.review.comments)) s.review.comments = [];
+      if (!isReviewerMap(s.review.choices)) s.review.choices = {};
+      // Migrate a pre-004 flat choice value ({choiceId: option|options[]}) to the
+      // per-reviewer shape { reviewerId: option }, keeping the legacy answer under
+      // 'anonymous' rather than dropping it on the first post-upgrade merge/render.
+      for (const [cid, v] of Object.entries(s.review.choices)) {
+        if (!isReviewerMap(v)) s.review.choices[cid] = { anonymous: v };
+      }
       if (Array.isArray(data.submissions)) s.submissions = data.submissions;
       if (Array.isArray(data.chat)) s.chat = data.chat;
       if (Array.isArray(data.progress)) s.progress = data.progress;
@@ -341,10 +350,26 @@ function loadDoc(s, docPath) {
 // Normalize a review bundle from a browser POST (shared by submit + approve).
 // Comments carry their full reply threads through verbatim, so the agent sees
 // the whole conversation (the reviewer's follow-ups included).
-function reviewBundle(s, body) {
+function reviewBundle(s, body, posterId) {
+  // CONSOLIDATE: the submitter's posted body is merged over the shared review (every
+  // peer's already-synced comments + the full per-reviewer choice map) into a throwaway
+  // snapshot — so nothing is lost — WITHOUT mutating s.review (the draft's carry-forward
+  // behavior is unchanged). structuredClone de-aliases the snapshot from live session
+  // objects (e.g. a later /agent/reply mutating a comment's replies must not rewrite a
+  // historical submission).
+  const comments = mergeComments(
+    s.review.comments,
+    Array.isArray(body.comments) ? body.comments : [],
+    posterId
+  );
+  const choices = mergeChoices(
+    s.review.choices,
+    body.choices && typeof body.choices === 'object' ? body.choices : {},
+    posterId
+  );
   return {
-    comments: Array.isArray(body.comments) ? body.comments : [],
-    choices: body.choices && typeof body.choices === 'object' ? body.choices : {},
+    comments: structuredClone(comments),
+    choices: structuredClone(choices),
     note: typeof body.note === 'string' ? body.note : '',
     docVersion: s.doc.version,
     submittedAt: new Date().toISOString(),
@@ -361,7 +386,11 @@ function mergeReplies(prev, incoming) {
   const out = [];
   for (const r of [...(prev || []), ...(incoming || [])]) {
     if (!r || typeof r.text !== 'string') continue;
-    const key = `${r.role}|${r.ts}|${r.text}`;
+    // Include the author so two reviewers whose replies collide on role|ts|text
+    // (e.g. a millisecond race, or a fixed-ts test) aren't deduped down to one.
+    // Agent replies have no author -> authorId returns 'anonymous' on both copies,
+    // so the server-appended-vs-browser-synced agent-reply dedup still works.
+    const key = `${r.role}|${r.ts}|${r.text}|${authorId(r)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(r);
@@ -370,24 +399,125 @@ function mergeReplies(prev, incoming) {
   return out;
 }
 
+// A comment's (or a POST body's) author id, defaulting to a synthetic 'anonymous'
+// so an old client / curl with no identity still round-trips without breaking.
+function authorId(c) {
+  return (c && c.author && typeof c.author.id === 'string' && c.author.id) || 'anonymous';
+}
+
+// The reviewer id a POST claims for itself (top-level, per the design). Determines
+// which comments in the body this POST is authoritative over. Derived from authorOf
+// so the two can't drift: same trimming, and a blank/whitespace id folds to the
+// synthetic 'anonymous' merge key rather than a stray "   " key.
+function posterIdOf(body) {
+  return (authorOf(body) || {}).id || 'anonymous';
+}
+
+// The author object for a chat/reply from a POST body: {id, name?} when the body
+// carries a reviewerId, else null (an un-identified message stays un-attributed and
+// renders exactly as it did before this feature). posterIdOf builds on this but folds
+// a missing id to the string 'anonymous' (a real merge key); authorOf omits the field.
+function authorOf(body) {
+  const id = body && typeof body.reviewerId === 'string' ? body.reviewerId.trim() : '';
+  if (!id) return null;
+  const name = body && typeof body.reviewerName === 'string' ? body.reviewerName.trim() : '';
+  return name ? { id, name } : { id };
+}
+
+// A value shaped like a per-reviewer choice map ({ reviewerId: option }): a plain,
+// non-null, non-array object. Used to guard the nested-choices shape against a legacy
+// scalar/array (pre-004 file) at every read site so none can drift.
+function isReviewerMap(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+// Reconcile ONE browser comment against the server's copy: union replies, and keep
+// the server-authoritative archived flag (the browser can clobber neither). This is
+// the per-comment step lifted out of the old mergeComments so mergeComments can
+// choose, per author, whether to apply it.
+function reconcileComment(prev, incoming) {
+  const replies = mergeReplies(prev && prev.replies, incoming.replies);
+  const merged = { ...incoming };
+  if (replies.length) merged.replies = replies;
+  else delete merged.replies;
+  delete merged.archived; // server-authoritative — never trust the browser's copy
+  if (prev && prev.archived) merged.archived = true;
+  return merged;
+}
+
 // Reconcile the browser's comment array with the server's. The browser owns the
 // set of comments (create / edit / delete / order); the server owns each
 // comment's `archived` flag (set at re-present) and any agent replies appended
 // out-of-band. So take the incoming comments, but union each one's replies with
 // the server's copy and re-apply the server's archived flag — the browser can't
 // clobber either.
-function mergeComments(prev, incoming) {
-  const prevById = new Map((prev || []).map((c) => [c.id, c]));
-  return (incoming || []).map((c) => {
-    const p = prevById.get(c.id);
-    const replies = mergeReplies(p && p.replies, c.replies);
-    const merged = { ...c };
-    if (replies.length) merged.replies = replies;
-    else delete merged.replies;
-    delete merged.archived; // server-authoritative — never trust the browser's copy
-    if (p && p.archived) merged.archived = true;
-    return merged;
-  });
+// Author-scoped union — the CORE multi-reviewer change. A POST is authoritative
+// ONLY over its own author's comments (create / edit / delete): those in `incoming`
+// whose author.id === posterId. Every OTHER author's comment is preserved from
+// `prev` untouched, so reviewer B's sync can never drop or edit reviewer A's
+// comments — even when B's browser holds A's comments (from live sync) and posts
+// them back. Order follows `prev` (peers stay put; a peer's card never jumps when
+// you edit yours), with the poster's brand-new comments appended.
+function mergeComments(prev, incoming, posterId) {
+  // Drop malformed entries up front (a null / non-object / id-less comment from a
+  // buggy client or curl) so no downstream `.id` deref can throw — FM-7. Mirrors the
+  // defensive filtering mergeReplies already does for reply objects.
+  const ok = (c) => c && typeof c === 'object' && typeof c.id === 'string';
+  const cleanIncoming = (incoming || []).filter(ok);
+  const cleanPrev = (prev || []).filter(ok);
+  const mine = new Map(cleanIncoming.filter((c) => authorId(c) === posterId).map((c) => [c.id, c]));
+  const incomingById = new Map(cleanIncoming.map((c) => [c.id, c]));
+  const prevById = new Map(cleanPrev.map((c) => [c.id, c]));
+  const emitted = new Set();
+  const out = [];
+  for (const p of cleanPrev) {
+    if (authorId(p) === posterId) {
+      const inc = mine.get(p.id);
+      if (!inc) continue; // the poster deleted their own comment
+      out.push(reconcileComment(p, inc));
+    } else {
+      // A peer's comment: the poster can't edit or delete it (body stays authoritative),
+      // but replies are open to everyone (issue 002 threads) — so union any replies the
+      // poster added to this thread onto the server's copy; mergeReplies only ADDS, never
+      // removes, so a peer can't clobber existing replies. Without this, a reply left on
+      // another reviewer's comment would be silently dropped.
+      const inc = incomingById.get(p.id);
+      if (inc && Array.isArray(inc.replies) && inc.replies.length) {
+        const replies = mergeReplies(p.replies, inc.replies);
+        out.push(replies.length ? { ...p, replies } : p);
+      } else {
+        out.push(p);
+      }
+    }
+    emitted.add(p.id);
+  }
+  for (const c of cleanIncoming) {
+    if (authorId(c) !== posterId || emitted.has(c.id)) continue;
+    out.push(reconcileComment(prevById.get(c.id), c)); // brand-new poster comment
+    emitted.add(c.id);
+  }
+  return out;
+}
+
+// Per-reviewer choice map: { choiceId: { reviewerId: option } }. A POST carries the
+// poster's OWN flat picks ({ choiceId: option }); we replace ONLY the poster's entries
+// (a divergent pick by reviewer B never overwrites reviewer A's) and drop any of the
+// poster's prior picks it no longer sends (a deselect). A prev entry that isn't a plain
+// object — e.g. a pre-004 persisted `{choiceId: <string>}` — is dropped rather than
+// mangled: a one-time loss only for a session already open across the upgrade.
+function mergeChoices(prev, incoming, posterId) {
+  const out = {};
+  for (const [choiceId, byReviewer] of Object.entries(prev || {})) {
+    if (!isReviewerMap(byReviewer)) continue;
+    const kept = {};
+    for (const [rid, opt] of Object.entries(byReviewer)) if (rid !== posterId) kept[rid] = opt;
+    if (Object.keys(kept).length) out[choiceId] = kept;
+  }
+  for (const [choiceId, opt] of Object.entries(incoming || {})) {
+    if (opt === undefined || opt === null || opt === '' || (Array.isArray(opt) && opt.length === 0)) continue;
+    (out[choiceId] || (out[choiceId] = {}))[posterId] = opt;
+  }
+  return out;
 }
 
 function readBody(req) {
@@ -601,11 +731,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const text = String(body.text || '').trim();
       if (!text) return sendJson(res, 400, { error: 'empty message' });
-      const msg = { role: 'reviewer', text, ts: Date.now() };
+      const author = authorOf(body);
+      const msg = { role: 'reviewer', text, ts: Date.now(), ...(author ? { author } : {}) };
       s.chat.push(msg);
       touch(s);
       broadcast(s, 'chat', msg);
-      enqueueAgentEvent(s, { type: 'chat', text, ts: msg.ts });
+      enqueueAgentEvent(s, { type: 'chat', text, ts: msg.ts, ...(author ? { author } : {}) });
       persist(s);
       return sendJson(res, 200, { ok: true });
     }
@@ -621,12 +752,22 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && pathname === '/api/review-state') {
       const body = await readBody(req);
-      // Merge, don't overwrite: preserves agent replies (and the server's
-      // archived flag) against a browser sync that raced the comment-reply SSE.
+      const posterId = posterIdOf(body);
+      // Author-scoped merge: preserves peers' comments (and agent replies + the
+      // server's archived flag) against a browser sync that only owns its author's set.
       if (Array.isArray(body.comments))
-        s.review.comments = mergeComments(s.review.comments, body.comments);
-      if (body.choices && typeof body.choices === 'object') s.review.choices = body.choices;
+        s.review.comments = mergeComments(s.review.comments, body.comments, posterId);
+      // Per-reviewer choices: record only the poster's picks; peers' picks survive.
+      if (body.choices && typeof body.choices === 'object')
+        s.review.choices = mergeChoices(s.review.choices, body.choices, posterId);
       touch(s);
+      // Live sync: fan the merged review out so other tabs render peers' comments and
+      // choice picks. The poster ignores its own echo by author.id (see the client).
+      broadcast(s, 'review', {
+        comments: s.review.comments,
+        choices: s.review.choices,
+        author: { id: posterId },
+      });
       persist(s);
       return sendJson(res, 200, { ok: true });
     }
@@ -639,9 +780,13 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && (pathname === '/api/submit' || pathname === '/api/approve')) {
       const approve = pathname === '/api/approve';
       const verb = approve ? 'approve' : 'submit';
+      const body = await readBody(req);
+      // Guard AFTER the await, then mutate synchronously — closes the check-then-act
+      // race where two reviewers submitting at once both pass a pre-await guard and
+      // each enqueue a round (FM-3). reviewBundle below performs no I/O / await.
       if (s.status !== 'reviewing')
         return sendJson(res, 409, { error: `cannot ${verb} while ${s.status}` });
-      const bundle = reviewBundle(s, await readBody(req));
+      const bundle = reviewBundle(s, body, posterIdOf(body));
       s.submissions.push(bundle);
       s.progress = []; // start the rework round with a clean progress log
       s.status = approve ? 'done' : 'working';

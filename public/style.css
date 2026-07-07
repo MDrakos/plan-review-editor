@@ -1026,3 +1026,54 @@ mark.hl.active { background: var(--mark-active); }
 }
 
 .choice-other-text:focus { outline: 2px solid var(--accent); border-color: transparent; }
+
+/* ---------- multi-reviewer attribution ---------- */
+.author-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 1px 7px;
+  margin-right: 6px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--author-color, var(--ink-soft));
+  vertical-align: middle;
+}
+.chat-author {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 6px;
+  color: var(--author-color, var(--ink-soft));
+}
+.reply-text,
+.chat-text { vertical-align: middle; }
+.choice-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.choice-pick {
+  font-size: 12px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  background: var(--surface);
+}
+.choice-disagree {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--ink-soft);
+  align-self: center;
+}
+.identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.identity-name { color: var(--author-color, var(--ink-soft)); font-weight: 600; }
+.identity-edit { padding: 1px 8px; font-size: 12px; }
