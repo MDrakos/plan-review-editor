@@ -321,7 +321,17 @@ async function fetchState() {
 function appendChatMessage(msg) {
   const el = document.createElement('div');
   el.className = `chat-msg ${msg.role}`;
-  el.textContent = msg.text;
+  if (msg.role !== 'agent' && msg.author) {
+    const who = document.createElement('span');
+    who.className = 'chat-author';
+    who.textContent = authorLabel(msg.author);
+    if (msg.author.id) who.style.setProperty('--author-color', authorColor(msg.author.id));
+    el.appendChild(who);
+  }
+  const body = document.createElement('span');
+  body.className = 'chat-text';
+  body.textContent = msg.text;
+  el.appendChild(body);
   chatListEl.appendChild(el);
   chatListEl.scrollTop = chatListEl.scrollHeight;
 }
@@ -531,6 +541,50 @@ function bindChoices() {
       summaryVal.textContent = answerText(myPick(id));
     };
 
+    // Who picked what across ALL reviewers (not just this tab): a badge per option
+    // with the reviewers who chose it, plus a muted hint when picks diverge. No lock.
+    const picksEl = document.createElement('div');
+    picksEl.className = 'choice-picks';
+    block.appendChild(picksEl);
+    const renderPicks = () => {
+      const byReviewer = state.choices[id];
+      // Guard the shape (DSM-13): a pre-004 restored session can still hold a legacy
+      // scalar/array here until its first post-restore sync; Object.entries on a string
+      // would yield per-character garbage badges. Only a plain nested object renders.
+      const entries =
+        byReviewer && typeof byReviewer === 'object' && !Array.isArray(byReviewer)
+          ? Object.entries(byReviewer) // [reviewerId, option]
+          : [];
+      picksEl.innerHTML = '';
+      if (!entries.length) {
+        picksEl.hidden = true;
+        return;
+      }
+      picksEl.hidden = false;
+      // count per option label, skipping empty/non-string labels (FM-10)
+      const counts = new Map();
+      for (const [rid, opt] of entries) {
+        for (const label of Array.isArray(opt) ? opt : [opt]) {
+          if (typeof label !== 'string' || label === '') continue;
+          if (!counts.has(label)) counts.set(label, []);
+          counts.get(label).push(rid);
+        }
+      }
+      for (const [label, rids] of counts) {
+        const tag = document.createElement('span');
+        tag.className = 'choice-pick';
+        tag.textContent = `${rids.length} · ${label}`;
+        tag.title = rids.map((r) => (r === reviewer.id ? 'you' : r.slice(0, 8))).join(', ');
+        picksEl.appendChild(tag);
+      }
+      if (counts.size > 1) {
+        const hint = document.createElement('span');
+        hint.className = 'choice-disagree';
+        hint.textContent = 'reviewers disagree';
+        picksEl.appendChild(hint);
+      }
+    };
+
     // the value an option contributes: for "Other", whatever was typed
     const valueOf = (i) =>
       i.dataset.other ? (otherText ? otherText.value.trim() : '') : i.value;
@@ -544,6 +598,7 @@ function bindChoices() {
       if (pick === undefined || (Array.isArray(pick) && pick.length === 0)) delete byReviewer[reviewer.id];
       else byReviewer[reviewer.id] = pick;
       refreshSummary();
+      renderPicks();
       syncReview();
     };
 
@@ -573,6 +628,7 @@ function bindChoices() {
     }
 
     refreshSummary();
+    renderPicks();
     if (hasAnswer(myPick(id))) block.classList.add('answered'); // collapse if already answered
   }
 }
@@ -653,6 +709,30 @@ function saveComment() {
 
 // ---------- comment panel ----------
 
+// A stable, legible color per reviewer id — a hashed hue so the same reviewer gets
+// the same badge color across cards without any server-assigned palette.
+function authorColor(id) {
+  let h = 0;
+  for (let i = 0; i < (id || '').length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return `hsl(${h}, 55%, 45%)`;
+}
+
+// The display label for an author stamp: their name, else a short id, else 'anonymous'.
+function authorLabel(a) {
+  if (!a) return 'anonymous';
+  if (a.name) return a.name;
+  return a.id ? a.id.slice(0, 8) : 'anonymous';
+}
+
+// A small colored badge naming an author (used on comment cards, replies, chat).
+function authorBadge(a) {
+  const badge = document.createElement('span');
+  badge.className = 'author-badge';
+  badge.textContent = authorLabel(a);
+  if (a && a.id) badge.style.setProperty('--author-color', authorColor(a.id));
+  return badge;
+}
+
 function renderComments() {
   const active = state.comments.filter((c) => !c.archived);
   const archived = state.comments.filter((c) => c.archived);
@@ -694,7 +774,11 @@ function renderThread(c) {
   for (const r of c.replies || []) {
     const reply = document.createElement('div');
     reply.className = `reply ${r.role === 'agent' ? 'agent' : 'reviewer'}`;
-    reply.textContent = r.text;
+    if (r.role !== 'agent' && r.author) reply.appendChild(authorBadge(r.author));
+    const body = document.createElement('span');
+    body.className = 'reply-text';
+    body.textContent = r.text;
+    reply.appendChild(body);
     thread.appendChild(reply);
   }
   if (!c.archived && state.status === 'reviewing') thread.appendChild(replyForm(c));
@@ -743,6 +827,8 @@ function viewCard(c) {
 
   const actions = document.createElement('div');
   actions.className = 'card-actions';
+  // Attribute the card to its author (color-coded) so reviewers can tell who said what.
+  if (c.author) actions.appendChild(authorBadge(c.author));
   // An archived comment's text is gone from the plan, so there's nothing to edit
   // in place — only offer to dismiss it.
   if (!c.archived) {
@@ -1041,7 +1127,32 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
+// ---------- identity affordance ----------
+// A small "you are <name> (edit)" chip. Editing the name updates localStorage and
+// re-syncs so peers see the new label on this tab's future mutations.
+function renderIdentity() {
+  const el = document.getElementById('identity');
+  if (!el) return;
+  el.innerHTML = '';
+  const label = document.createElement('span');
+  label.className = 'identity-name';
+  label.textContent = `you are ${authorLabel({ id: reviewer.id, name: reviewer.name })}`;
+  label.style.setProperty('--author-color', authorColor(reviewer.id));
+  const edit = document.createElement('button');
+  edit.className = 'btn identity-edit';
+  edit.textContent = 'edit';
+  edit.addEventListener('click', () => {
+    const next = prompt('Your reviewer name (shown to others on this plan):', reviewer.name);
+    if (next === null) return;
+    reviewer.name = next.trim();
+    renderIdentity();
+    syncReview(); // re-stamp future work; existing comments keep their prior author
+  });
+  el.append(label, edit);
+}
+
 // ---------- boot ----------
 
+renderIdentity();
 fetchState();
 connectEvents();

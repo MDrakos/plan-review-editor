@@ -166,7 +166,7 @@ async function driveLivenessWiring() {
 
   const makeEl = () => ({
     textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
-    className: '', dataset: {}, style: {},
+    className: '', dataset: {}, style: { setProperty() {}, removeProperty() {} },
     classList: { add() {}, remove() {}, contains: () => false },
     addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
     append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
@@ -1696,6 +1696,20 @@ async function main() {
   check(
     'client stamps new comments with an author',
     /author:\s*author\(\)/.test(app.body)
+  );
+  check(
+    'client renders comment author badges with an id-derived color',
+    /author-badge/.test(app.body) && /function authorColor\(/.test(app.body)
+  );
+  check(
+    'client shows per-option who-picked badges and a muted disagree hint on choices',
+    /choice-picks/.test(app.body) && /choice-disagree/.test(app.body)
+  );
+  check('client shows the reviewer name on chat lines', /chat-author/.test(app.body));
+  check('review page carries the "you are <name>" identity affordance', /id="identity"/.test(appPage.body));
+  check(
+    'stylesheet styles the attribution UI (author badge + choice conflict)',
+    /author-badge/.test(css.body) && /choice-disagree/.test(css.body)
   );
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
