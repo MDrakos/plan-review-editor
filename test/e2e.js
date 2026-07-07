@@ -554,7 +554,7 @@ async function persistenceChecks() {
       JSON.stringify({
         id: preId,
         status: 'reviewing',
-        doc: { path: null, title: 'Preseeded', html: '<p>Hi</p>', version: 3, blocks: ['<p>Hi</p>'] },
+        doc: { path: null, title: 'Preseeded', html: '<p>Hi</p>', version: 3, blocks: ['<p>Hi</p>'], history: [] },
         review: { comments: [], choices: {} },
         submissions: [],
         chat: [],

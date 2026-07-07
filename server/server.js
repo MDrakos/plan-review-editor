@@ -235,6 +235,7 @@ function restoreSessions() {
       // Object fields fall back to blankSession's defaults if a hand-edited file
       // has them as the wrong type — restore a usable session, never a booby-trap.
       if (data.doc && typeof data.doc === 'object') s.doc = data.doc;
+      if (!Array.isArray(s.doc.history)) s.doc.history = []; // handlers assume it exists
       if (data.review && typeof data.review === 'object') s.review = data.review;
       if (Array.isArray(data.submissions)) s.submissions = data.submissions;
       if (Array.isArray(data.chat)) s.chat = data.chat;
