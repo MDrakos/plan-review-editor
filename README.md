@@ -169,8 +169,10 @@ options:
 ```
 ````
 
-The reviewer's selection comes back in the submit bundle as
-`choices.storage`.
+Each reviewer's selection comes back in the submit bundle as a per-reviewer map,
+`choices.storage[reviewerId]` — so when several reviewers pick differently, every
+pick is present and the conflict is surfaced rather than overwritten. With one
+reviewer the map simply has a single entry.
 
 ### Comparing versions
 
@@ -195,6 +197,8 @@ dismissible "what changed since your last review" highlight on each new round.
 - [x] Concurrent isolated sessions — many agents at once, one tab each
 - [x] Diff view between document versions — add/remove/change markers, incl. removals
 - [x] Persist sessions to disk so they survive a server restart
+- [x] Comment threads with agent replies
+- [x] Multiple reviewers on one plan — attribution, live sync, per-reviewer choices
 
-Possible next steps: comment threads with agent replies, multiple reviewers on
-one plan.
+Possible next steps: presence indicators (who's viewing now), and richer choice
+conflict resolution.

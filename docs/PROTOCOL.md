@@ -53,8 +53,12 @@ anything else — answer it with `planreview say` and keep waiting. Chat does
 not interrupt the review; the reviewer keeps commenting while you respond.
 
 ```json
-{ "type": "chat", "text": "can we ship without Redis?", "ts": 1783032851932 }
+{ "type": "chat", "text": "can we ship without Redis?", "ts": 1783032851932,
+  "author": { "id": "5f3c…", "name": "Ada" } }
 ```
+
+`author` (`{ id, name? }`) names the reviewer who sent it when more than one is
+on the plan; it's absent for a pre-identity client. See **Multiple reviewers**.
 
 ### `submit`
 
@@ -66,9 +70,10 @@ shows a "reworking" overlay until you `present` again.
   "type": "submit",
   "comments": [
     { "id": "c1a2b3", "quote": "the exact text the reviewer selected",
-      "text": "the reviewer's comment about it", "ts": 1783032851932 }
+      "text": "the reviewer's comment about it", "ts": 1783032851932,
+      "author": { "id": "5f3c…", "name": "Ada" } }
   ],
-  "choices": { "storage": "In-process now, Redis behind the feature flag later" },
+  "choices": { "storage": { "5f3c…": "In-process", "9b1d…": "Redis" } },
   "note": "overall note typed next to the submit button",
   "docVersion": 1,
   "submittedAt": "2026-07-02T22:54:12.907Z"
@@ -77,14 +82,22 @@ shows a "reworking" overlay until you `present` again.
 
 - `comments[].quote` is the selected passage — locate it in your markdown
   source to understand what the comment anchors to.
+- `comments[].author` (`{ id, name? }`) attributes the comment to a reviewer —
+  see **Multiple reviewers** below. It is absent only for a pre-identity client
+  (treated as `anonymous`). One bundle consolidates **every** reviewer's
+  comments, each attributed; a submit never drops a peer's input.
 - Each comment can carry a `replies` thread — `[{ role: "agent" | "reviewer",
-  text, ts }]` — so a comment is a conversation, not a leaf. To answer a
-  *specific* comment in place (rather than in the global chat), run
+  text, ts, author? }]` — so a comment is a conversation, not a leaf. A reviewer
+  reply carries its own `author`; agent replies keep `role: "agent"`. Any
+  reviewer may reply to any comment (replies are append-only across reviewers).
+  To answer a *specific* comment in place (rather than in the global chat), run
   `planreview reply <commentId> "<answer>" --session <id>`; it threads under
-  that comment and the reviewer's follow-ups ride back in the next bundle's
+  that comment and the reviewers' follow-ups ride back in the next bundle's
   `comments[].replies`. See **Replying to a comment** below.
-- `choices` maps each `id` from a ` ```choice ` fence to the selected option
-  (an array when the block sets `multi: true`).
+- `choices` maps each `id` from a ` ```choice ` fence to a **per-reviewer** map
+  of `{ reviewerId: selected option }` (the option is an array when the block
+  sets `multi: true`). When reviewers pick differently, every pick is present —
+  the conflict is surfaced, never overwritten. See **Multiple reviewers**.
 - Rework the document, then `planreview present <file> --session <id>` — the
   browser reloads it in place and a fresh review round begins. Every re-present
   after the first automatically highlights the blocks that changed since the
@@ -125,7 +138,7 @@ to `done`, independent of what the agent does next.
 {
   "type": "approve",
   "comments": [],
-  "choices": { "storage": "In-process" },
+  "choices": { "storage": { "5f3c…": "In-process" } },
   "note": "ship it",
   "docVersion": 3,
   "submittedAt": "2026-07-03T18:12:00.000Z"
@@ -171,19 +184,23 @@ options:
 ````
 
 `id` and at least one option are required; a malformed block falls back to
-rendering as plain code. The reviewer's answer arrives in `submit.choices` (and
-`approve.choices`).
+rendering as plain code. The reviewers' answers arrive in `submit.choices` (and
+`approve.choices`) as a per-reviewer map `{ id: { reviewerId: option } }` —
+every reviewer's pick for each block, so a divergence is visible rather than
+silently overwritten (the UI shows a per-option who-picked badge and a muted
+"reviewers disagree" hint). With a single reviewer the map simply has one entry.
 
 By default each block also renders a free-text **"Other"** answer (a radio or
-checkbox plus a text field). If the reviewer types there, `choices[id]` holds
-their typed string — indistinguishable in shape from a preset answer, so no
-special handling is needed. Add `other: false` to omit it and require one of the
-listed options.
+checkbox plus a text field). If a reviewer types there, their entry in
+`choices[id]` holds the typed string — indistinguishable in shape from a preset
+answer, so no special handling is needed. Add `other: false` to omit it and
+require one of the listed options.
 
-**Answers persist across cycles.** A re-present keeps the reviewer's prior
-`choices`. So if you keep a choice block in the reworked doc, the reviewer isn't
-re-asked — their previous pick shows collapsed, with a "Change" option — and
-`submit`/`approve` still report the current value for every answered `id`.
+**Answers persist across cycles.** A re-present keeps every reviewer's prior
+`choices`. So if you keep a choice block in the reworked doc, a reviewer isn't
+re-asked — their own previous pick shows collapsed, with a "Change" option — and
+`submit`/`approve` still report the current per-reviewer value for every
+answered `id`.
 
 ## Comment & thread persistence
 
@@ -198,8 +215,35 @@ is re-checked against the new text:
   section in the reviewer's panel. It is **never silently dropped** — the thread
   is preserved, and you can still `reply` to it.
 
-The comment shape is therefore `{ id, quote, text, ts, replies?, archived? }`;
-`submit`/`approve` bundles carry the full threads (archived comments included).
+The comment shape is therefore
+`{ id, quote, text, ts, author?, replies?, archived? }`; `submit`/`approve`
+bundles carry the full threads (archived comments included).
+
+## Multiple reviewers
+
+Several people can open the same `/s/<id>` in different browsers and review
+together; a single-reviewer session behaves exactly as before.
+
+- **Identity.** Each browser mints an ephemeral `reviewerId` (kept in
+  `localStorage`, so a refresh keeps it) plus an optional editable display name,
+  and attaches them to every mutating request. No accounts, no server roster.
+  A request without a `reviewerId` (an old client, a raw `curl`) is attributed
+  to the synthetic id `anonymous` — nothing breaks.
+- **Attribution.** Comments, reviewer chat messages, and reviewer replies carry
+  an `author: { id, name? }`. The UI color-codes each reviewer.
+- **Comment ownership.** A reviewer's save is authoritative **only over its own
+  author's comments** (create / edit / delete) — peers' comments are preserved
+  untouched, so no one can clobber another's. Replies are the exception: any
+  reviewer may reply to any comment, and replies are append-only (never removed
+  by a peer's sync). The archived flag stays server-authoritative.
+- **Choices** are per-reviewer (`{ id: { reviewerId: option } }`), so a conflict
+  is surfaced, not overwritten.
+- **Live sync.** A `POST /api/review-state` broadcasts a `review` SSE event so
+  other open tabs re-sync and render peers' comments and picks live; a tab
+  ignores the echo of its own change.
+- **Submit consolidates.** Any reviewer can submit; the one bundle carries every
+  reviewer's attributed comments plus the full per-reviewer choice map, with no
+  loss. The status state machine is unchanged — the agent still reworks once.
 
 ## Version history and diffs
 
@@ -243,8 +287,8 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/agent/start` | CLI | create a session and present a document; returns its `id` |
 | GET | `/api/state?session=` | browser | full session state (doc — incl. `doc.versions` — review, chat, progress, status, clients) |
 | GET | `/api/diff?session=` | browser | annotated diff between two retained versions (`&from=`/`&to=` optional); 400s outside the retention ring |
-| GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `comment-reply`, `progress`, `status` |
-| POST | `/api/review-state?session=` | browser | persist in-progress comments/choices |
+| GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `comment-reply`, `review`, `progress`, `status` |
+| POST | `/api/review-state?session=` | browser | persist in-progress comments/choices (carries `reviewerId`; broadcasts a `review` delta) |
 | POST | `/api/chat?session=` | browser | reviewer chat message (queued for the agent) |
 | POST | `/api/submit?session=` | browser | submit a review round (→ `working`; queued as `submit`) |
 | POST | `/api/approve?session=` | browser | approve & finish (→ `done`; queued as `approve`) |
