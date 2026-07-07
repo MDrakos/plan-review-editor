@@ -77,6 +77,12 @@ shows a "reworking" overlay until you `present` again.
 
 - `comments[].quote` is the selected passage — locate it in your markdown
   source to understand what the comment anchors to.
+- Each comment can carry a `replies` thread — `[{ role: "agent" | "reviewer",
+  text, ts }]` — so a comment is a conversation, not a leaf. To answer a
+  *specific* comment in place (rather than in the global chat), run
+  `planreview reply <commentId> "<answer>" --session <id>`; it threads under
+  that comment and the reviewer's follow-ups ride back in the next bundle's
+  `comments[].replies`. See **Replying to a comment** below.
 - `choices` maps each `id` from a ` ```choice ` fence to the selected option
   (an array when the block sets `multi: true`).
 - Rework the document, then `planreview present <file> --session <id>` — the
@@ -86,6 +92,24 @@ shows a "reworking" overlay until you `present` again.
 - While reworking, `planreview progress "<step>" --session <id>` appends a step
   to a live checklist shown in the reviewer's "reworking" overlay (SSE
   `progress` event). Steps reset each round and clear when you `present`.
+
+#### Replying to a comment
+
+`planreview reply <commentId> "<message>" --session <id>` posts an agent reply
+threaded under one specific comment — the inline counterpart to `say` (which is
+the global, un-anchored chat). The `<commentId>` comes from the bundle's
+`comments[].id`. The reply renders under that comment in the reviewer's panel
+(SSE `comment-reply`), not in the chat sidebar.
+
+```
+planreview reply c1a2b3 "Keeping Redis — the limiter is process-local." --session $id
+# -> { "ok": true, "commentId": "c1a2b3", "reply": { "role": "agent", "text": "…", "ts": … } }
+```
+
+Unknown `commentId` → 404; empty message → 400. A reply does **not** start a
+review round or change status — it's a message, like `say`. Comments (and their
+threads) persist across `present` rounds as long as the quote still anchors —
+see **Comment & thread persistence** below.
 
 ### `approve`
 
@@ -157,10 +181,25 @@ special handling is needed. Add `other: false` to omit it and require one of the
 listed options.
 
 **Answers persist across cycles.** A re-present keeps the reviewer's prior
-`choices` (only comments reset each round). So if you keep a choice block in the
-reworked doc, the reviewer isn't re-asked — their previous pick shows collapsed,
-with a "Change" option — and `submit`/`approve` still report the current value
-for every answered `id`.
+`choices`. So if you keep a choice block in the reworked doc, the reviewer isn't
+re-asked — their previous pick shows collapsed, with a "Change" option — and
+`submit`/`approve` still report the current value for every answered `id`.
+
+## Comment & thread persistence
+
+Comments (with their reply threads) also survive a re-present, so a conversation
+can outlive one round. When you `present` a reworked document, each prior comment
+is re-checked against the new text:
+
+- **Still anchors** (its `quote` still appears in the reworked document) → the
+  comment stays active with its thread intact.
+- **No longer anchors** (you rewrote or removed that passage) → the comment is
+  flagged `archived: true` and shown collapsed in a distinct "unanchored"
+  section in the reviewer's panel. It is **never silently dropped** — the thread
+  is preserved, and you can still `reply` to it.
+
+The comment shape is therefore `{ id, quote, text, ts, replies?, archived? }`;
+`submit`/`approve` bundles carry the full threads (archived comments included).
 
 ## Version history and diffs
 
@@ -204,7 +243,7 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/agent/start` | CLI | create a session and present a document; returns its `id` |
 | GET | `/api/state?session=` | browser | full session state (doc — incl. `doc.versions` — review, chat, progress, status, clients) |
 | GET | `/api/diff?session=` | browser | annotated diff between two retained versions (`&from=`/`&to=` optional); 400s outside the retention ring |
-| GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `progress`, `status` |
+| GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `comment-reply`, `progress`, `status` |
 | POST | `/api/review-state?session=` | browser | persist in-progress comments/choices |
 | POST | `/api/chat?session=` | browser | reviewer chat message (queued for the agent) |
 | POST | `/api/submit?session=` | browser | submit a review round (→ `working`; queued as `submit`) |
@@ -213,6 +252,7 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/agent/present?session=` | CLI | render a markdown file as the session's document |
 | GET | `/agent/wait?session=` | CLI | long-poll for the next reviewer event (`&timeout=<ms>` optional) |
 | POST | `/agent/say?session=` | CLI | agent chat message to the reviewer |
+| POST | `/agent/reply?session=` | CLI | agent reply threaded under a specific comment (`comment-reply` SSE) |
 | POST | `/agent/progress?session=` | CLI | append a rework step to the working overlay |
 | POST | `/agent/stop?session=` | CLI | end and drop just this session |
 

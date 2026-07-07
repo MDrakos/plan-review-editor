@@ -517,6 +517,92 @@ html, body {
 
 .icon-btn:hover { background: var(--fill-subtle); color: var(--ink); }
 
+/* ---------- comment threads ---------- */
+
+.comment-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.comment-thread:empty { margin-top: 0; }
+
+/* a reply bubble, echoing the chat idiom: agent left, reviewer right */
+.reply {
+  max-width: 90%;
+  padding: 6px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.reply.agent {
+  align-self: flex-start;
+  background: var(--fill-subtle);
+  border-bottom-left-radius: 3px;
+}
+
+.reply.reviewer {
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--on-accent);
+  border-bottom-right-radius: 3px;
+}
+
+.reply-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.reply-form input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.reply-form input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+
+.reply-form .btn { padding: 6px 10px; font-size: 13px; }
+
+/* unanchored comments: a comment whose quoted text is gone from the reworked
+   plan. Kept (never dropped) but collapsed into a distinct, muted section. */
+.archived-comments {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 4px 10px;
+}
+
+.archived-comments > summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.archived-comments .comment-card { margin-top: 8px; }
+
+.comment-card.archived {
+  cursor: default;
+  opacity: 0.72;
+  background: var(--fill-faint);
+}
+
+.comment-card.archived blockquote {
+  border-left-color: var(--line);
+  text-decoration: line-through;
+}
+
+.comment-card.archived:hover { border-color: var(--line); }
+
 /* ---------- submit ---------- */
 
 .submit-area {

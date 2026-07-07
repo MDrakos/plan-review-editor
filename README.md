@@ -147,6 +147,8 @@ When you have a plan for the user to review, do not print it. Instead:
                           wait again.
    - {"type":"submit"} → rework plan.md using every comment, choice, and note,
                           run `planreview present plan.md --session ID`, wait again.
+                          To answer one comment in place (vs the global chat), run
+                          `planreview reply <commentId> "<answer>" --session ID`.
    - {"type":"end"}    → run `planreview stop --session ID` and continue.
 ```
 

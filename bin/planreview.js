@@ -244,6 +244,18 @@ const commands = {
     console.log(JSON.stringify(await request('POST', scoped('/agent/say', id), { text })));
   },
 
+  // Reply to a SPECIFIC inline comment (threaded under it), vs `say` which posts
+  // to the global chat. The comment id comes from the submit bundle's comments.
+  async reply(argv) {
+    const { opts, positionals } = parseArgs(argv);
+    const id = requireSession(opts, 'reply');
+    const commentId = positionals[0];
+    const text = positionals.slice(1).join(' ').trim();
+    if (!commentId || !text)
+      throw new Error('usage: planreview reply <commentId> <message> --session <id>');
+    console.log(JSON.stringify(await request('POST', scoped('/agent/reply', id), { commentId, text })));
+  },
+
   // Report a rework step; shown live in the reviewer's "reworking" overlay.
   async progress(argv) {
     const { opts, positionals } = parseArgs(argv);
@@ -317,6 +329,8 @@ function usage() {
                                      after s seconds (for shell-capped agents that re-loop);
                                      --warn-after notes a long wait on stderr (default 300s)
   say <message> --session <id>       send a chat message to the reviewer
+  reply <commentId> <message>        reply to a specific inline comment (threaded under it);
+        --session <id>               the id comes from the submitted bundle's comments
   progress <message> --session <id>  report a rework step (shown live while reworking)
   status --session <id>              print session status
   list                               list all open sessions
