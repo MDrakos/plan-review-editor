@@ -215,6 +215,386 @@ async function driveLivenessWiring() {
   check('liveness: a terminal state stops the timer and clears the cue', timers.length === 0 && elapsed.textContent === '' && stale.hidden === true);
 }
 
+// ---------- persistence: sessions survive a server restart (issue 005) ----------
+//
+// Unlike the checks above (which drive the CLI-managed shared server on PORT),
+// these need to control the server process directly — start it, kill -9, and
+// restart it — with a temp PLANREVIEW_STATE_DIR. So this phase spawns
+// `node server/server.js` itself on a separate port and talks HTTP directly.
+async function persistenceChecks() {
+  const SERVER = path.join(__dirname, '..', 'server', 'server.js');
+  const PPORT = 4798;
+  const PBASE = `http://127.0.0.1:${PPORT}`;
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-state-'));
+  const doc = path.join(os.tmpdir(), 'planreview-persist-doc.md');
+  const docV1 =
+    '# Persisted Plan\n\nAlpha paragraph.\n\nBeta paragraph.\n\n' +
+    '```choice\nid: pick\nprompt: Which?\noptions:\n  - One\n  - Two\n```\n';
+  fs.writeFileSync(doc, docV1);
+
+  const baseEnv = (extra) => ({
+    ...process.env,
+    PLANREVIEW_PORT: String(PPORT),
+    PLANREVIEW_STATE_DIR: stateDir,
+    PLANREVIEW_PERSIST_MS: '40', // short debounce so the flush lands fast in tests
+    PLANREVIEW_IDLE_MS: '60000', // don't self-exit mid-test
+    ...extra,
+  });
+
+  let child = null;
+  function spawnP(extra) {
+    child = spawn(process.execPath, [SERVER], {
+      env: baseEnv(extra),
+      stdio: ['ignore', 'ignore', 'inherit'], // surface server-side errors + skip logs
+    });
+  }
+  async function waitHealth(up) {
+    for (let i = 0; i < 80; i++) {
+      await sleep(100);
+      let ok = false;
+      try {
+        ok = (await fetch(`${PBASE}/health`)).ok;
+      } catch {
+        ok = false;
+      }
+      if (ok === up) return true;
+    }
+    return false;
+  }
+  async function killP() {
+    if (!child) return;
+    child.kill('SIGKILL');
+    await waitHealth(false);
+    await sleep(150); // let the OS release the port before a respawn
+    child = null;
+  }
+  const p = async (pathname, body) => {
+    const res = await fetch(PBASE + pathname, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* non-JSON */
+    }
+    return { status: res.status, ok: res.ok, data };
+  };
+  const stop = (id) => p(`/agent/stop?session=${id}`, {}); // POST (body forces the method)
+  const fileFor = (id) => path.join(stateDir, `${id}.json`);
+  const readState = (id) => {
+    try {
+      return JSON.parse(fs.readFileSync(fileFor(id), 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  // poll the on-disk file until the debounced flush satisfies `pred`
+  async function waitFile(id, pred) {
+    for (let i = 0; i < 80; i++) {
+      const st = readState(id);
+      if (st && pred(st)) return st;
+      await sleep(50);
+    }
+    return readState(id);
+  }
+
+  try {
+    // ----- P1: kill -9 mid-review, restart -> everything restored -----
+    console.log('persistence: a session survives kill -9 and is fully restored');
+    spawnP();
+    check('persistence server comes up', await waitHealth(true));
+    const started = await p('/agent/start', { path: doc });
+    const id = started.data.id;
+    await p(`/api/review-state?session=${id}`, {
+      comments: [{ id: 'c1', quote: 'Alpha paragraph.', text: 'keep this' }],
+      choices: { pick: 'Two' },
+    });
+    await p(`/api/submit?session=${id}`, {
+      comments: [{ id: 'c1', quote: 'Alpha paragraph.', text: 'keep this' }],
+      choices: { pick: 'Two' },
+      note: 'round one',
+    });
+    await p(`/api/chat?session=${id}`, { text: 'a question during review' });
+    await p(`/agent/progress?session=${id}`, { text: 'reworking step 1' });
+    const before = await waitFile(
+      id,
+      (st) =>
+        (st.submissions || []).length === 1 &&
+        (st.progress || []).length === 1 &&
+        (st.chat || []).length >= 1 &&
+        st.status === 'working'
+    );
+    check(
+      'persist: the on-disk file captures the full session state (incl. doc.blocks)',
+      before &&
+        before.submissions.length === 1 &&
+        before.doc.version === 1 &&
+        before.review.choices.pick === 'Two' &&
+        Array.isArray(before.doc.blocks) &&
+        before.sse === undefined &&
+        before.waiters === undefined,
+      JSON.stringify(before && Object.keys(before))
+    );
+
+    await killP();
+    spawnP();
+    check('persist: server restarts after kill -9', await waitHealth(true));
+
+    const restored = await p(`/api/state?session=${id}`);
+    check(
+      'kill -9 restore: /api/state re-hydrates doc, review, choices, chat, progress, status',
+      restored.status === 200 &&
+        restored.data.status === 'working' &&
+        restored.data.doc.title === 'Persisted Plan' &&
+        restored.data.doc.version === 1 &&
+        restored.data.review.comments.length === 1 &&
+        restored.data.review.choices.pick === 'Two' &&
+        restored.data.chat.length >= 1 &&
+        restored.data.progress.length === 1,
+      JSON.stringify(restored.data)
+    );
+    const page = await fetch(`${PBASE}/s/${id}`);
+    check('kill -9 restore: /s/<id> resolves after restart', page.ok);
+
+    // submissions aren't in /api/state; prove they round-tripped by re-reading the file
+    await p(`/agent/progress?session=${id}`, { text: 'reworking step 2' });
+    const after = await waitFile(id, (st) => (st.progress || []).length === 2);
+    check(
+      'kill -9 restore: submissions survived the round-trip',
+      after && after.submissions.length === 1 && after.submissions[0].note === 'round one',
+      JSON.stringify(after && after.submissions)
+    );
+
+    // FM-6: doc.blocks survived, so the next present diffs against the real prior render
+    fs.writeFileSync(doc, docV1.replace('Beta paragraph.', 'Beta paragraph EDITED.'));
+    await p(`/agent/present?session=${id}`, { path: doc });
+    const v2 = await p(`/api/state?session=${id}`);
+    const marks = (v2.data.doc.html.match(/data-changed/g) || []).length;
+    check(
+      'kill -9 restore: doc.blocks survived so the next diff marks only the edited block',
+      v2.data.doc.version === 2 && marks === 1 && /Beta paragraph EDITED/.test(v2.data.doc.html),
+      `version=${v2.data.doc.version} marks=${marks}`
+    );
+    fs.writeFileSync(doc, docV1); // reset for later groups
+    await stop(id);
+    await sleep(300);
+
+    // ----- P2: a queued-but-undelivered agent event survives the restart -----
+    console.log('persistence: a queued agent event survives a restart');
+    const q = await p('/agent/start', { path: doc });
+    const qid = q.data.id;
+    await p(`/api/chat?session=${qid}`, { text: 'queued while agent away' });
+    const qfile = await waitFile(qid, (st) =>
+      (st.queue || []).some((e) => e.type === 'chat' && e.text === 'queued while agent away')
+    );
+    check(
+      'persist: the queued event is on disk before the crash',
+      qfile && qfile.queue.length >= 1,
+      JSON.stringify(qfile && qfile.queue)
+    );
+    await killP();
+    spawnP();
+    check('persist: server restarts (queued-event case)', await waitHealth(true));
+    const waitRes = await p(`/agent/wait?session=${qid}&timeout=3000`);
+    check(
+      'queued event survives restart: the next /agent/wait delivers it',
+      waitRes.data && waitRes.data.type === 'chat' && waitRes.data.text === 'queued while agent away',
+      JSON.stringify(waitRes.data)
+    );
+    await stop(qid);
+    await sleep(300);
+
+    // ----- P3: stop deletes the file; a pending write never resurrects it -----
+    console.log('persistence: stop deletes the file; a pending write never resurrects it');
+    await killP();
+    spawnP({ PLANREVIEW_PERSIST_MS: '400' }); // debounce longer than stop's 200ms teardown delay
+    check('persist: server up (resurrection case)', await waitHealth(true));
+    const d = await p('/agent/start', { path: doc });
+    const did = d.data.id;
+    check('stop test: a session file is created by persistence', !!(await waitFile(did, (st) => !!st)));
+    // schedule a NEW persist, then stop before it can fire (removeSession @200ms < 400ms debounce)
+    await p(`/api/review-state?session=${did}`, {
+      comments: [{ id: 'x', quote: 'q', text: 't' }],
+      choices: {},
+    });
+    await stop(did);
+    await sleep(700); // past removeSession(200ms) AND the 400ms debounce that must be cancelled
+    check(
+      'stop deletes the file and the cancelled pending write does not resurrect it',
+      !fs.existsSync(fileFor(did)),
+      `exists=${fs.existsSync(fileFor(did))}`
+    );
+
+    // ----- P4: corrupt / empty / missing-id files are skipped, not fatal -----
+    console.log('persistence: corrupt/empty/missing-id files are skipped, not fatal');
+    await killP();
+    spawnP();
+    check('persist: server up (corrupt-file case)', await waitHealth(true));
+    const good = await p('/agent/start', { path: doc });
+    const gid = good.data.id;
+    await waitFile(gid, (st) => !!st);
+    await killP();
+    fs.writeFileSync(path.join(stateDir, 'garbage.json'), '{ this is not json');
+    fs.writeFileSync(path.join(stateDir, 'empty.json'), '');
+    fs.writeFileSync(path.join(stateDir, 'noid.json'), JSON.stringify({ status: 'reviewing' }));
+    fs.writeFileSync(path.join(stateDir, `${gid}.json.tmp`), 'partial-write-leftover'); // FM-14
+    spawnP();
+    check('corrupt files are not fatal: server still starts', await waitHealth(true));
+    const goodState = await p(`/api/state?session=${gid}`);
+    check(
+      'the good session is restored despite sibling corrupt files',
+      goodState.status === 200 && goodState.data.doc.title === 'Persisted Plan',
+      JSON.stringify(goodState.status)
+    );
+    const listed = await p('/api/sessions');
+    const ids4 = (listed.data || []).map((x) => x.id);
+    check(
+      'bad files were skipped, not loaded as sessions',
+      ids4.length === 1 && ids4[0] === gid,
+      JSON.stringify(ids4)
+    );
+    check(
+      'a leftover .tmp is cleaned on restore (never loaded as a session)',
+      !fs.existsSync(path.join(stateDir, `${gid}.json.tmp`)),
+      'tmp still present'
+    );
+    await stop(gid);
+    await sleep(300);
+
+    // ----- P5: PLANREVIEW_PERSIST=0 does no disk I/O -----
+    console.log('persistence: PLANREVIEW_PERSIST=0 does no disk I/O');
+    await killP();
+    const stateDir0 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-nopersist-'));
+    spawnP({ PLANREVIEW_PERSIST: '0', PLANREVIEW_STATE_DIR: stateDir0 });
+    check('persist: server up (PERSIST=0 case)', await waitHealth(true));
+    const z = await p('/agent/start', { path: doc });
+    const zid = z.data.id;
+    await p(`/api/chat?session=${zid}`, { text: 'no disk please' });
+    await sleep(200); // longer than the debounce
+    check(
+      'PERSIST=0 writes nothing to STATE_DIR',
+      fs.readdirSync(stateDir0).length === 0,
+      JSON.stringify(fs.readdirSync(stateDir0))
+    );
+    const stopRes = await stop(zid);
+    check(
+      'PERSIST=0: stop still succeeds (delete is a safe no-op)',
+      stopRes.data && stopRes.data.ok === true
+    );
+    await sleep(300);
+    fs.rmSync(stateDir0, { recursive: true, force: true });
+
+    // ----- FM-1: a failed write inside the debounced flush is logged, not fatal -----
+    // The flush runs in a setTimeout, outside the request try/catch — an unhandled
+    // throw there would take the whole process (every session) down.
+    console.log('persistence: a failed disk write is swallowed, never crashes the process');
+    await killP();
+    const blocker = path.join(os.tmpdir(), `planreview-blocker-${process.pid}`);
+    fs.writeFileSync(blocker, 'x'); // a regular file, so mkdir of a dir *under* it fails (ENOTDIR)
+    spawnP({ PLANREVIEW_STATE_DIR: path.join(blocker, 'sub') });
+    check('persist: server up (write-error case)', await waitHealth(true));
+    const w = await p('/agent/start', { path: doc });
+    check(
+      'a mutation still returns 200 even when persistence cannot write',
+      w.status === 200 && !!w.data.id
+    );
+    await sleep(300); // let the debounced flush fire and fail
+    check('a failed disk write is swallowed — the server process survives', await waitHealth(true));
+    await stop(w.data.id);
+    await sleep(200);
+    fs.rmSync(blocker, { force: true });
+
+    // ----- P6: restore completes before listen (a pre-seeded file resolves) -----
+    console.log('persistence: an externally-written session file restores (restore-before-listen)');
+    await killP();
+    const stateDir6 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-preseed-'));
+    const preId = 'abc123';
+    fs.writeFileSync(
+      path.join(stateDir6, `${preId}.json`),
+      JSON.stringify({
+        id: preId,
+        status: 'reviewing',
+        doc: { path: null, title: 'Preseeded', html: '<p>Hi</p>', version: 3, blocks: ['<p>Hi</p>'] },
+        review: { comments: [], choices: {} },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6 });
+    check('persist: server up (pre-seed case)', await waitHealth(true));
+    const first = await p(`/api/state?session=${preId}`);
+    check(
+      'a pre-seeded session file is restored and resolves (restore ran before listen)',
+      first.status === 200 && first.data.doc.title === 'Preseeded' && first.data.doc.version === 3,
+      JSON.stringify(first.status)
+    );
+    await stop(preId);
+    await sleep(300);
+    fs.rmSync(stateDir6, { recursive: true, force: true });
+
+    // ----- P7: a restored-but-stale session is reaped by the sweep + file deleted -----
+    console.log('persistence: a restored-but-stale session is reaped by the abandon sweep');
+    await killP();
+    const stateDir7 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-stale-'));
+    const staleId = 'stale1';
+    fs.writeFileSync(
+      path.join(stateDir7, `${staleId}.json`),
+      JSON.stringify({
+        id: staleId,
+        status: 'reviewing',
+        doc: { path: null, title: 'Stale', html: '', version: 1, blocks: [] },
+        review: { comments: [], choices: {} },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now() - 10 * 60 * 1000, // 10 minutes ago
+      })
+    );
+    spawnP({
+      PLANREVIEW_STATE_DIR: stateDir7,
+      PLANREVIEW_ABANDON_MS: '1000',
+      PLANREVIEW_SWEEP_MS: '300',
+    });
+    check('persist: server up (stale-reap case)', await waitHealth(true));
+    // Poll /api/sessions, NOT /api/state — /api/state calls touch(s), which would
+    // keep resetting the session's age and prevent the abandon sweep from reaping it.
+    let reaped = false;
+    for (let i = 0; i < 40; i++) {
+      await sleep(100);
+      const listed = await p('/api/sessions');
+      if (!(listed.data || []).some((x) => x.id === staleId)) {
+        reaped = true;
+        break;
+      }
+    }
+    check('a restored-but-stale session is reaped by the abandon sweep', reaped);
+    check(
+      "the reaped session's file is deleted",
+      !fs.existsSync(path.join(stateDir7, `${staleId}.json`))
+    );
+    fs.rmSync(stateDir7, { recursive: true, force: true });
+  } finally {
+    await killP();
+    try {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
+    try {
+      fs.unlinkSync(doc);
+    } catch {
+      /* best effort */
+    }
+  }
+}
+
 async function main() {
   const dir = os.tmpdir();
   const docA = path.join(dir, 'planreview-e2e-a.md');
@@ -765,6 +1145,8 @@ async function main() {
     }
   }
   check('server auto-exits after the last session ends', exited, 'still alive after ~6s');
+
+  await persistenceChecks();
 }
 
 main()

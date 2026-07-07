@@ -21,6 +21,18 @@ const IDLE_SHUTDOWN_MS = Number(process.env.PLANREVIEW_IDLE_MS || 60_000);
 // Reap a session that has no browser tab, no waiting agent, and no activity
 // for this long — an abandoned start that was never stopped.
 const ABANDON_MS = Number(process.env.PLANREVIEW_ABANDON_MS || 6 * 60 * 60 * 1000);
+// How often the abandon sweep runs (configurable only so tests can exercise it
+// quickly; the default is unchanged).
+const SWEEP_MS = Number(process.env.PLANREVIEW_SWEEP_MS || 60_000);
+
+// Persist each session's serializable state to disk so an open review survives a
+// server restart — a crash, a reboot, or this project's own idle-shutdown /
+// stale-code respawn. On by default; PLANREVIEW_PERSIST=0 disables all disk I/O.
+// State lives in a per-session file under STATE_DIR (repo-local .sessions/ by
+// default; override with PLANREVIEW_STATE_DIR).
+const PERSIST = process.env.PLANREVIEW_PERSIST !== '0';
+const STATE_DIR = process.env.PLANREVIEW_STATE_DIR || path.join(process.cwd(), '.sessions');
+const PERSIST_DEBOUNCE_MS = Number(process.env.PLANREVIEW_PERSIST_MS || 250);
 
 // How many prior document versions each session retains for the "show changes
 // since v N" diff. A bounded ring: only the last N versions' markdown SOURCE is
@@ -38,12 +50,11 @@ const VERSION_HISTORY = Number(process.env.PLANREVIEW_VERSION_HISTORY || 10);
 
 const sessions = new Map(); // id -> session
 
-function createSession() {
-  let id;
-  do {
-    id = crypto.randomBytes(3).toString('hex');
-  } while (sessions.has(id));
-  const s = {
+// The shape of a session: serializable state plus live handles. restoreSessions
+// rebuilds this exact shape from disk with fresh, empty sse/waiters — so the
+// serialize/restore round-trip and createSession never drift apart.
+function blankSession(id) {
+  return {
     id,
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
     doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [] },
@@ -53,11 +64,19 @@ function createSession() {
     submissions: [], // completed review bundles, oldest first
     chat: [], // {role: 'reviewer' | 'agent', text, ts}
     progress: [], // {text, ts} steps the agent reports while reworking
-    sse: new Set(), // browser tabs watching this session
+    sse: new Set(), // browser tabs watching this session (never persisted)
     queue: [], // agent events awaiting a wait
-    waiters: [], // {res, timer} in-flight /agent/wait long-polls
+    waiters: [], // {res, timer} in-flight /agent/wait long-polls (never persisted)
     touched: Date.now(),
   };
+}
+
+function createSession() {
+  let id;
+  do {
+    id = crypto.randomBytes(3).toString('hex');
+  } while (sessions.has(id));
+  const s = blankSession(id);
   sessions.set(id, s);
   cancelIdleShutdown();
   return s;
@@ -87,6 +106,7 @@ function removeSession(s) {
   }
   s.sse.clear();
   sessions.delete(s.id);
+  deleteSession(s); // cancel any pending flush + delete the file (no resurrection)
   armIdleShutdownIfEmpty();
 }
 
@@ -99,6 +119,131 @@ function sessionSummary(s) {
     clients: s.sse.size,
     url: `/s/${s.id}`,
   };
+}
+
+// ---------- persistence ----------
+//
+// Write-through each session's serializable state to <STATE_DIR>/<id>.json,
+// debounced per session and written atomically (temp file + rename), then
+// restore it on startup with fresh, empty sse/waiters. On by default;
+// PLANREVIEW_PERSIST=0 disables all disk I/O.
+
+const persistTimers = new Map(); // id -> pending debounce timer; keys ⊆ sessions
+
+function sessionFile(id) {
+  return path.join(STATE_DIR, `${id}.json`);
+}
+
+// Exactly the serializable state — never the live handles (sse/waiters) or the
+// res/timer objects inside them. An explicit allowlist, so a field added later
+// can't silently leak a non-serializable value into the file.
+function serialize(s) {
+  return {
+    id: s.id,
+    status: s.status,
+    doc: s.doc, // includes doc.blocks so the next present still diffs correctly
+    review: s.review,
+    submissions: s.submissions,
+    chat: s.chat,
+    progress: s.progress,
+    queue: s.queue, // pending agent events must survive a restart (decision 3)
+    touched: s.touched,
+  };
+}
+
+// Atomic + defensive. Write a temp file in the same dir, then rename over the
+// target (atomic on one filesystem — a reader never sees a torn file). This runs
+// inside a debounce timer, OUTSIDE the request try/catch, so any disk error is
+// swallowed and logged: a failed write must never crash the process and take
+// every other session down with it.
+function writeSession(s) {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    const file = sessionFile(s.id);
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(serialize(s)));
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    console.error(`planreview: failed to persist session ${s.id}: ${err.message}`);
+  }
+}
+
+// Schedule-once debounce: the first mutation arms a flush ~PERSIST_DEBOUNCE_MS
+// out; further mutations inside that window don't re-arm; when it fires it
+// serializes the CURRENT state (capturing every mutation up to fire time). This
+// bounds staleness to the debounce window while coalescing chat/progress bursts,
+// and still survives a hard kill -9 (modulo the last sub-debounce window).
+function persist(s) {
+  if (!PERSIST) return;
+  if (persistTimers.has(s.id)) return; // a flush is already scheduled
+  const timer = setTimeout(() => {
+    persistTimers.delete(s.id);
+    if (!sessions.has(s.id)) return; // removed before the flush — don't resurrect its file
+    writeSession(s);
+  }, PERSIST_DEBOUNCE_MS);
+  persistTimers.set(s.id, timer);
+}
+
+// Cancel any pending flush (so it can't recreate the file after we unlink) and
+// delete the file. Called from removeSession — the single teardown path shared
+// by /agent/stop and the abandon sweep. Clearing the timer is safe even with
+// persistence off; the unlink is skipped when off.
+function deleteSession(s) {
+  const timer = persistTimers.get(s.id);
+  if (timer) {
+    clearTimeout(timer);
+    persistTimers.delete(s.id);
+  }
+  if (!PERSIST) return;
+  try {
+    fs.unlinkSync(sessionFile(s.id));
+  } catch {
+    /* nothing to delete */
+  }
+}
+
+// Rebuild every persisted session BEFORE the server listens. Fresh, empty
+// sse/waiters (live connections are never serialized — the browser's own SSE
+// reconnect repopulates them); the persisted queue replays to the next
+// /agent/wait. A corrupt / truncated / missing-id file is logged and skipped —
+// never fatal to startup. Synchronous, so restored sessions exist before the
+// first request and before armIdleShutdownIfEmpty evaluates sessions.size.
+function restoreSessions() {
+  if (!PERSIST) return;
+  let names;
+  try {
+    names = fs.readdirSync(STATE_DIR);
+  } catch {
+    return; // no state dir yet — nothing to restore
+  }
+  for (const name of names) {
+    const full = path.join(STATE_DIR, name);
+    if (name.endsWith('.tmp')) {
+      try {
+        fs.unlinkSync(full); // orphaned partial write from a crashed flush — clean it up
+      } catch {
+        /* ignore */
+      }
+      continue;
+    }
+    if (!name.endsWith('.json')) continue;
+    try {
+      const data = JSON.parse(fs.readFileSync(full, 'utf8'));
+      if (!data || typeof data.id !== 'string') throw new Error('missing session id');
+      const s = blankSession(data.id);
+      if (typeof data.status === 'string') s.status = data.status;
+      if (data.doc) s.doc = data.doc;
+      if (data.review) s.review = data.review;
+      if (Array.isArray(data.submissions)) s.submissions = data.submissions;
+      if (Array.isArray(data.chat)) s.chat = data.chat;
+      if (Array.isArray(data.progress)) s.progress = data.progress;
+      if (Array.isArray(data.queue)) s.queue = data.queue;
+      if (typeof data.touched === 'number') s.touched = data.touched; // honor age so the sweep still reaps
+      sessions.set(s.id, s);
+    } catch (err) {
+      console.error(`planreview: skipping unreadable session file ${name}: ${err.message}`);
+    }
+  }
 }
 
 // ---------- lifecycle timers ----------
@@ -123,7 +268,7 @@ setInterval(() => {
   for (const s of sessions.values()) {
     if (s.sse.size === 0 && s.waiters.length === 0 && s.touched < cutoff) removeSession(s);
   }
-}, 60_000).unref();
+}, SWEEP_MS).unref();
 
 // ---------- server-sent events ----------
 
@@ -175,6 +320,7 @@ function loadDoc(s, docPath) {
   s.progress = []; // the reworked doc is here — the previous round's steps are done
   s.status = 'reviewing';
   touch(s);
+  persist(s); // covers /agent/start and /agent/present
 }
 
 // Normalize a review bundle from a browser POST (shared by submit + approve).
@@ -404,6 +550,7 @@ const server = http.createServer(async (req, res) => {
       touch(s);
       broadcast(s, 'chat', msg);
       enqueueAgentEvent(s, { type: 'chat', text, ts: msg.ts });
+      persist(s);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -412,6 +559,7 @@ const server = http.createServer(async (req, res) => {
       touch(s);
       broadcast(s, 'status', { status: s.status });
       enqueueAgentEvent(s, { type: 'end' });
+      persist(s);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -420,6 +568,7 @@ const server = http.createServer(async (req, res) => {
       if (Array.isArray(body.comments)) s.review.comments = body.comments;
       if (body.choices && typeof body.choices === 'object') s.review.choices = body.choices;
       touch(s);
+      persist(s);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -440,6 +589,7 @@ const server = http.createServer(async (req, res) => {
       touch(s);
       broadcast(s, 'status', { status: s.status });
       enqueueAgentEvent(s, { type: verb, ...bundle });
+      persist(s);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -500,6 +650,7 @@ const server = http.createServer(async (req, res) => {
       s.progress.push(msg);
       touch(s);
       broadcast(s, 'progress', msg);
+      persist(s);
       return sendJson(res, 200, { ok: true });
     }
 
@@ -522,7 +673,9 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 0;
 server.headersTimeout = 0;
 
+restoreSessions(); // rebuild any persisted sessions before we accept requests
+
 server.listen(PORT, HOST, () => {
   console.log(`plan-review-editor listening on http://${HOST}:${PORT}`);
-  armIdleShutdownIfEmpty(); // exit if nobody ever connects
+  armIdleShutdownIfEmpty(); // exit if nobody ever connects (and nothing was restored)
 });
