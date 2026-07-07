@@ -5,7 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { renderDiff } = require('./markdown');
+const { renderDiff, renderVersionDiff } = require('./markdown');
 const { codeVersion } = require('./version');
 
 const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
@@ -21,6 +21,13 @@ const IDLE_SHUTDOWN_MS = Number(process.env.PLANREVIEW_IDLE_MS || 60_000);
 // Reap a session that has no browser tab, no waiting agent, and no activity
 // for this long — an abandoned start that was never stopped.
 const ABANDON_MS = Number(process.env.PLANREVIEW_ABANDON_MS || 6 * 60 * 60 * 1000);
+
+// How many prior document versions each session retains for the "show changes
+// since v N" diff. A bounded ring: only the last N versions' markdown SOURCE is
+// kept (re-rendered on demand — cheap), so memory stays capped no matter how
+// many rework rounds a session runs. Older versions age out and can no longer
+// be diffed against.
+const VERSION_HISTORY = Number(process.env.PLANREVIEW_VERSION_HISTORY || 10);
 
 // ---------- sessions ----------
 //
@@ -39,7 +46,9 @@ function createSession() {
   const s = {
     id,
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
-    doc: { path: null, title: '', html: '', version: 0, blocks: null }, // blocks: prev render, for diff
+    doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [] },
+    // blocks: prev render, for the per-round highlight. history: a bounded ring
+    // of { version, title, markdown } (last VERSION_HISTORY), for version diffs.
     review: { comments: [], choices: {} }, // in-progress review, survives refreshes
     submissions: [], // completed review bundles, oldest first
     chat: [], // {role: 'reviewer' | 'agent', text, ts}
@@ -155,6 +164,10 @@ function loadDoc(s, docPath) {
   s.doc.html = html;
   s.doc.blocks = blocks;
   s.doc.version += 1;
+  // Retain the markdown SOURCE for this version (re-rendered on demand for the
+  // version diff), capped at the last VERSION_HISTORY — older versions age out.
+  s.doc.history.push({ version: s.doc.version, title: s.doc.title, markdown });
+  if (s.doc.history.length > VERSION_HISTORY) s.doc.history.shift();
   // Fresh comments each round, but keep prior answers — the reviewer shouldn't
   // have to re-answer a question they already decided (the UI shows those
   // collapsed with a "Change" option).
@@ -319,12 +332,54 @@ const server = http.createServer(async (req, res) => {
       touch(s);
       return sendJson(res, 200, {
         status: s.status,
-        doc: { title: s.doc.title, html: s.doc.html, version: s.doc.version },
+        // versions: the retained version numbers (oldest→newest) the client can
+        // diff between. Numbers only — the markdown source stays server-side.
+        doc: {
+          title: s.doc.title,
+          html: s.doc.html,
+          version: s.doc.version,
+          versions: s.doc.history.map((h) => h.version),
+        },
         review: s.review,
         chat: s.chat,
         progress: s.progress,
         clients: s.sse.size,
       });
+    }
+
+    // Annotated diff between two retained versions (add / remove / change), used
+    // by the "show changes since v N" selector. ?from=&to= are version numbers;
+    // both default sensibly (previous → current). Any version outside the
+    // retention ring (aged out, unknown, or malformed) is a 400 that lists what
+    // is still comparable — we never feed a missing version into the renderer.
+    if (method === 'GET' && pathname === '/api/diff') {
+      touch(s);
+      const history = s.doc.history;
+      const versions = history.map((h) => h.version);
+      const current = s.doc.version;
+      const parseVersion = (raw, fallback) => {
+        if (raw === null || raw === '') return fallback;
+        const n = Number(raw);
+        return Number.isInteger(n) ? n : NaN;
+      };
+      const to = parseVersion(reqUrl.searchParams.get('to'), current);
+      // Default `from` to the retained version immediately BEFORE `to` (per the
+      // documented contract), not merely the second-newest overall — so an
+      // explicit ?to=<older> still gets a sensible previous-version baseline.
+      const toIdx = versions.indexOf(to);
+      const defaultFrom = toIdx > 0 ? versions[toIdx - 1] : versions[0];
+      const from = parseVersion(reqUrl.searchParams.get('from'), defaultFrom);
+      const fromEntry = history.find((h) => h.version === from);
+      const toEntry = history.find((h) => h.version === to);
+      if (!fromEntry || !toEntry) {
+        return sendJson(res, 400, {
+          error: 'from and to must both be retained versions',
+          versions,
+          current,
+        });
+      }
+      const { html } = renderVersionDiff(fromEntry.markdown, toEntry.markdown);
+      return sendJson(res, 200, { from, to, html, versions, current });
     }
 
     if (method === 'GET' && pathname === '/events') {

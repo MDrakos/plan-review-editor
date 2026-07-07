@@ -19,6 +19,20 @@
         <span id="changes-label"></span>
         <button id="changes-dismiss" class="btn">Dismiss</button>
       </div>
+      <div id="diff-bar" class="diff-bar" hidden>
+        <span class="diff-bar-label">Compare</span>
+        <label class="diff-field">v<select id="diff-from" aria-label="from version"></select></label>
+        <span class="diff-arrow">→</span>
+        <label class="diff-field">v<select id="diff-to" aria-label="to version"></select></label>
+        <button id="diff-show" class="btn">Show changes</button>
+        <button id="diff-close" class="btn" hidden>Back to current</button>
+        <span id="diff-legend" class="diff-legend" hidden>
+          <span class="diff-key add">added</span>
+          <span class="diff-key change">changed</span>
+          <span class="diff-key remove">removed</span>
+        </span>
+        <span id="diff-error" class="diff-error" hidden></span>
+      </div>
       <article id="doc" class="doc"></article>
       <div id="working-overlay" class="overlay" hidden>
         <div class="overlay-card">

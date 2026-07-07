@@ -165,6 +165,16 @@ options:
 The reviewer's selection comes back in the submit bundle as
 `choices.storage`.
 
+### Comparing versions
+
+Every rework round is a new version. Above the document, a **Compare** control
+lets the reviewer diff any two retained versions and see an annotated single
+view with **added, changed, and removed** blocks marked — so deletions between
+versions are visible, not just what's new. Each session keeps the last **10**
+versions' markdown source (a bounded ring; older versions age out and can no
+longer be compared). This is separate from — and doesn't disturb — the
+dismissible "what changed since your last review" highlight on each new round.
+
 ## Roadmap
 
 - [x] Serve a markdown plan rendered as an HTML document
@@ -176,6 +186,7 @@ The reviewer's selection comes back in the submit bundle as
 - [x] Pause → rework → reload cycle in the same browser window
 - [x] End-session handoff back to the terminal
 - [x] Concurrent isolated sessions — many agents at once, one tab each
+- [x] Diff view between document versions — add/remove/change markers, incl. removals
 
-Possible next steps: comment threads with agent replies, diff view between
-document versions, multiple reviewers on one plan, persisting sessions to disk.
+Possible next steps: comment threads with agent replies, multiple reviewers on
+one plan, persisting sessions to disk.
