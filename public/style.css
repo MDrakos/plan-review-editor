@@ -590,6 +590,8 @@ html, body {
 
 .archived-comments .comment-card { margin-top: 8px; }
 
+.archived-comments .clear-archived { margin: 4px 0 8px; padding: 4px 10px; font-size: 13px; }
+
 .comment-card.archived {
   cursor: default;
   opacity: 0.72;

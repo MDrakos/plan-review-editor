@@ -2687,6 +2687,20 @@ async function main() {
     'client gates edit/delete to the comment owner (peer comments are read-only)',
     /function ownComment\(/.test(app.body) && /if \(!c\.archived && own\)/.test(app.body)
   );
+  check(
+    'client offers a "Clear all" bulk action, scoped to the reviewer\'s own archived comments',
+    /function clearArchived\(/.test(app.body) && /archived\.some\(ownComment\)/.test(app.body)
+  );
+  check(
+    'the "Clear all" button is gated on owning an archived comment AND an active review status ' +
+      '(a peer-only-archived session shows no button; nor does one mid-rework)',
+    /archived\.some\(ownComment\) && state\.status === 'reviewing'/.test(app.body)
+  );
+  check(
+    'the archived section (and its "Clear all" button) only ever renders when at least one comment is archived',
+    /if \(archived\.length\) commentListEl\.appendChild\(archivedSection\(archived\)\)/.test(app.body)
+  );
+  check('stylesheet styles the archived "Clear all" action', /\.clear-archived/.test(css.body));
   check('client can post an approve (finish) action', /\/api\/approve/.test(app.body));
   check('client renders live rework progress', /renderProgress/.test(app.body) && /'progress'/.test(app.body));
   check('client highlights + can dismiss doc changes', /data-changed/.test(app.body) && /changes-dismissed/.test(app.body));
