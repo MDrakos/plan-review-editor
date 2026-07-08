@@ -105,6 +105,12 @@ shows a "reworking" overlay until you `present` again.
 - While reworking, `planreview progress "<step>" --session <id>` appends a step
   to a live checklist shown in the reviewer's "reworking" overlay (SSE
   `progress` event). Steps reset each round and clear when you `present`.
+- The overlay also shows a live elapsed timer and, past a threshold with no
+  sign of life, a "may be stuck" hint — driven by two server-tracked
+  timestamps on `/api/state` and every `status` SSE event: `workingSince`
+  (when the current round began; `null` outside `working`) and
+  `lastAgentActivity` (bumped on `wait`, `progress`, and `present`). Both
+  survive a browser refresh; neither affects the status state machine.
 
 #### Replying to a comment
 
@@ -285,7 +291,7 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/admin/shutdown` | CLI | shut the whole server down (used to restart a server running stale code) |
 | GET | `/api/sessions` | both | list open sessions (`planreview list`) |
 | POST | `/agent/start` | CLI | create a session and present a document; returns its `id` |
-| GET | `/api/state?session=` | browser | full session state (doc — incl. `doc.versions` — review, chat, progress, status, clients) |
+| GET | `/api/state?session=` | browser | full session state (doc — incl. `doc.versions` — review, chat, progress, status, `workingSince`, `lastAgentActivity`, clients) |
 | GET | `/api/diff?session=` | browser | annotated diff between two retained versions (`&from=`/`&to=` optional); 400s outside the retention ring |
 | GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `comment-reply`, `review`, `progress`, `status` |
 | POST | `/api/review-state?session=` | browser | persist in-progress comments/choices (carries `reviewerId`; broadcasts a `review` delta) |
