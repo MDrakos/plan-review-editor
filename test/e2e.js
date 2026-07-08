@@ -9,29 +9,47 @@
 // session. The rest covers a full review cycle, the "session id required"
 // guard, the sessions index, and the idle self-shutdown.
 //
-// Run: node test/e2e.js   (port 4799 + a short idle window so it never clashes
-// with a real session and cleans itself up fast). Set PLANREVIEW_TEST_PORT to
-// run on a different port — useful when several git worktrees run this suite at
-// once, since a shared fixed port would otherwise collide.
+// Run: node test/e2e.js   (binds an OS-assigned free port + a short idle window
+// so it never clashes with a real session — or a sibling test run — and cleans
+// itself up fast). Set PLANREVIEW_TEST_PORT to pin a specific port instead.
 
 const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const vm = require('vm');
+const net = require('net');
 
-const PORT = Number(process.env.PLANREVIEW_TEST_PORT) || 4799;
-const BASE = `http://127.0.0.1:${PORT}`;
+// Port selection is resolved once at the start of main(): PLANREVIEW_TEST_PORT
+// still wins (so an operator can pin a port), otherwise the OS hands us a free
+// one (see freePort). PORT/BASE/env are therefore `let`s bound before any server
+// work runs, not module-load constants.
+let PORT;
+let BASE;
+let env;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
 const { render, renderDiff, renderVersionDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
 const { quoteAnchors } = require(path.join(__dirname, '..', 'server', 'anchor'));
-const env = {
-  ...process.env,
-  PLANREVIEW_PORT: String(PORT),
-  PLANREVIEW_IDLE_MS: '1500',
-  PLANREVIEW_POLL_MS: '400', // short internal poll window so tests can exercise the wait loop
-};
+
+// Ask the OS for a free TCP port: bind port 0, read the actual port back off the
+// listening socket, then release it. Every worktree that runs this suite gets
+// its own port, so concurrent `npm test` runs never share a server — a shared
+// fixed port used to let one run restart the other's server and drop its
+// sessions, surfacing as a false "no such session". Returns a Promise<number>.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
+}
+
+// PLANREVIEW_TEST_PORT pins a port; otherwise fall back to an OS-assigned one.
+const resolvePort = async () => Number(process.env.PLANREVIEW_TEST_PORT) || (await freePort());
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -88,7 +106,10 @@ function makeClient(base) {
   };
 }
 
-const { json: browser, text, alive: serverAlive } = makeClient(BASE);
+// Bound in main() once BASE is known (see the port-selection note above).
+let browser;
+let text;
+let serverAlive;
 
 // simulate a review tab's SSE connection to one session
 async function openEventStream(id) {
@@ -288,7 +309,7 @@ async function driveLivenessWiring() {
 // `node server/server.js` itself on a separate port and talks HTTP directly.
 async function persistenceChecks() {
   const SERVER = path.join(__dirname, '..', 'server', 'server.js');
-  const PPORT = 4798;
+  const PPORT = await freePort(); // own free port too — never clash with the main server or a sibling run
   const PBASE = `http://127.0.0.1:${PPORT}`;
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-state-'));
   const doc = path.join(os.tmpdir(), 'planreview-persist-doc.md');
@@ -772,6 +793,18 @@ async function persistenceChecks() {
 }
 
 async function main() {
+  // Resolve this run's port and bind everything that hangs off it before any
+  // server work starts.
+  PORT = await resolvePort();
+  BASE = `http://127.0.0.1:${PORT}`;
+  env = {
+    ...process.env,
+    PLANREVIEW_PORT: String(PORT),
+    PLANREVIEW_IDLE_MS: '1500',
+    PLANREVIEW_POLL_MS: '400', // short internal poll window so tests can exercise the wait loop
+  };
+  ({ json: browser, text, alive: serverAlive } = makeClient(BASE));
+
   const dir = os.tmpdir();
   const docA = path.join(dir, 'planreview-e2e-a.md');
   const docB = path.join(dir, 'planreview-e2e-b.md');
@@ -1888,9 +1921,11 @@ main()
     console.error(` FAIL  e2e crashed — ${err.message}`);
   })
   .then(async () => {
-    // best-effort cleanup if a check bailed early: stop any stragglers
+    // best-effort cleanup if a check bailed early: stop any stragglers.
+    // `browser` is only bound once main() reaches its setup; guard in case main
+    // rejected earlier (e.g. freePort failing before the client was built).
     try {
-      const open = (await browser('/api/sessions')).data || [];
+      const open = browser ? (await browser('/api/sessions')).data || [] : [];
       for (const x of open) await cli('stop', '--session', x.id).catch(() => {});
     } catch {
       /* server already down */
