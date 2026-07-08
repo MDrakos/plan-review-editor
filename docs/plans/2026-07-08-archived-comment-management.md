@@ -229,6 +229,44 @@ git commit -m "test: cover the archived-comment Clear-all action + style it"
 
 ---
 
+## Fixtures
+
+Conformance mode — the story (issue 010's 3 acceptance criteria) and the FMEA/DSM pass above fully specify inputs/outputs; nothing here is expected to shift during implementation. All four are locked now.
+
+### FX-1 — clearArchived removes only the reviewer's own archived comments; a peer's and the active one survive untouched
+- **Mode:** conformance
+- **Inputs:** `state.comments = [{id:'a1', archived:false}, {id:'r1', archived:true}, {id:'r2', archived:true}, {id:'p1', archived:true, author:{id:'peer-1'}}]`, then call `clearArchived()`
+- **Expected:** `state.comments` = `[a1, p1]` (order preserved), `a1.archived` still `false` — `r1`/`r2` gone
+- **Source:** issue-010 acceptance criteria 1 ("individually and/or all at once") + 2 ("active comments... untouched")
+- **Scope boundary:** `public/app.js` — `clearArchived()` and `archivedSection()` only; no other function's behavior may change to satisfy this
+- **Exercised by:** Task 1, Step 1, checks 1–2 (`test/e2e.js`, `driveLivenessWiring()`)
+
+### FX-2 — clearArchived is a true no-op when nothing archived-and-own exists
+- **Mode:** conformance
+- **Inputs:** `state.comments = [{id:'a1', archived:false}]`, then call `clearArchived()`
+- **Expected:** `state.comments` is the *same array reference* afterward (no reassignment, no `renderComments()`/`syncReview()` side effect)
+- **Source:** FMEA primary finding #3 (avoid a needless render/POST cycle)
+- **Scope boundary:** `clearArchived()`'s early-return guard only
+- **Exercised by:** Task 1, Step 1, check 3
+
+### FX-3 — the "Clear all" button never renders in a peer-only-archived session
+- **Mode:** conformance
+- **Inputs:** archived set = `[{id:'p1', archived:true, author:{id:'peer-1'}}]` (reviewer owns none), `state.status = 'reviewing'`
+- **Expected:** `archivedSection()`'s `archived.some(ownComment)` gate evaluates `false` — no `.clear-archived` button is appended
+- **Source:** FMEA primary finding #4
+- **Scope boundary:** `archivedSection()`'s gate condition only
+- **Exercised by:** Task 2's static regex check on the compound gate condition. (The DOM shim in `driveLivenessWiring()` doesn't retain appended children — `appendChild`/`append` are no-op stubs — so this is verified at the source level, not by inspecting rendered output; that's an existing, accepted limitation of this harness, matching how the pre-existing owner-gating check at `test/e2e.js:1861-1863` already verifies its analogous condition.)
+
+### FX-4 — the "Clear all" button never renders mid-rework, even when the reviewer owns an archived comment
+- **Mode:** conformance
+- **Inputs:** archived set = `[{id:'r1', archived:true}]` (reviewer's own), `state.status = 'working'`
+- **Expected:** `archivedSection()`'s `state.status === 'reviewing'` gate evaluates `false` — no `.clear-archived` button is appended
+- **Source:** FMEA adversarial finding A (a rework in flight could re-anchor an archived comment before the client learns of it; clearing on stale data would drop it for good)
+- **Scope boundary:** `archivedSection()`'s gate condition only
+- **Exercised by:** Task 2's static regex check (same gate condition as FX-3, second clause) — same harness limitation noted above applies
+
+---
+
 ## Spec coverage check
 
 | Acceptance criterion (issue 010) | Covered by |
