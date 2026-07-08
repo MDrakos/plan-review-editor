@@ -130,10 +130,16 @@ async function openEventStream(id) {
 }
 
 // like openEventStream, but parses SSE frames into {event, data} so a test can
-// assert what the server broadcast (used for the comment-reply path).
-async function captureEvents(id) {
+// assert what the server broadcast (used for the comment-reply path). Optional
+// rid/rname carry the reviewer identity on the /events query so the connection
+// registers presence (issue 007) — omit them for an anonymous, presence-inert tab.
+// presenceFrames() returns each 'presence' frame's parsed roster, newest last.
+async function captureEvents(id, rid, rname) {
+  let url = `${BASE}/events?session=${id}`;
+  if (rid !== undefined) url += `&rid=${encodeURIComponent(rid)}`;
+  if (rname !== undefined) url += `&rname=${encodeURIComponent(rname)}`;
   const controller = new AbortController();
-  const res = await fetch(`${BASE}/events?session=${id}`, { signal: controller.signal });
+  const res = await fetch(url, { signal: controller.signal });
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   const events = [];
@@ -160,7 +166,11 @@ async function captureEvents(id) {
       /* aborted */
     }
   })();
-  return { events, close: () => controller.abort() };
+  return {
+    events,
+    presenceFrames: () => events.filter((e) => e.event === 'presence').map((e) => JSON.parse(e.data)),
+    close: () => controller.abort(),
+  };
 }
 
 let failures = 0;
@@ -200,7 +210,7 @@ async function driveLivenessWiring() {
 
   let es = null;
   let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
-  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [] };
+  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [], presence: [] };
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
   const ctx = vm.createContext({
@@ -299,6 +309,23 @@ async function driveLivenessWiring() {
   fire('review', { author: { id: myId } });
   await flush();
   check('review: this tab ignores its own echo (no re-sync)', fetchCalls === beforeOwn, `Δ=${fetchCalls - beforeOwn}`);
+
+  // presence (issue 007): firing a roster must render without throwing, must never route
+  // an (untrusted) reviewer name through innerHTML (TM-3), and must tolerate a malformed
+  // or non-array payload (FM-12).
+  const presenceEl = getEl('presence');
+  let presenceThrew = null;
+  try {
+    fire('presence', [{ id: 'peer1', name: 'Peer One', connectedAt: 1, count: 1 }, { id: myId, name: 'Me', connectedAt: 1, count: 2 }]);
+    fire('presence', [{ id: 'evil', name: '<img src=x onerror=alert(1)>', connectedAt: 1, count: 1 }]);
+    fire('presence', [{}]);
+    fire('presence', [{ id: 'x' }]);
+    fire('presence', null);
+  } catch (e) {
+    presenceThrew = e;
+  }
+  check('presence: rendering a roster (incl. an HTML-payload name + malformed entries) never throws (FM-12)', !presenceThrew, presenceThrew && presenceThrew.message);
+  check('presence: the reviewer name never reaches innerHTML — textContent/title only (TM-3)', !/<img/.test(presenceEl.innerHTML), presenceEl.innerHTML);
 }
 
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
@@ -423,11 +450,40 @@ async function persistenceChecks() {
       JSON.stringify(before && { v: before.doc && before.doc.version, sub: before.submissions.length })
     );
 
+    // issue 007: presence is derived/live state. Open an SSE with an identity so the
+    // roster is genuinely non-empty pre-restart, then prove (a) it shows in /api/state
+    // while live, and (b) it never reaches the persisted file — the EXPECTED_KEYS check
+    // above already forbids a `presence` key, this confirms a live roster doesn't sneak in.
+    const presCtl = new AbortController();
+    fetch(`${PBASE}/events?session=${id}&rid=ghost&rname=Ghost`, { signal: presCtl.signal }).catch(() => {});
+    let livePres = [];
+    for (let i = 0; i < 40; i++) {
+      livePres = ((await p(`/api/state?session=${id}`)).data || {}).presence || [];
+      if (livePres.some((r) => r.id === 'ghost')) break;
+      await sleep(50);
+    }
+    check(
+      'presence: a live SSE connection shows in /api/state before restart (issue 007)',
+      livePres.some((r) => r.id === 'ghost' && r.count === 1),
+      JSON.stringify(livePres)
+    );
+    check(
+      'presence: the persisted session file never contains a presence key (derived state, AC4)',
+      before && !('presence' in before) && !('presence' in (readState(id) || {})),
+      JSON.stringify(readState(id) && Object.keys(readState(id)))
+    );
+    presCtl.abort(); // drop the SSE before the kill so it can't linger
+
     await killP();
     spawnP();
     check('persist: server restarts after kill -9', await waitHealth(true));
 
     const restored = await p(`/api/state?session=${id}`);
+    check(
+      'presence: a restored session comes back with an empty roster until tabs reconnect (AC4)',
+      Array.isArray(restored.data.presence) && restored.data.presence.length === 0,
+      JSON.stringify(restored.data.presence)
+    );
     check(
       'kill -9 restore: /api/state re-hydrates doc, review, choices, chat, progress, status',
       restored.status === 200 &&
@@ -802,6 +858,8 @@ async function main() {
     PLANREVIEW_PORT: String(PORT),
     PLANREVIEW_IDLE_MS: '1500',
     PLANREVIEW_POLL_MS: '400', // short internal poll window so tests can exercise the wait loop
+    PLANREVIEW_PRESENCE_MS: '80', // short presence-broadcast debounce so join/leave frames land fast
+    PLANREVIEW_MAX_PRESENCE: '4', // small roster cap so the map-growth guard is cheap to exercise
   };
   ({ json: browser, text, alive: serverAlive } = makeClient(BASE));
 
@@ -1806,6 +1864,201 @@ async function main() {
     appPage.ok && /id="doc"/.test(appPage.body) && /split-btn/.test(appPage.body)
   );
 
+  console.log('presence: live roster of who is viewing — join/leave, tab counting, isolation (issue 007)');
+  const presenceOf = async (id) => ((await browser(`/api/state?session=${id}`)).data || {}).presence || [];
+  const waitPresence = async (id, pred) => {
+    let roster = [];
+    for (let i = 0; i < 60; i++) {
+      roster = await presenceOf(id);
+      if (pred(roster)) return roster;
+      await sleep(40);
+    }
+    return roster;
+  };
+  const byId = (roster, rid) => roster.find((r) => r.id === rid);
+
+  const ps = await cli('start', docA, '--no-open');
+  const pid = ps.id;
+  // FX-1 / FM-11: a reviewer's SSE connection shows in /api/state (the map mutates
+  // synchronously on connect; only the broadcast is debounced).
+  const alice1 = await captureEvents(pid, 'alice', 'Ada');
+  const j1 = await waitPresence(pid, (r) => byId(r, 'alice'));
+  check(
+    'presence: a connected reviewer appears with count 1, a name, and a connectedAt',
+    (() => { const a = byId(j1, 'alice'); return !!a && a.count === 1 && a.name === 'Ada' && typeof a.connectedAt === 'number'; })(),
+    JSON.stringify(j1)
+  );
+  // FX-2 / AC1: a distinct reviewer joining broadcasts a roster naming BOTH to the
+  // already-open tab — "shows the other reviewer present within a second or two".
+  const bob1 = await captureEvents(pid, 'bob', 'Bo');
+  await waitPresence(pid, (r) => byId(r, 'bob'));
+  await sleep(150); // let the debounced frame reach alice's stream
+  const aliceFrames = alice1.presenceFrames();
+  const latest = aliceFrames[aliceFrames.length - 1] || [];
+  check(
+    'presence: a second distinct reviewer broadcasts a roster naming both to the first tab (AC1)',
+    aliceFrames.length >= 1 && !!byId(latest, 'alice') && !!byId(latest, 'bob'),
+    JSON.stringify({ frames: aliceFrames.length, latest })
+  );
+  // FX-3: a second tab for the SAME reviewer is one entry with a tab count, not a 2nd avatar.
+  const alice2 = await captureEvents(pid, 'alice');
+  const j2 = await waitPresence(pid, (r) => byId(r, 'alice') && byId(r, 'alice').count === 2);
+  check(
+    'presence: multiple tabs of one reviewer collapse to a single entry with a tab count',
+    (() => { const a = byId(j2, 'alice'); return !!a && a.count === 2 && j2.filter((r) => r.id === 'alice').length === 1; })(),
+    JSON.stringify(j2)
+  );
+  // FX-4: closing one of the two tabs leaves the reviewer present with count 1.
+  alice2.close();
+  const j3 = await waitPresence(pid, (r) => byId(r, 'alice') && byId(r, 'alice').count === 1);
+  check(
+    'presence: closing one of a reviewer\'s tabs keeps them present (count decrements)',
+    !!byId(j3, 'alice') && byId(j3, 'alice').count === 1,
+    JSON.stringify(j3)
+  );
+  // FX-5 / AC2: closing the reviewer's LAST tab removes them from the roster.
+  alice1.close();
+  const j4 = await waitPresence(pid, (r) => !byId(r, 'alice'));
+  check(
+    'presence: closing a reviewer\'s last tab removes them from the roster (AC2)',
+    !byId(j4, 'alice') && !!byId(j4, 'bob'),
+    JSON.stringify(j4)
+  );
+  bob1.close();
+
+  // FX-6 / FM-2 / AC3: an anonymous connection (no rid — curl, an old client, the plain
+  // test helpers) registers no presence and broadcasts none, on open AND on close. This
+  // is the majority path today; a regression here would corrupt every existing SSE test.
+  const anonSess = await cli('start', docA, '--no-open');
+  const anonId = anonSess.id;
+  const anonConn = await captureEvents(anonId); // no rid
+  await sleep(180);
+  check(
+    'presence: an anonymous connection registers no presence and broadcasts none (AC3/FM-2)',
+    (await presenceOf(anonId)).length === 0 && anonConn.presenceFrames().length === 0,
+    JSON.stringify(await presenceOf(anonId))
+  );
+  anonConn.close();
+  await sleep(150);
+  check('presence: closing an anonymous connection still leaves an empty roster', (await presenceOf(anonId)).length === 0);
+  await cli('stop', '--session', anonId);
+
+  // FX-9: presence is per-session — a join in one session never leaks into another.
+  const isoSess = await cli('start', docB, '--no-open');
+  const isoId = isoSess.id;
+  const isoConn = await captureEvents(pid, 'carol');
+  await waitPresence(pid, (r) => byId(r, 'carol'));
+  check(
+    'presence: a join in one session never appears in another session\'s roster (FX-9)',
+    (await presenceOf(isoId)).length === 0,
+    JSON.stringify(await presenceOf(isoId))
+  );
+  isoConn.close();
+  await cli('stop', '--session', isoId);
+
+  // TM-9: rid/rname are truncated server-side so an oversized value can't bloat the
+  // roster that gets re-broadcast to every tab.
+  const truncSess = await cli('start', docA, '--no-open');
+  const truncId = truncSess.id;
+  const bigConn = await captureEvents(truncId, 'x'.repeat(300), 'y'.repeat(300));
+  const tr = await waitPresence(truncId, (r) => r.length === 1);
+  check(
+    'presence: an oversized rid/rname is truncated to 100 chars (TM-9)',
+    tr.length === 1 && tr[0].id.length === 100 && tr[0].name.length === 100,
+    JSON.stringify({ idLen: tr[0] && tr[0].id.length, nameLen: tr[0] && tr[0].name.length })
+  );
+  bigConn.close();
+  await cli('stop', '--session', truncId);
+
+  // FM-4 / TM-7: the roster map is capped (PLANREVIEW_MAX_PRESENCE=4 in this run) so a
+  // runaway client can't grow it — and the O(N) broadcast — without bound.
+  const capSess = await cli('start', docA, '--no-open');
+  const capId = capSess.id;
+  const capConns = [];
+  for (let i = 0; i < 6; i++) capConns.push(await captureEvents(capId, `cap${i}`));
+  const capped = await waitPresence(capId, (r) => r.length >= 4);
+  check('presence: the roster is capped so distinct-rid growth is bounded (FM-4/TM-7)', capped.length === 4, `size=${capped.length}`);
+  for (const c of capConns) c.close();
+  await cli('stop', '--session', capId);
+
+  // FM-8: name freshening — a later tab supplying a name updates a nameless entry, a
+  // later blank name never blanks an existing one, and leaving a tab never rewrites it.
+  const nameSess = await cli('start', docA, '--no-open');
+  const nameId = nameSess.id;
+  const n1 = await captureEvents(nameId, 'dee', '');
+  await waitPresence(nameId, (r) => byId(r, 'dee'));
+  const n2 = await captureEvents(nameId, 'dee', 'Dee');
+  const nf = await waitPresence(nameId, (r) => byId(r, 'dee') && byId(r, 'dee').name === 'Dee');
+  check('presence: a later tab freshens a nameless reviewer\'s label (FM-8a)', !!byId(nf, 'dee') && byId(nf, 'dee').name === 'Dee', JSON.stringify(nf));
+  const n3 = await captureEvents(nameId, 'dee', '');
+  await waitPresence(nameId, (r) => byId(r, 'dee') && byId(r, 'dee').count === 3);
+  check('presence: a later blank name does not wipe an existing name (FM-8b)', byId(await presenceOf(nameId), 'dee')?.name === 'Dee');
+  n2.close();
+  await waitPresence(nameId, (r) => byId(r, 'dee') && byId(r, 'dee').count === 2);
+  check('presence: leaving a tab never rewrites the reviewer\'s name', byId(await presenceOf(nameId), 'dee')?.name === 'Dee');
+  n1.close();
+  n3.close();
+  await cli('stop', '--session', nameId);
+
+  // FM-13: the roster is a Map, so a hostile rid like "__proto__" is an ordinary key.
+  const protoSess = await cli('start', docA, '--no-open');
+  const protoId = protoSess.id;
+  const pc1 = await captureEvents(protoId, '__proto__', 'p');
+  const pc2 = await captureEvents(protoId, 'constructor', 'c');
+  const pr2 = await waitPresence(protoId, (r) => r.length === 2);
+  check(
+    'presence: __proto__/constructor rids are ordinary entries, no prototype pollution (FM-13)',
+    pr2.length === 2 && !!byId(pr2, '__proto__') && !!byId(pr2, 'constructor') && ({}).p === undefined,
+    JSON.stringify(pr2.map((x) => x.id))
+  );
+  pc1.close();
+  pc2.close();
+  await cli('stop', '--session', protoId);
+
+  // TM-8: rapid churn coalesces — several joins inside one debounce window produce ONE
+  // presence frame (not one per join), so churn can't storm the fan-out.
+  const churnSess = await cli('start', docA, '--no-open');
+  const churnId = churnSess.id;
+  const observer = await captureEvents(churnId); // anonymous — receives frames, adds none
+  await sleep(120); // ensure nothing is mid-window before we count
+  const churnConns = await Promise.all(['e1', 'e2', 'e3'].map((r) => captureEvents(churnId, r)));
+  await sleep(80 + 150); // one debounce window + slack
+  check(
+    'presence: a burst of joins in one debounce window is a single roster frame (TM-8)',
+    observer.presenceFrames().length === 1 && observer.presenceFrames()[0].length === 3,
+    JSON.stringify({ frames: observer.presenceFrames().length })
+  );
+  observer.close();
+  for (const c of churnConns) c.close();
+  await cli('stop', '--session', churnId);
+
+  // FM-3: broadcast() must survive a write to a socket that died between reaps. Presence
+  // fires broadcasts far more often than before, so one dead socket must never crash the
+  // fan-out (and every other session with it). Open raw SSE sockets, kill them hard, and
+  // force a broadcast (a chat message) while each may still be in s.sse.
+  console.log('presence: a dead SSE socket never crashes the broadcast fan-out (FM-3)');
+  const resSess = await cli('start', docA, '--no-open');
+  const resId = resSess.id;
+  const survivor = await captureEvents(resId, 'survivor');
+  await waitPresence(resId, (r) => byId(r, 'survivor'));
+  for (let i = 0; i < 15; i++) {
+    await new Promise((resolve) => {
+      const sock = net.connect(PORT, '127.0.0.1', () => {
+        sock.write(`GET /events?session=${resId} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`); // anonymous, cap-independent
+        setTimeout(() => { sock.destroy(); resolve(); }, 10);
+      });
+      sock.on('error', () => resolve());
+    });
+    await browser(`/api/chat?session=${resId}`, { text: `ping ${i}` }); // broadcasts to every sse, incl. the just-killed one
+  }
+  await sleep(150);
+  check('presence: the server survives broadcasting to dead sockets (FM-3)', await serverAlive(), 'server crashed under dead-socket churn');
+  const survives = await presenceOf(resId);
+  check('presence: a healthy subscriber still holds a valid roster after the churn', Array.isArray(survives) && !!byId(survives, 'survivor'), JSON.stringify(survives));
+  survivor.close();
+  await cli('stop', '--session', resId);
+  await cli('stop', '--session', pid);
+
   console.log('connected tab shows up in the session\'s client count');
   const tab = await openEventStream(guard.id);
   await sleep(300);
@@ -1848,6 +2101,24 @@ async function main() {
     /choice-picks/.test(app.body) && /choice-disagree/.test(app.body)
   );
   check('client shows the reviewer name on chat lines', /chat-author/.test(app.body));
+  // presence (issue 007): identity rides the SSE connection; a presence handler + strip render.
+  check(
+    'client carries its reviewer identity on the SSE connection (rid/rname on /events)',
+    /function eventsUrl\(/.test(app.body) && /rid=/.test(app.body) && /rname=/.test(app.body) && /reviewer\.id/.test(app.body),
+  );
+  check(
+    'client renders a live presence strip on presence events, colored by reviewerId',
+    /addEventListener\('presence'/.test(app.body) &&
+      /function renderPresence\(/.test(app.body) &&
+      /presence-avatar/.test(app.body) &&
+      /authorColor\(/.test(app.body),
+  );
+  check(
+    'client guards the presence payload shape and renders names via textContent (not innerHTML)',
+    /state\.presence = Array\.isArray/.test(app.body) && /textContent = initials\(/.test(app.body),
+  );
+  check('review page carries the presence strip container', /id="presence"/.test(appPage.body));
+  check('stylesheet styles the presence avatars', /presence-avatar/.test(css.body));
   check('review page carries the "you are <name>" identity affordance', /id="identity"/.test(appPage.body));
   check(
     'stylesheet styles the attribution UI (author badge + choice conflict)',

@@ -125,6 +125,7 @@ const state = {
   comments: [], // {id, quote, text, ts, replies?: [{role:'agent'|'reviewer', text, ts}], archived?}
   choices: {}, // choiceId -> { reviewerId -> value(string) | values(string[]) when multi }
   progress: [], // {text, ts} rework steps, shown in the working overlay
+  presence: [], // [{id, name, connectedAt, count}] reviewers viewing now (live, never persisted)
 };
 
 let pendingRange = null;
@@ -314,6 +315,8 @@ async function fetchState() {
   for (const msg of s.chat || []) appendChatMessage(msg);
   state.progress = s.progress || [];
   renderProgress();
+  state.presence = Array.isArray(s.presence) ? s.presence : [];
+  renderPresence();
 }
 
 // ---------- chat ----------
@@ -466,12 +469,30 @@ chatFormEl.addEventListener('submit', async (e) => {
 
 // ---------- live events ----------
 
+// The SSE URL carries this tab's identity so the server can add it to the session's
+// presence roster (issue 007). rid is always present (loadReviewerId always mints one);
+// rname is optional. An identity-less connection (not possible from this client, but
+// e.g. curl) stays anonymous and registers no presence.
+function eventsUrl() {
+  let u = `${api('/events')}&rid=${encodeURIComponent(reviewer.id)}`;
+  if (reviewer.name) u += `&rname=${encodeURIComponent(reviewer.name)}`;
+  return u;
+}
+
 function connectEvents() {
-  const es = new EventSource(api('/events'));
+  const es = new EventSource(eventsUrl());
   // Resync on every (re)connect. A tab that missed broadcasts while the
   // server restarted — e.g. one still showing a previous session's "ended"
   // overlay — heals itself the moment it reattaches to the new session.
   es.onopen = () => fetchState();
+  // the live roster of who is viewing changed (someone joined or left): re-render the
+  // strip. The payload is the full roster, so replace wholesale; guard the shape so a
+  // malformed frame can't throw and kill the stream.
+  es.addEventListener('presence', (e) => {
+    const roster = JSON.parse(e.data);
+    state.presence = Array.isArray(roster) ? roster : [];
+    renderPresence();
+  });
   es.addEventListener('chat', (e) => {
     const msg = JSON.parse(e.data);
     // our own messages are appended optimistically on send
@@ -730,6 +751,36 @@ function authorLabel(a) {
   if (!a) return 'anonymous';
   if (a.name) return a.name;
   return a.id ? a.id.slice(0, 8) : 'anonymous';
+}
+
+// A two-letter monogram for a presence avatar: initials from the name (first + last
+// word), else the head of the id. Falls back to '?' so a malformed entry never throws.
+function initials(name, id) {
+  const n = (name || '').trim();
+  if (n) {
+    const parts = n.split(/\s+/);
+    return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
+  }
+  return (id || '?').slice(0, 2).toUpperCase();
+}
+
+// The live "who is viewing now" strip in the top bar: one color-coded avatar per present
+// reviewer (you included), colored by reviewerId to match 004's attribution. Names are
+// untrusted, so they only ever reach textContent / the title attribute — never innerHTML.
+function renderPresence() {
+  const el = document.getElementById('presence');
+  if (!el) return;
+  el.innerHTML = '';
+  for (const p of state.presence || []) {
+    const av = document.createElement('span');
+    av.className = 'presence-avatar';
+    if (p && p.id === reviewer.id) av.classList.add('you');
+    av.textContent = initials(p && p.name, p && p.id);
+    if (p && p.id) av.style.setProperty('--author-color', authorColor(p.id));
+    const tabs = p && p.count > 1 ? ` · ${p.count} tabs` : '';
+    av.title = `${authorLabel(p)}${p && p.id === reviewer.id ? ' (you)' : ''}${tabs}`;
+    el.appendChild(av);
+  }
 }
 
 // Whether this tab may edit/delete a comment: only its own (the server enforces the
@@ -1176,5 +1227,6 @@ function renderIdentity() {
 // ---------- boot ----------
 
 renderIdentity();
+renderPresence();
 fetchState();
 connectEvents();
