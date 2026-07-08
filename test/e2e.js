@@ -28,7 +28,7 @@ let PORT;
 let BASE;
 let env;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
-const { render, renderDiff, renderVersionDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
+const { render, renderDiff, renderVersionDiff, parseChoiceSpecs } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
 const { quoteAnchors } = require(path.join(__dirname, '..', 'server', 'anchor'));
 
@@ -1423,6 +1423,23 @@ async function main() {
   check(
     'other: false omits the free-text input',
     !/data-other/.test(noOther) && /choice-option/.test(noOther)
+  );
+
+  // issue 008: the server captures each choice block's declared options so a resolve
+  // can be validated against them.
+  const specs = parseChoiceSpecs(
+    '# T\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n\n```choice\nid: multi\nmulti: true\noptions:\n  - X\n  - Y\n```\n'
+  );
+  check(
+    'parseChoiceSpecs returns declared options per choice id',
+    specs.pick && specs.pick.options.join(',') === 'A1,A2' && specs.pick.multi === false &&
+      specs.multi && specs.multi.multi === true && specs.multi.options.join(',') === 'X,Y',
+    JSON.stringify(specs)
+  );
+  check(
+    'parseChoiceSpecs ignores a malformed choice (no id or no options)',
+    Object.keys(parseChoiceSpecs('```choice\nprompt: no id\noptions:\n  - A\n```\n')).length === 0,
+    JSON.stringify(parseChoiceSpecs('```choice\nprompt: no id\n```\n'))
   );
 
   console.log('doc changes: re-render highlights new/changed blocks; first render is clean');
