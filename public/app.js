@@ -142,7 +142,7 @@ const STATUS_LABEL = {
   ended: 'session ended',
 };
 
-function setStatus(status) {
+function setStatus(status, activity) {
   const wasWorking = state.status === 'working';
   state.status = status;
   statusPill.dataset.status = status;
@@ -155,7 +155,7 @@ function setStatus(status) {
   // reset it); stop and clear it the moment we leave — which is also how the
   // hint clears when the reworked document loads (present → 'reviewing').
   if (status === 'working') {
-    if (!wasWorking) startWorkingTimer();
+    if (!wasWorking) startWorkingTimer(activity);
   } else if (wasWorking) {
     stopWorkingTimer();
   }
@@ -302,7 +302,7 @@ async function fetchState() {
     return; // server unreachable — the event stream's reconnect will retry us
   }
   renderDoc(s.doc);
-  setStatus(s.status);
+  setStatus(s.status, { workingSince: s.workingSince, lastAgentActivity: s.lastAgentActivity });
   state.comments = (s.review && s.review.comments) || [];
   state.choices = (s.review && s.review.choices) || {};
   // Only active comments anchor into the document; archived ones (their quote is
@@ -419,10 +419,21 @@ let workingTimer = null; // interval ticking the elapsed/staleness display
 let workingStartTs = 0; // when this rework spell began (client clock)
 let lastSignalTs = 0; // last sign of life: entering 'working' or a progress event
 
-function startWorkingTimer() {
-  workingStartTs = Date.now();
-  lastSignalTs = workingStartTs;
-  tickWorking(); // paint 0:00 immediately rather than leaving a blank first second
+// `activity`, when present, carries the server's view of this round's real
+// start/last-signal times ({ workingSince, lastAgentActivity }) — a refreshed
+// (or freshly reconnected) tab passes this through so its clock reflects the
+// round already in progress instead of restarting at 0:00. Number.isFinite
+// (not ??/||) guards against a malformed/legacy payload's non-numeric field
+// propagating into Math.max and producing NaN, which would render "No updates
+// for NaN s" forever. Math.max(last, since) also means a stale leftover
+// lastAgentActivity from a PRIOR round can never make a brand-new round look
+// instantly stale — the round's own start time is always the floor.
+function startWorkingTimer(activity) {
+  const since = activity && Number.isFinite(activity.workingSince) ? activity.workingSince : Date.now();
+  const last = activity && Number.isFinite(activity.lastAgentActivity) ? activity.lastAgentActivity : since;
+  workingStartTs = since;
+  lastSignalTs = Math.max(last, since);
+  tickWorking(); // paint the real elapsed time immediately rather than leaving a blank first second
   clearInterval(workingTimer);
   workingTimer = setInterval(tickWorking, 1000);
 }
@@ -529,12 +540,12 @@ function connectEvents() {
     noteAgentSignal(); // a progress event = the agent is alive; reset staleness
   });
   es.addEventListener('status', (e) => {
-    const status = JSON.parse(e.data).status;
-    if (status === 'working') {
+    const d = JSON.parse(e.data);
+    if (d.status === 'working') {
       state.progress = []; // a fresh rework round — clear last round's steps
       renderProgress();
     }
-    setStatus(status);
+    setStatus(d.status, d);
   });
 }
 

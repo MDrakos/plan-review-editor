@@ -182,15 +182,16 @@ function check(name, cond, detail) {
   }
 }
 
-// Exercise the working-overlay liveness WIRING the way a browser would: load the
-// real public/liveness.js + public/app.js as two classic scripts into one shared
-// scope (a hand-rolled, zero-dep DOM shim with a controllable clock), then drive
-// the SSE lifecycle and assert what the reviewer sees. This is the only layer
-// that catches (a) two <script>s colliding on a top-level `const`, which takes
-// the whole page down, and (b) timer start/stop/reset bugs that structural regex
-// checks can't see. No DOM library — just the handful of globals app.js touches.
-async function driveLivenessWiring() {
-  let now = 1_000_000; // fake clock (ms); app.js reads Date.now()
+// Shared VM-shim builder for the liveness DOM harness: builds the hand-rolled,
+// zero-dep DOM/EventSource/fetch/timer shim (a `vm.createContext` global object
+// shaped like the handful of browser globals app.js/liveness.js touch), and
+// returns a `load(file)` helper that `vm.runInContext`s a real public/*.js file
+// into it. Both driveLivenessWiring (one long sequential story, its own local
+// `now`/`fetchCalls` mutated directly by the story) and bootLivenessHarness
+// (one-shot per-scenario boots, a boxed clock advanced after boot) call this —
+// `getNow` and `onFetch` are hooks so each caller's own clock/counter variables
+// keep working exactly as before, since neither caller's driving code may change.
+function buildLivenessVm({ fakeState, getNow, onFetch }) {
   let timers = [];
   let tid = 1;
   const pump = () => { for (const t of [...timers]) t.fn(); }; // one tick of every live interval
@@ -209,8 +210,7 @@ async function driveLivenessWiring() {
   const getEl = (id) => (els[id] || (els[id] = makeEl()));
 
   let es = null;
-  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
-  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [], presence: [] };
+  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState); always tracked, cheap either way
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
   const ctx = vm.createContext({
@@ -222,11 +222,11 @@ async function driveLivenessWiring() {
     },
     location: { pathname: '/s/abc' },
     EventSource: function (url) { es = { _url: url, onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
-    fetch: () => { fetchCalls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }); },
+    fetch: () => { fetchCalls++; if (onFetch) onFetch(); return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }); },
     setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
-    clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
+    clearInterval: (id) => { const idx = timers.findIndex((t) => t.id === id); if (idx !== -1) timers.splice(idx, 1); },
     setTimeout: () => 0, clearTimeout: () => {},
-    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
+    Date: { now: getNow }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
     // Browser globals the reviewer-identity module (app.js) legitimately uses.
     crypto: { randomUUID: () => `shim-uuid-${tid++}` },
     localStorage: (() => {
@@ -237,6 +237,29 @@ async function driveLivenessWiring() {
   });
 
   const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
+  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+
+  return { ctx, getEl, fire, pump, timers, load, flush, get fetchCalls() { return fetchCalls; }, get es() { return es; } };
+}
+
+// Exercise the working-overlay liveness WIRING the way a browser would: load the
+// real public/liveness.js + public/app.js as two classic scripts into one shared
+// scope (a hand-rolled, zero-dep DOM shim with a controllable clock), then drive
+// the SSE lifecycle and assert what the reviewer sees. This is the only layer
+// that catches (a) two <script>s colliding on a top-level `const`, which takes
+// the whole page down, and (b) timer start/stop/reset bugs that structural regex
+// checks can't see. No DOM library — just the handful of globals app.js touches.
+async function driveLivenessWiring() {
+  let now = 1_000_000; // fake clock (ms); app.js reads Date.now()
+  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
+  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [], presence: [] };
+  const vmHandle = buildLivenessVm({
+    fakeState,
+    getNow: () => now,
+    onFetch: () => fetchCalls++,
+  });
+  const { ctx, getEl, fire, pump, timers, load, flush } = vmHandle;
+
   load('liveness.js');
   let loadErr = null;
   try {
@@ -251,7 +274,6 @@ async function driveLivenessWiring() {
   check('liveness.js + app.js load together with no top-level identifier collision', !collided, loadErr && loadErr.message);
   if (collided) return; // nothing more to drive — the page wouldn't have loaded
 
-  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
   await flush(); // boot fetchState() settles → status 'reviewing'
   const overlay = getEl('working-overlay'), elapsed = getEl('working-elapsed'), stale = getEl('working-stale');
 
@@ -315,8 +337,8 @@ async function driveLivenessWiring() {
   // an unused helper exists in source).
   check(
     'presence: connectEvents opens the SSE carrying the reviewer id (rid=<our id>)',
-    !!es && typeof es._url === 'string' && es._url.includes('rid=' + encodeURIComponent(myId)),
-    es && es._url
+    !!vmHandle.es && typeof vmHandle.es._url === 'string' && vmHandle.es._url.includes('rid=' + encodeURIComponent(myId)),
+    vmHandle.es && vmHandle.es._url
   );
 
   // Firing a roster must render without throwing, must tolerate malformed / non-array /
@@ -352,6 +374,230 @@ async function driveLivenessWiring() {
     nameRenderedViaTitle && !innerHtmlHasPayload,
     JSON.stringify({ nameRenderedViaTitle, innerHtmlHasPayload })
   );
+}
+
+// ---------- liveness refresh accuracy (issue 009 T3) ----------
+//
+// driveLivenessWiring above proves a LIVE tab's timer/staleness lifecycle is
+// correct. These scenarios prove a REFRESHED tab is correct too: app.js must
+// seed workingStartTs/lastSignalTs from the server-reported workingSince /
+// lastAgentActivity (carried on GET /api/state and on the `status` SSE event)
+// rather than always restarting the clock at Date.now(). Each scenario gets
+// its own fresh VM context/session — unlike driveLivenessWiring's one long
+// story — since each needs a different boot payload and must not disturb the
+// existing scenario's assertions.
+//
+// Factored out of driveLivenessWiring's inline setup so each scenario below
+// can boot its own isolated shim with its own fake clock and fake state.
+function bootLivenessHarness(fakeState, initialNow) {
+  const clock = { now: initialNow }; // mutable box so Date.now() can be advanced after boot
+  const { pump, fire, flush, getEl, timers, load } = buildLivenessVm({ fakeState, getNow: () => clock.now });
+  load('liveness.js');
+  load('app.js');
+
+  return { clock, pump, fire, flush, getEl, timerCount: () => timers.length };
+}
+
+// Shared boot boilerplate for driveLivenessRefreshAccuracy's scenarios: merge
+// each scenario's distinctive fields (workingSince/lastAgentActivity/status/etc.)
+// over a default idle-doc fakeState, boot the harness, flush the initial
+// fetchState(), and hand back the two elements every scenario asserts against.
+async function runLivenessScenario(overrides, initialNow) {
+  const fakeState = {
+    doc: { title: 'T', html: '<p>x</p>', version: 1 },
+    status: 'working',
+    review: { comments: [], choices: {} },
+    chat: [],
+    progress: [],
+    ...overrides,
+  };
+  const h = bootLivenessHarness(fakeState, initialNow);
+  await h.flush(); // boot fetchState() settles
+  return { h, elapsed: h.getEl('working-elapsed'), stale: h.getEl('working-stale') };
+}
+
+async function driveLivenessRefreshAccuracy() {
+  // Scenario 1: a refresh mid-round shows the REAL elapsed time, not 0:00.
+  {
+    const workingSince = 1_000_000;
+    const lastAgentActivity = workingSince + 5000;
+    const now = workingSince + 12000; // boot 12s into a round already underway
+    const { h, elapsed } = await runLivenessScenario({ workingSince, lastAgentActivity }, now);
+    const overlay = h.getEl('working-overlay');
+    check(
+      'liveness refresh: overlay is visible on a mid-round boot',
+      overlay.hidden === false,
+      String(overlay.hidden)
+    );
+    check(
+      'liveness refresh: mid-round boot paints the REAL elapsed time (0:12), not 0:00',
+      elapsed.textContent === '0:12' && elapsed.textContent !== '0:00',
+      elapsed.textContent
+    );
+
+    // Extend scenario 1 to prove lastSignalTs is really Math.max(lastAgentActivity,
+    // workingSince) rather than workingSince alone. lastAgentActivity (1_005_000) is
+    // 5s AFTER workingSince (1_000_000), so the two candidate staleness deadlines
+    // land 5s apart: since-alone would cross the 40s threshold at now=1_040_000;
+    // the correct max-based lastSignalTs (1_005_000) crosses it 5s later, at
+    // now=1_045_000. Landing the clock in between (1_042_000) is hidden under the
+    // correct implementation but would already show under a since-alone regression
+    // that silently dropped the Math.max computation — the exact gap this closes.
+    const stale = h.getEl('working-stale');
+    h.clock.now = workingSince + 42000; // 1_042_000: past since-based deadline, before last-based deadline
+    h.pump();
+    check(
+      'liveness refresh: Math.max(last, since) — hint stays hidden between the since-only and last-based deadlines',
+      stale.hidden === true,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+    h.clock.now = workingSince + 46000; // 1_046_000: past the correct (last-based) deadline too
+    h.pump();
+    check(
+      'liveness refresh: Math.max(last, since) — hint finally appears once the last-based deadline passes',
+      stale.hidden === false,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+  }
+
+  // Scenario 2 (FM-4): a malformed activity payload never produces "NaN s".
+  {
+    const now = 2_000_000;
+    const { h, elapsed, stale } = await runLivenessScenario(
+      { workingSince: 'not-a-number', lastAgentActivity: 'also-not-a-number' },
+      now
+    );
+    check(
+      'liveness refresh FM-4: garbage workingSince/lastAgentActivity falls back to Date.now() (0:00)',
+      elapsed.textContent === '0:00',
+      elapsed.textContent
+    );
+    check(
+      'liveness refresh FM-4: the staleness hint never renders "NaN" and stays hidden',
+      stale.hidden === true && !/NaN/.test(stale.textContent),
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+    h.pump(); // one more tick for good measure — still must never go NaN
+    check(
+      'liveness refresh FM-4: still no "NaN" after a tick',
+      !/NaN/.test(elapsed.textContent) && !/NaN/.test(stale.textContent),
+      JSON.stringify({ e: elapsed.textContent, s: stale.textContent })
+    );
+  }
+
+  // Scenario 3 (FM-9): a future workingSince (clock skew) clamps to 0:00, no crash.
+  {
+    const now = 3_000_000;
+    const workingSince = now + 5000; // ahead of "now" — simulated clock skew
+    const { elapsed, stale } = await runLivenessScenario({ workingSince, lastAgentActivity: workingSince }, now);
+    check(
+      'liveness refresh FM-9: a future workingSince clamps the first tick to 0:00 (no negative/garbage)',
+      elapsed.textContent === '0:00',
+      elapsed.textContent
+    );
+    check(
+      'liveness refresh FM-9: the staleness hint stays hidden under clock skew',
+      stale.hidden === true,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+  }
+
+  // Scenario 4 (FM-2/FM-11): a stray workingSince on a terminal status is inert —
+  // e.g. /agent/stop firing mid-round, which the server now allows. The 'ended'
+  // branch of setStatus never reads `activity`, so this must produce the exact
+  // same clean teardown as a bare {status:'ended'} event.
+  {
+    const now = 4_000_000;
+    const { h } = await runLivenessScenario({ status: 'reviewing', workingSince: null, lastAgentActivity: null }, now); // boots into 'reviewing', no timer yet
+    const workingSince = now - 3000; // a real round already 3s underway
+    h.fire('status', { status: 'working', workingSince, lastAgentActivity: workingSince });
+    check(
+      'liveness refresh FM-2/FM-11 setup: a real round is running before the stray-stop event',
+      h.timerCount() === 1,
+      String(h.timerCount())
+    );
+    // /agent/stop mid-round: the server now allows this and still carries the
+    // (now-stale) workingSince/lastAgentActivity fields on the terminal event.
+    h.fire('status', { status: 'ended', workingSince, lastAgentActivity: workingSince });
+    const elapsed = h.getEl('working-elapsed');
+    const stale = h.getEl('working-stale');
+    check(
+      'liveness refresh FM-2/FM-11: a stray workingSince on a terminal status is inert — clean teardown',
+      h.timerCount() === 0 && elapsed.textContent === '' && stale.hidden === true,
+      JSON.stringify({ timers: h.timerCount(), elapsed: elapsed.textContent, staleHidden: stale.hidden })
+    );
+  }
+
+  // Scenario 5 (FM-4 mixed payload): the failure mode Number.isFinite actually
+  // guards against is a MIXED payload — one field a real timestamp, the other
+  // garbage — not both-garbage (scenario 2 above; both-garbage happens to land on
+  // NaN either way, since formatElapsed/stalenessHint already clamp NaN, so it
+  // passes identically with or without the guard and proves nothing on its own).
+  // With a naive `??`/`||` fallback, Math.max(garbageString, validNumber) still
+  // coerces to NaN (Math.max always Numbers both args), which would permanently
+  // poison lastSignalTs for the rest of the round: Date.now() - NaN is always NaN,
+  // and stalenessHint's `!(NaN >= threshold)` is true, so it returns null forever
+  // — the staleness advisory would be silently, permanently disabled. The correct
+  // Number.isFinite guard instead falls the garbage field back to `since`, keeping
+  // lastSignalTs a real number so staleness detection keeps working.
+  {
+    const now = 5_000_000;
+    const workingSince = now - 5000; // a real round already 5s underway
+    const { h, elapsed, stale } = await runLivenessScenario(
+      { workingSince, lastAgentActivity: 'garbage' }, // the other field is garbage — the mixed case
+      now
+    );
+    check(
+      'liveness refresh FM-4 mixed: a valid workingSince paints the real elapsed time (0:05), proving it was not discarded',
+      elapsed.textContent === '0:05',
+      elapsed.textContent
+    );
+    h.clock.now = workingSince + 40000; // now - workingSince === 40000: past the staleness threshold
+    h.pump();
+    check(
+      'liveness refresh FM-4 mixed: garbage lastAgentActivity does not poison Math.max into NaN — the staleness hint still fires',
+      stale.hidden === false && !/NaN/.test(stale.textContent),
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+  }
+
+  // Scenario 6 (FX-7): a LEFTOVER lastAgentActivity from a PREVIOUS round can be
+  // numerically SMALLER (older) than the new round's workingSince — this is the
+  // exact scenario that motivates Math.max(last, since) instead of using `last`
+  // alone. Same discrimination technique as scenario 1: land the clock between
+  // the WRONG (last-alone) deadline and the CORRECT (max-based) one, and prove
+  // the stale, older lastAgentActivity does not make the hint fire early.
+  {
+    const STALE = liveness.STALE_THRESHOLD_MS;
+    const workingSince = 6_000_000;
+    const lastAgentActivity = workingSince - 5000; // stale, from a prior round — OLDER than workingSince
+    const now = workingSince + 10000; // boot 10s into the new round
+    const { h, elapsed, stale } = await runLivenessScenario({ workingSince, lastAgentActivity }, now);
+    check(
+      'liveness refresh FX-7: mid-round boot paints the real elapsed time (0:10) despite a stale, older lastAgentActivity',
+      elapsed.textContent === '0:10',
+      elapsed.textContent
+    );
+
+    // Wrong (last-alone) deadline: lastAgentActivity + STALE = (workingSince - 5000) + STALE.
+    // Correct (max-based) deadline: workingSince + STALE — 5s later, since workingSince
+    // is the larger (more recent) of the two candidates and Math.max must pick it.
+    h.clock.now = workingSince - 5000 + STALE + 2000; // past the WRONG deadline, still before the correct one
+    h.pump();
+    check(
+      'liveness refresh FX-7: Math.max(last, since) — the stale, older lastAgentActivity does not win; hint stays hidden past the wrong last-alone deadline',
+      stale.hidden === true,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+
+    h.clock.now = workingSince + STALE + 2000; // past the CORRECT (max-based) deadline
+    h.pump();
+    check(
+      'liveness refresh FX-7: Math.max(last, since) — past the correct max-based deadline, the hint finally appears',
+      stale.hidden === false,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+  }
 }
 
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
@@ -454,12 +700,14 @@ async function persistenceChecks() {
       'chat',
       'doc',
       'id',
+      'lastAgentActivity',
       'progress',
       'queue',
       'review',
       'status',
       'submissions',
       'touched',
+      'workingSince',
     ];
     check(
       'persist: the on-disk file is exactly the serializable allowlist (no live handles)',
@@ -532,6 +780,17 @@ async function persistenceChecks() {
       'kill -9 restore: the restored session has no live clients (empty sse/waiters)',
       restored.data.clients === 0,
       `clients=${restored.data.clients}`
+    );
+    check(
+      'kill -9 restore: lastAgentActivity and workingSince round-trip exactly (set before the crash)',
+      typeof before.lastAgentActivity === 'number' &&
+        typeof before.workingSince === 'number' &&
+        restored.data.lastAgentActivity === before.lastAgentActivity &&
+        restored.data.workingSince === before.workingSince,
+      JSON.stringify({
+        before: { lastAgentActivity: before.lastAgentActivity, workingSince: before.workingSince },
+        after: { lastAgentActivity: restored.data.lastAgentActivity, workingSince: restored.data.workingSince },
+      })
     );
     const page = await pageText(`/s/${id}`);
     check('kill -9 restore: /s/<id> resolves after restart', page.ok);
@@ -640,6 +899,72 @@ async function persistenceChecks() {
     );
     await stop(gid);
     await sleep(300);
+
+    // ----- P4b: FM-1 restore guard — a malformed/missing liveness field falls back to null -----
+    console.log('persistence: a malformed lastAgentActivity type and a missing workingSince fall back to null (FM-1)');
+    await killP();
+    const stateDir4b = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-badtypes-'));
+    const badId = 'badtypes1';
+    fs.writeFileSync(
+      path.join(stateDir4b, `${badId}.json`),
+      JSON.stringify({
+        id: badId,
+        status: 'reviewing',
+        doc: { path: null, title: 'BadTypes', html: '<p>Hi</p>', version: 1, blocks: ['<p>Hi</p>'], history: [] },
+        review: { comments: [], choices: {} },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+        lastAgentActivity: 'yesterday', // wrong type — must never pass through
+        // workingSince intentionally omitted entirely
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir4b });
+    check('persist: server up (bad-types case)', await waitHealth(true));
+    const badState = await p(`/api/state?session=${badId}`);
+    check(
+      'FM-1: a wrong-typed lastAgentActivity and a missing workingSince both restore as null, not a crash',
+      badState.status === 200 && badState.data.lastAgentActivity === null && badState.data.workingSince === null,
+      JSON.stringify(badState.status === 200 ? { lastAgentActivity: badState.data.lastAgentActivity, workingSince: badState.data.workingSince } : badState.status)
+    );
+    await stop(badId);
+    await sleep(300);
+    fs.rmSync(stateDir4b, { recursive: true, force: true });
+
+    // ----- P4b (mirror): the same guard applies to the OTHER field/direction -----
+    console.log('persistence: a malformed workingSince type and a missing lastAgentActivity fall back to null (FM-1 mirror)');
+    await killP();
+    const stateDir4c = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-badtypes2-'));
+    const badId2 = 'badtypes2';
+    fs.writeFileSync(
+      path.join(stateDir4c, `${badId2}.json`),
+      JSON.stringify({
+        id: badId2,
+        status: 'working',
+        doc: { path: null, title: 'BadTypes2', html: '<p>Hi</p>', version: 1, blocks: ['<p>Hi</p>'], history: [] },
+        review: { comments: [], choices: {} },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+        workingSince: 'yesterday', // wrong type — must never pass through
+        // lastAgentActivity intentionally omitted entirely
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir4c });
+    check('persist: server up (bad-types mirror case)', await waitHealth(true));
+    const badState2 = await p(`/api/state?session=${badId2}`);
+    check(
+      'FM-1 mirror: a wrong-typed workingSince and a missing lastAgentActivity both restore as null, not a crash',
+      badState2.status === 200 && badState2.data.workingSince === null && badState2.data.lastAgentActivity === null,
+      JSON.stringify(badState2.status === 200 ? { workingSince: badState2.data.workingSince, lastAgentActivity: badState2.data.lastAgentActivity } : badState2.status)
+    );
+    await stop(badId2);
+    await sleep(300);
+    fs.rmSync(stateDir4c, { recursive: true, force: true });
 
     // ----- P5: PLANREVIEW_PERSIST=0 does no disk I/O -----
     console.log('persistence: PLANREVIEW_PERSIST=0 does no disk I/O');
@@ -948,6 +1273,9 @@ async function main() {
   console.log('working-overlay liveness: overlay timer/hint lifecycle (real app.js in a DOM shim)');
   await driveLivenessWiring();
 
+  console.log('working-overlay liveness: refresh-accurate elapsed timer + staleness hint (issue 009 T3)');
+  await driveLivenessRefreshAccuracy();
+
   console.log('safeguard: a server running stale code is restarted on start');
   // occupy the port with a server that reports old code + no active sessions
   const STALE = `
@@ -1176,6 +1504,11 @@ async function main() {
     apState.data.status === 'done',
     apState.data.status
   );
+  check(
+    'FM-5: approve never sets workingSince (only submit does)',
+    apState.data.workingSince === null,
+    JSON.stringify(apState.data.workingSince)
+  );
   const apEv = await cli('wait', '--session', ap.id, '--timeout', '3');
   check(
     'agent gets an approve event carrying the final bundle',
@@ -1208,6 +1541,109 @@ async function main() {
     JSON.stringify({ status: afterPresent.data.status, progress: afterPresent.data.progress })
   );
   await cli('stop', '--session', pr.id);
+
+  console.log('liveness tracking: server-side lastAgentActivity/workingSince (issue 009)');
+  const lt = await cli('start', docA, '--no-open');
+  const ltState0 = await browser(`/api/state?session=${lt.id}`);
+  check(
+    // start's own loadDoc call already bumps lastAgentActivity (it's shared with
+    // /agent/present, and the initial present is itself agent activity); workingSince
+    // stays null until the first submit.
+    'a fresh session starts with lastAgentActivity set by the initial present, workingSince still null',
+    typeof ltState0.data.lastAgentActivity === 'number' &&
+      Math.abs(Date.now() - ltState0.data.lastAgentActivity) < 5000 &&
+      ltState0.data.workingSince === null,
+    JSON.stringify({ lastAgentActivity: ltState0.data.lastAgentActivity, workingSince: ltState0.data.workingSince })
+  );
+
+  await cli('progress', 'doing something', '--session', lt.id);
+  const ltAfterProgress = await browser(`/api/state?session=${lt.id}`);
+  check(
+    '/agent/progress bumps lastAgentActivity to ~now',
+    typeof ltAfterProgress.data.lastAgentActivity === 'number' &&
+      Math.abs(Date.now() - ltAfterProgress.data.lastAgentActivity) < 5000,
+    JSON.stringify(ltAfterProgress.data.lastAgentActivity)
+  );
+
+  const beforeWait = ltAfterProgress.data.lastAgentActivity;
+  await sleep(20);
+  await cli('wait', '--session', lt.id, '--timeout', '1'); // times out (no queued event) but still bumps
+  const ltAfterWait = await browser(`/api/state?session=${lt.id}`);
+  check(
+    '/agent/wait bumps lastAgentActivity on receipt, even when it times out',
+    typeof ltAfterWait.data.lastAgentActivity === 'number' && ltAfterWait.data.lastAgentActivity >= beforeWait,
+    JSON.stringify(ltAfterWait.data.lastAgentActivity)
+  );
+
+  await browser(`/api/submit?session=${lt.id}`, { comments: [], choices: {}, note: '' });
+  const ltAfterSubmit = await browser(`/api/state?session=${lt.id}`);
+  check(
+    'submit sets workingSince to ~now and status to working',
+    ltAfterSubmit.data.status === 'working' &&
+      typeof ltAfterSubmit.data.workingSince === 'number' &&
+      Math.abs(Date.now() - ltAfterSubmit.data.workingSince) < 5000,
+    JSON.stringify({ status: ltAfterSubmit.data.status, workingSince: ltAfterSubmit.data.workingSince })
+  );
+
+  fs.appendFileSync(docA, '\n(lt reworked)\n');
+  await cli('present', docA, '--session', lt.id);
+  const ltAfterPresent = await browser(`/api/state?session=${lt.id}`);
+  check(
+    'present clears workingSince back to null, returns to reviewing, and bumps lastAgentActivity again',
+    ltAfterPresent.data.workingSince === null &&
+      ltAfterPresent.data.status === 'reviewing' &&
+      typeof ltAfterPresent.data.lastAgentActivity === 'number' &&
+      Math.abs(Date.now() - ltAfterPresent.data.lastAgentActivity) < 5000,
+    JSON.stringify({
+      workingSince: ltAfterPresent.data.workingSince,
+      status: ltAfterPresent.data.status,
+      lastAgentActivity: ltAfterPresent.data.lastAgentActivity,
+    })
+  );
+  await cli('stop', '--session', lt.id);
+
+  // The block above only ever reads workingSince/lastAgentActivity back through
+  // GET /api/state. A regression that reverted just ONE of the three
+  // `broadcast(s, 'status', statusPayload(s))` call sites back to the old
+  // `{status: s.status}` shape would pass every check above, since /api/state is
+  // a separate code path — but a LIVE, already-connected tab only ever sees the
+  // SSE frame. Use captureEvents to assert the actual broadcast payload.
+  console.log('liveness tracking: the SSE "status" broadcast frame itself carries workingSince/lastAgentActivity, not just /api/state (issue 009 gap)');
+  const sseLt = await cli('start', docA, '--no-open');
+  const sseLtEvents = await captureEvents(sseLt.id);
+  await sleep(100); // let the SSE connection establish before triggering a broadcast
+  await browser(`/api/submit?session=${sseLt.id}`, { comments: [], choices: {}, note: '' });
+  await sleep(150);
+  const submitFrame = sseLtEvents.events.filter((e) => e.event === 'status').pop();
+  const submitData = submitFrame ? JSON.parse(submitFrame.data) : null;
+  check(
+    'SSE: the "status" broadcast frame for /api/submit carries status:working and a recent workingSince',
+    !!submitData &&
+      submitData.status === 'working' &&
+      typeof submitData.workingSince === 'number' &&
+      Math.abs(Date.now() - submitData.workingSince) < 5000,
+    JSON.stringify(submitData)
+  );
+
+  // Drive /agent/stop (the CLI 'stop' command) on the SAME session, mid-round.
+  // Per FM-2/FM-11 a stray non-null workingSince riding along on the terminal
+  // 'ended' broadcast is expected and intentional — this just confirms the
+  // broadcast frame (not /api/state) really carries it, proving statusPayload(s)
+  // is wired at this call site too.
+  await cli('stop', '--session', sseLt.id);
+  await sleep(150);
+  sseLtEvents.close();
+  const endedFrame = sseLtEvents.events.filter((e) => e.event === 'status').pop();
+  const endedData = endedFrame ? JSON.parse(endedFrame.data) : null;
+  check(
+    'SSE: the "status" broadcast frame for /agent/stop carries status:ended and still surfaces the stray workingSince (FM-2/FM-11)',
+    !!endedData &&
+      endedData.status === 'ended' &&
+      typeof endedData.workingSince === 'number' &&
+      submitData &&
+      endedData.workingSince === submitData.workingSince,
+    JSON.stringify({ submitData, endedData })
+  );
 
   console.log('answered questions persist across cycles; an un-anchored comment is archived, never dropped');
   const q = await cli('start', docA, '--no-open');
@@ -1465,6 +1901,11 @@ async function main() {
     sbDraft.data.review.comments.length === 1 && sbDraft.data.review.comments[0].id === 'a1',
     JSON.stringify(sbDraft.data.review.comments)
   );
+  check(
+    'T4: workingSince is session-scoped — set by reviewer B\'s submit exactly like a single-reviewer submit',
+    typeof sbDraft.data.workingSince === 'number' && Math.abs(Date.now() - sbDraft.data.workingSince) < 5000,
+    JSON.stringify(sbDraft.data.workingSince)
+  );
   await cli('stop', '--session', sbid);
 
   console.log('single-reviewer regression: one reviewer behaves exactly as before (union = just theirs)');
@@ -1508,6 +1949,14 @@ async function main() {
     'FM-3: only ONE submit event was enqueued (agent reworks once)',
     rcEv1.type === 'submit' && rcEv2.type === 'timeout',
     JSON.stringify({ e1: rcEv1.type, e2: rcEv2.type })
+  );
+  const rcState = await browser(`/api/state?session=${rc.id}`);
+  check(
+    'FM-6: after the concurrent-submit race, workingSince is set exactly once and status is working',
+    rcState.data.status === 'working' &&
+      typeof rcState.data.workingSince === 'number' &&
+      Math.abs(Date.now() - rcState.data.workingSince) < 5000,
+    JSON.stringify({ status: rcState.data.status, workingSince: rcState.data.workingSince })
   );
   await cli('stop', '--session', rc.id);
 
