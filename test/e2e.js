@@ -1205,6 +1205,42 @@ async function persistenceChecks() {
     await sleep(300);
     fs.rmSync(stateDir6b, { recursive: true, force: true });
 
+    // ----- P6b2: a pre-008 session (no resolutions key) restores as all-unresolved -----
+    console.log('persistence: a pre-008 session (no resolutions) restores as all-unresolved (issue 008)');
+    await killP();
+    const stateDir6b2 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-pre008-'));
+    const pre008Id = 'pre008';
+    fs.writeFileSync(
+      path.join(stateDir6b2, `${pre008Id}.json`),
+      JSON.stringify({
+        id: pre008Id,
+        status: 'reviewing',
+        doc: { path: null, title: 'Pre008', html: '<p>x</p>', version: 1, blocks: ['<p>x</p>'], history: [] },
+        // 004 shape: per-reviewer choices, but NO resolutions key and NO doc.choiceSpecs.
+        review: { comments: [], choices: { pick: { A: 'A1', B: 'A2' } } },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b2 });
+    check('persist: server up (pre-008 case)', await waitHealth(true));
+    const pre008 = await p(`/api/state?session=${pre008Id}`);
+    check(
+      'a pre-008 file restores with review.resolutions === {} (unresolved), choices intact',
+      pre008.status === 200 &&
+        pre008.data.review.resolutions &&
+        Object.keys(pre008.data.review.resolutions).length === 0 &&
+        pre008.data.review.choices.pick.A === 'A1' &&
+        pre008.data.review.choices.pick.B === 'A2',
+      JSON.stringify(pre008.data.review)
+    );
+    await stop(pre008Id);
+    await sleep(300);
+    fs.rmSync(stateDir6b2, { recursive: true, force: true });
+
     // ----- P6c: a submitted bundle is de-aliased from live session objects -----
     // mergeComments returns peer comments by reference; reviewBundle structuredClones the
     // result so a later /agent/reply (which mutates s.review.comments[i].replies in place)

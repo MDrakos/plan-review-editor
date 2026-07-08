@@ -5,7 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { renderDiff, renderVersionDiff } = require('./markdown');
+const { renderDiff, renderVersionDiff, parseChoiceSpecs } = require('./markdown');
 const { quoteAnchors } = require('./anchor');
 const { codeVersion } = require('./version');
 
@@ -67,10 +67,14 @@ function blankSession(id) {
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
     lastAgentActivity: null, // ms epoch of the last server-observed agent activity (progress/wait/present); null until the agent does something
     workingSince: null, // ms epoch when the CURRENT working round began; null when not working (set only by submit, cleared by loadDoc)
-    doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [] },
+    doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [], choiceSpecs: {} },
     // blocks: prev render, for the per-round highlight. history: a bounded ring
     // of { version, title, markdown } (last VERSION_HISTORY), for version diffs.
-    review: { comments: [], choices: {} }, // in-progress review, survives refreshes
+    // choiceSpecs: { choiceId: { options, multi, other } } captured at each present,
+    // so a resolve (008) can be validated against a block's declared options.
+    review: { comments: [], choices: {}, resolutions: {} }, // in-progress review, survives refreshes
+    // resolutions: 008's parallel map { choiceId: { option, by, byName, at, reason } };
+    // the shared, attributed decision on a divergent choice, orthogonal to `choices`.
     submissions: [], // completed review bundles, oldest first
     chat: [], // {role: 'reviewer' | 'agent', text, ts}
     progress: [], // {text, ts} steps the agent reports while reworking
@@ -266,6 +270,11 @@ function restoreSessions() {
       // A restored review must have the exact shapes the merge/render code assumes.
       if (!Array.isArray(s.review.comments)) s.review.comments = [];
       if (!isReviewerMap(s.review.choices)) s.review.choices = {};
+      // 008: a resolutions map parallel to choices. A pre-008 file (no key) or a bad
+      // type restores as all-unresolved rather than a booby-trap. (doc.choiceSpecs
+      // needs no branch here: the `s.doc = { ...s.doc, ...data.doc }` merge above
+      // already carries it, falling back to blankSession's {} for a pre-008 file.)
+      if (!isReviewerMap(s.review.resolutions)) s.review.resolutions = {};
       // Migrate a pre-004 flat choice value ({choiceId: option|options[]}) to the
       // per-reviewer shape { reviewerId: option }, keeping the legacy answer under
       // 'anonymous' rather than dropping it on the first post-upgrade merge/render.
@@ -400,6 +409,7 @@ function loadDoc(s, docPath) {
   const markdown = fs.readFileSync(docPath, 'utf8');
   // Highlight what changed since the previous cycle (nothing on the first load).
   const { html, blocks } = renderDiff(markdown, s.doc.blocks);
+  s.doc.choiceSpecs = parseChoiceSpecs(markdown); // 008: declared options for resolve-validation
   s.doc.path = docPath;
   s.doc.title = titleFrom(markdown) || path.basename(docPath);
   s.doc.html = html;
@@ -421,7 +431,10 @@ function loadDoc(s, docPath) {
     ...c,
     archived: !quoteAnchors(c.quote, html),
   }));
-  s.review = { comments: carried, choices: s.review.choices || {} };
+  // Carry choices AND resolutions forward across the rework round: a resolution is an
+  // explicit shared decision (008) that persists until cleared, so re-presenting a
+  // reworked doc must not silently drop it (parallel to how choices survive).
+  s.review = { comments: carried, choices: s.review.choices || {}, resolutions: s.review.resolutions || {} };
   s.progress = []; // the reworked doc is here — the previous round's steps are done
   s.status = 'reviewing';
   s.lastAgentActivity = Date.now(); // shared by /agent/start and /agent/present — either counts as agent activity
