@@ -182,15 +182,16 @@ function check(name, cond, detail) {
   }
 }
 
-// Exercise the working-overlay liveness WIRING the way a browser would: load the
-// real public/liveness.js + public/app.js as two classic scripts into one shared
-// scope (a hand-rolled, zero-dep DOM shim with a controllable clock), then drive
-// the SSE lifecycle and assert what the reviewer sees. This is the only layer
-// that catches (a) two <script>s colliding on a top-level `const`, which takes
-// the whole page down, and (b) timer start/stop/reset bugs that structural regex
-// checks can't see. No DOM library — just the handful of globals app.js touches.
-async function driveLivenessWiring() {
-  let now = 1_000_000; // fake clock (ms); app.js reads Date.now()
+// Shared VM-shim builder for the liveness DOM harness: builds the hand-rolled,
+// zero-dep DOM/EventSource/fetch/timer shim (a `vm.createContext` global object
+// shaped like the handful of browser globals app.js/liveness.js touch), and
+// returns a `load(file)` helper that `vm.runInContext`s a real public/*.js file
+// into it. Both driveLivenessWiring (one long sequential story, its own local
+// `now`/`fetchCalls` mutated directly by the story) and bootLivenessHarness
+// (one-shot per-scenario boots, a boxed clock advanced after boot) call this —
+// `getNow` and `onFetch` are hooks so each caller's own clock/counter variables
+// keep working exactly as before, since neither caller's driving code may change.
+function buildLivenessVm({ fakeState, getNow, onFetch }) {
   let timers = [];
   let tid = 1;
   const pump = () => { for (const t of [...timers]) t.fn(); }; // one tick of every live interval
@@ -209,8 +210,7 @@ async function driveLivenessWiring() {
   const getEl = (id) => (els[id] || (els[id] = makeEl()));
 
   let es = null;
-  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
-  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [], presence: [] };
+  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState); always tracked, cheap either way
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
   const ctx = vm.createContext({
@@ -222,11 +222,11 @@ async function driveLivenessWiring() {
     },
     location: { pathname: '/s/abc' },
     EventSource: function (url) { es = { _url: url, onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
-    fetch: () => { fetchCalls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }); },
+    fetch: () => { fetchCalls++; if (onFetch) onFetch(); return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }); },
     setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
-    clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
+    clearInterval: (id) => { const idx = timers.findIndex((t) => t.id === id); if (idx !== -1) timers.splice(idx, 1); },
     setTimeout: () => 0, clearTimeout: () => {},
-    Date: { now: () => now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
+    Date: { now: getNow }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
     // Browser globals the reviewer-identity module (app.js) legitimately uses.
     crypto: { randomUUID: () => `shim-uuid-${tid++}` },
     localStorage: (() => {
@@ -237,6 +237,28 @@ async function driveLivenessWiring() {
   });
 
   const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
+  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+
+  return { ctx, getEl, fire, pump, timers, load, flush, get fetchCalls() { return fetchCalls; } };
+}
+
+// Exercise the working-overlay liveness WIRING the way a browser would: load the
+// real public/liveness.js + public/app.js as two classic scripts into one shared
+// scope (a hand-rolled, zero-dep DOM shim with a controllable clock), then drive
+// the SSE lifecycle and assert what the reviewer sees. This is the only layer
+// that catches (a) two <script>s colliding on a top-level `const`, which takes
+// the whole page down, and (b) timer start/stop/reset bugs that structural regex
+// checks can't see. No DOM library — just the handful of globals app.js touches.
+async function driveLivenessWiring() {
+  let now = 1_000_000; // fake clock (ms); app.js reads Date.now()
+  let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
+  const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [], presence: [] };
+  const { ctx, getEl, fire, pump, timers, load, flush } = buildLivenessVm({
+    fakeState,
+    getNow: () => now,
+    onFetch: () => fetchCalls++,
+  });
+
   load('liveness.js');
   let loadErr = null;
   try {
@@ -251,7 +273,6 @@ async function driveLivenessWiring() {
   check('liveness.js + app.js load together with no top-level identifier collision', !collided, loadErr && loadErr.message);
   if (collided) return; // nothing more to drive — the page wouldn't have loaded
 
-  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
   await flush(); // boot fetchState() settles → status 'reviewing'
   const overlay = getEl('working-overlay'), elapsed = getEl('working-elapsed'), stale = getEl('working-stale');
 
@@ -369,54 +390,29 @@ async function driveLivenessWiring() {
 // can boot its own isolated shim with its own fake clock and fake state.
 function bootLivenessHarness(fakeState, initialNow) {
   const clock = { now: initialNow }; // mutable box so Date.now() can be advanced after boot
-  let timers = [];
-  let tid = 1;
-  const pump = () => { for (const t of [...timers]) t.fn(); }; // one tick of every live interval
-
-  const makeEl = () => ({
-    textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
-    className: '', dataset: {}, style: { setProperty() {}, removeProperty() {} },
-    classList: { add() {}, remove() {}, contains: () => false },
-    addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
-    append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
-    scrollIntoView() {}, focus() {}, setSelectionRange() {},
-    querySelector: () => makeEl(), querySelectorAll: () => [], contains: () => false,
-    getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), cloneRange() { return this; },
-  });
-  const els = {};
-  const getEl = (id) => (els[id] || (els[id] = makeEl()));
-
-  let es = null;
-  const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
-
-  const ctx = vm.createContext({
-    window: {},
-    document: {
-      getElementById: getEl, querySelector: () => makeEl(), querySelectorAll: () => [], addEventListener() {},
-      createElement: () => makeEl(), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({}) }),
-      createTreeWalker: () => ({ nextNode: () => null, currentNode: null }), title: '',
-    },
-    location: { pathname: '/s/abc' },
-    EventSource: function () { es = { onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
-    fetch: () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }),
-    setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
-    clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
-    setTimeout: () => 0, clearTimeout: () => {},
-    Date: { now: () => clock.now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
-    crypto: { randomUUID: () => `shim-uuid-${tid++}` },
-    localStorage: (() => {
-      const m = new Map();
-      return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
-    })(),
-    JSON, Math, Number, String, Array, Object, Boolean, console, Promise, encodeURIComponent, decodeURIComponent,
-  });
-
-  const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
+  const { pump, fire, flush, getEl, timers, load } = buildLivenessVm({ fakeState, getNow: () => clock.now });
   load('liveness.js');
   load('app.js');
 
-  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
   return { clock, pump, fire, flush, getEl, timerCount: () => timers.length };
+}
+
+// Shared boot boilerplate for driveLivenessRefreshAccuracy's scenarios: merge
+// each scenario's distinctive fields (workingSince/lastAgentActivity/status/etc.)
+// over a default idle-doc fakeState, boot the harness, flush the initial
+// fetchState(), and hand back the two elements every scenario asserts against.
+async function runLivenessScenario(overrides, initialNow) {
+  const fakeState = {
+    doc: { title: 'T', html: '<p>x</p>', version: 1 },
+    status: 'working',
+    review: { comments: [], choices: {} },
+    chat: [],
+    progress: [],
+    ...overrides,
+  };
+  const h = bootLivenessHarness(fakeState, initialNow);
+  await h.flush(); // boot fetchState() settles
+  return { h, elapsed: h.getEl('working-elapsed'), stale: h.getEl('working-stale') };
 }
 
 async function driveLivenessRefreshAccuracy() {
@@ -425,19 +421,8 @@ async function driveLivenessRefreshAccuracy() {
     const workingSince = 1_000_000;
     const lastAgentActivity = workingSince + 5000;
     const now = workingSince + 12000; // boot 12s into a round already underway
-    const fakeState = {
-      doc: { title: 'T', html: '<p>x</p>', version: 1 },
-      status: 'working',
-      workingSince,
-      lastAgentActivity,
-      review: { comments: [], choices: {} },
-      chat: [],
-      progress: [],
-    };
-    const h = bootLivenessHarness(fakeState, now);
-    await h.flush(); // boot fetchState() settles
+    const { h, elapsed } = await runLivenessScenario({ workingSince, lastAgentActivity }, now);
     const overlay = h.getEl('working-overlay');
-    const elapsed = h.getEl('working-elapsed');
     check(
       'liveness refresh: overlay is visible on a mid-round boot',
       overlay.hidden === false,
@@ -477,19 +462,10 @@ async function driveLivenessRefreshAccuracy() {
   // Scenario 2 (FM-4): a malformed activity payload never produces "NaN s".
   {
     const now = 2_000_000;
-    const fakeState = {
-      doc: { title: 'T', html: '<p>x</p>', version: 1 },
-      status: 'working',
-      workingSince: 'not-a-number',
-      lastAgentActivity: 'also-not-a-number',
-      review: { comments: [], choices: {} },
-      chat: [],
-      progress: [],
-    };
-    const h = bootLivenessHarness(fakeState, now);
-    await h.flush();
-    const elapsed = h.getEl('working-elapsed');
-    const stale = h.getEl('working-stale');
+    const { h, elapsed, stale } = await runLivenessScenario(
+      { workingSince: 'not-a-number', lastAgentActivity: 'also-not-a-number' },
+      now
+    );
     check(
       'liveness refresh FM-4: garbage workingSince/lastAgentActivity falls back to Date.now() (0:00)',
       elapsed.textContent === '0:00',
@@ -512,19 +488,7 @@ async function driveLivenessRefreshAccuracy() {
   {
     const now = 3_000_000;
     const workingSince = now + 5000; // ahead of "now" — simulated clock skew
-    const fakeState = {
-      doc: { title: 'T', html: '<p>x</p>', version: 1 },
-      status: 'working',
-      workingSince,
-      lastAgentActivity: workingSince,
-      review: { comments: [], choices: {} },
-      chat: [],
-      progress: [],
-    };
-    const h = bootLivenessHarness(fakeState, now);
-    await h.flush();
-    const elapsed = h.getEl('working-elapsed');
-    const stale = h.getEl('working-stale');
+    const { elapsed, stale } = await runLivenessScenario({ workingSince, lastAgentActivity: workingSince }, now);
     check(
       'liveness refresh FM-9: a future workingSince clamps the first tick to 0:00 (no negative/garbage)',
       elapsed.textContent === '0:00',
@@ -543,17 +507,7 @@ async function driveLivenessRefreshAccuracy() {
   // same clean teardown as a bare {status:'ended'} event.
   {
     const now = 4_000_000;
-    const fakeState = {
-      doc: { title: 'T', html: '<p>x</p>', version: 1 },
-      status: 'reviewing',
-      workingSince: null,
-      lastAgentActivity: null,
-      review: { comments: [], choices: {} },
-      chat: [],
-      progress: [],
-    };
-    const h = bootLivenessHarness(fakeState, now);
-    await h.flush(); // boots into 'reviewing', no timer yet
+    const { h } = await runLivenessScenario({ status: 'reviewing', workingSince: null, lastAgentActivity: null }, now); // boots into 'reviewing', no timer yet
     const workingSince = now - 3000; // a real round already 3s underway
     h.fire('status', { status: 'working', workingSince, lastAgentActivity: workingSince });
     check(
@@ -588,19 +542,10 @@ async function driveLivenessRefreshAccuracy() {
   {
     const now = 5_000_000;
     const workingSince = now - 5000; // a real round already 5s underway
-    const fakeState = {
-      doc: { title: 'T', html: '<p>x</p>', version: 1 },
-      status: 'working',
-      workingSince,
-      lastAgentActivity: 'garbage', // the other field is garbage — the mixed case
-      review: { comments: [], choices: {} },
-      chat: [],
-      progress: [],
-    };
-    const h = bootLivenessHarness(fakeState, now);
-    await h.flush();
-    const elapsed = h.getEl('working-elapsed');
-    const stale = h.getEl('working-stale');
+    const { h, elapsed, stale } = await runLivenessScenario(
+      { workingSince, lastAgentActivity: 'garbage' }, // the other field is garbage — the mixed case
+      now
+    );
     check(
       'liveness refresh FM-4 mixed: a valid workingSince paints the real elapsed time (0:05), proving it was not discarded',
       elapsed.textContent === '0:05',
@@ -626,19 +571,7 @@ async function driveLivenessRefreshAccuracy() {
     const workingSince = 6_000_000;
     const lastAgentActivity = workingSince - 5000; // stale, from a prior round — OLDER than workingSince
     const now = workingSince + 10000; // boot 10s into the new round
-    const fakeState = {
-      doc: { title: 'T', html: '<p>x</p>', version: 1 },
-      status: 'working',
-      workingSince,
-      lastAgentActivity,
-      review: { comments: [], choices: {} },
-      chat: [],
-      progress: [],
-    };
-    const h = bootLivenessHarness(fakeState, now);
-    await h.flush();
-    const elapsed = h.getEl('working-elapsed');
-    const stale = h.getEl('working-stale');
+    const { h, elapsed, stale } = await runLivenessScenario({ workingSince, lastAgentActivity }, now);
     check(
       'liveness refresh FX-7: mid-round boot paints the real elapsed time (0:10) despite a stale, older lastAgentActivity',
       elapsed.textContent === '0:10',
