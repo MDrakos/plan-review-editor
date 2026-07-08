@@ -239,7 +239,7 @@ function buildLivenessVm({ fakeState, getNow, onFetch }) {
   const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
   const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 
-  return { ctx, getEl, fire, pump, timers, load, flush, get fetchCalls() { return fetchCalls; } };
+  return { ctx, getEl, fire, pump, timers, load, flush, get fetchCalls() { return fetchCalls; }, get es() { return es; } };
 }
 
 // Exercise the working-overlay liveness WIRING the way a browser would: load the
@@ -253,11 +253,12 @@ async function driveLivenessWiring() {
   let now = 1_000_000; // fake clock (ms); app.js reads Date.now()
   let fetchCalls = 0; // count GET /api/state re-syncs (fetchState) so we can assert echo suppression
   const fakeState = { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [], presence: [] };
-  const { ctx, getEl, fire, pump, timers, load, flush } = buildLivenessVm({
+  const vmHandle = buildLivenessVm({
     fakeState,
     getNow: () => now,
     onFetch: () => fetchCalls++,
   });
+  const { ctx, getEl, fire, pump, timers, load, flush } = vmHandle;
 
   load('liveness.js');
   let loadErr = null;
@@ -336,8 +337,8 @@ async function driveLivenessWiring() {
   // an unused helper exists in source).
   check(
     'presence: connectEvents opens the SSE carrying the reviewer id (rid=<our id>)',
-    !!es && typeof es._url === 'string' && es._url.includes('rid=' + encodeURIComponent(myId)),
-    es && es._url
+    !!vmHandle.es && typeof vmHandle.es._url === 'string' && vmHandle.es._url.includes('rid=' + encodeURIComponent(myId)),
+    vmHandle.es && vmHandle.es._url
   );
 
   // Firing a roster must render without throwing, must tolerate malformed / non-array /
