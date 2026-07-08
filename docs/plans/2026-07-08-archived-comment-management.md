@@ -265,6 +265,30 @@ Conformance mode — the story (issue 010's 3 acceptance criteria) and the FMEA/
 - **Scope boundary:** `archivedSection()`'s gate condition only
 - **Exercised by:** Task 2's static regex check (same gate condition as FX-3, second clause) — same harness limitation noted above applies
 
+### FX-5 — clearArchived matches the realistic comment shape (explicit author), not just the legacy authorless one
+- **Mode:** conformance
+- **Inputs:** an archived comment with `author: { id: <this tab's reviewer.id> }` (the shape `app.js`'s `author()` actually stamps on every comment created through the normal flow), alongside the FX-1 fixture
+- **Expected:** removed by `clearArchived()`, same as an authorless own comment
+- **Source:** post-implementation `test-coverage` review (Important finding: FX-1's `r1`/`r2` only exercised `ownComment()`'s `!c.author` fallback, never its `c.author.id === reviewer.id` branch — the one every real comment hits)
+- **Scope boundary:** none — test-only addition, no production code changed
+- **Exercised by:** `driveLivenessWiring()`, folded into the FX-1 fixture as `r3`
+
+### FX-6 — a real clear syncs to the server; a no-op (own-only or peer-only) does not
+- **Mode:** conformance
+- **Inputs:** the FX-1 mixed fixture (real clear) and the FX-2 / peer-only fixtures (no-ops), each with `fetchCalls` sampled before/after `clearArchived()`
+- **Expected:** the real clear increments `fetchCalls` (the shimmed `fetch()` used by `syncReview()`); both no-op cases leave it unchanged
+- **Source:** post-implementation `test-coverage` review (Important finding: no test asserted the persistence side effect — a dropped `syncReview()` call would have passed every prior check)
+- **Scope boundary:** none — test-only addition, no production code changed
+- **Exercised by:** `driveLivenessWiring()`, reusing the pre-existing `fetchCalls` counter (already used at `test/e2e.js:293-301` for the same purpose)
+
+### FX-7 — a peer-only-archived session (reviewer owns none) is untouched by clearArchived
+- **Mode:** conformance
+- **Inputs:** `state.comments = [{id:'a1', archived:false}, {id:'p1', archived:true, author:{id:'peer-1'}}]`, then call `clearArchived()`
+- **Expected:** same array reference afterward, no sync fired — matches the "Clear all" button's own render gate (`archived.some(ownComment)`)
+- **Source:** post-implementation `test-coverage` review (Minor finding: this scenario was previously backed only by the static regex on the render gate, not a behavioral test of `clearArchived()` itself)
+- **Scope boundary:** none — test-only addition, no production code changed
+- **Exercised by:** `driveLivenessWiring()`, a third fixture alongside FX-1/FX-2
+
 ---
 
 ## Spec coverage check

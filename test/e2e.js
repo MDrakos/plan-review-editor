@@ -379,15 +379,21 @@ async function driveLivenessWiring() {
   // Drive clearArchived() against the real, loaded app.js state (not just a
   // source regex) so the "own comments only" scoping and the "active comments
   // untouched" invariant are actually exercised, not merely asserted to exist.
+  // r3 carries an EXPLICIT author matching this tab's reviewer id — the shape
+  // every real comment gets (app.js stamps `author: author()` on creation) —
+  // so this exercises ownComment()'s `c.author.id === reviewer.id` branch, not
+  // just its `!c.author` legacy fallback (which r1/r2 alone would only cover).
   vm.runInContext(
     `state.comments = [
       { id: 'a1', quote: 'q1', text: 'active', archived: false },
       { id: 'r1', quote: 'q2', text: 'mine, archived', archived: true },
       { id: 'r2', quote: 'q3', text: 'mine too, archived', archived: true },
+      { id: 'r3', quote: 'q5', text: 'mine, explicit author', archived: true, author: { id: '${myId}' } },
       { id: 'p1', quote: 'q4', text: "peer's archived", archived: true, author: { id: 'peer-1' } },
     ];`,
     ctx
   );
+  const beforeClear = fetchCalls;
   vm.runInContext('clearArchived()', ctx);
   const afterClear = vm.runInContext('state.comments', ctx);
   check(
@@ -395,22 +401,53 @@ async function driveLivenessWiring() {
     afterClear.length === 2 &&
       afterClear.some((c) => c.id === 'a1') &&
       afterClear.some((c) => c.id === 'p1') &&
-      !afterClear.some((c) => c.id === 'r1' || c.id === 'r2'),
+      !afterClear.some((c) => c.id === 'r1' || c.id === 'r2' || c.id === 'r3'),
     JSON.stringify(afterClear.map((c) => c.id))
   );
   check(
     'clearArchived: the surviving active comment is untouched (still archived: false)',
     afterClear.find((c) => c.id === 'a1').archived === false
   );
+  check(
+    'clearArchived: a real clear syncs the trimmed list to the server (fetch fired)',
+    fetchCalls > beforeClear,
+    `Δ=${fetchCalls - beforeClear}`
+  );
 
   vm.runInContext(`state.comments = [{ id: 'a1', quote: 'q1', text: 'active', archived: false }];`, ctx);
   const beforeNoop = vm.runInContext('state.comments', ctx);
+  const beforeNoopFetch = fetchCalls;
   vm.runInContext('clearArchived()', ctx);
   const afterNoop = vm.runInContext('state.comments', ctx);
   check(
     'clearArchived: a no-op (nothing archived-and-own) leaves state.comments untouched',
     afterNoop === beforeNoop,
     'expected the same array reference when there is nothing to clear'
+  );
+  check(
+    'clearArchived: a no-op does not sync (no fetch fired)',
+    fetchCalls === beforeNoopFetch,
+    `Δ=${fetchCalls - beforeNoopFetch}`
+  );
+
+  // Peer-only-archived (multi-reviewer): the reviewer owns no archived comment at
+  // all, only a peer's — clearArchived() must leave everything alone, matching
+  // the "Clear all" button's own render gate (archived.some(ownComment)).
+  vm.runInContext(
+    `state.comments = [
+      { id: 'a1', quote: 'q1', text: 'active', archived: false },
+      { id: 'p1', quote: 'q4', text: "peer's archived", archived: true, author: { id: 'peer-1' } },
+    ];`,
+    ctx
+  );
+  const beforePeerOnly = vm.runInContext('state.comments', ctx);
+  const beforePeerOnlyFetch = fetchCalls;
+  vm.runInContext('clearArchived()', ctx);
+  const afterPeerOnly = vm.runInContext('state.comments', ctx);
+  check(
+    "clearArchived: a peer-only-archived session (reviewer owns none) is untouched, no sync fired",
+    afterPeerOnly === beforePeerOnly && fetchCalls === beforePeerOnlyFetch,
+    `sameRef=${afterPeerOnly === beforePeerOnly} Δfetch=${fetchCalls - beforePeerOnlyFetch}`
   );
 }
 
