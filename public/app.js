@@ -124,6 +124,7 @@ const state = {
   diffing: false, // true while the doc pane shows a version diff (read-only)
   comments: [], // {id, quote, text, ts, replies?: [{role:'agent'|'reviewer', text, ts}], archived?}
   choices: {}, // choiceId -> { reviewerId -> value(string) | values(string[]) when multi }
+  resolutions: {}, // 008: choiceId -> { option, by, byName, at, reason } — shared decision on a divergent choice
   progress: [], // {text, ts} rework steps, shown in the working overlay
   presence: [], // [{id, name, connectedAt, count}] reviewers viewing now (live, never persisted)
 };
@@ -305,6 +306,7 @@ async function fetchState() {
   setStatus(s.status, { workingSince: s.workingSince, lastAgentActivity: s.lastAgentActivity });
   state.comments = (s.review && s.review.comments) || [];
   state.choices = (s.review && s.review.choices) || {};
+  state.resolutions = (s.review && s.review.resolutions) || {};
   // Only active comments anchor into the document; archived ones (their quote is
   // gone from the reworked plan) have nothing to highlight and live collapsed.
   for (const c of state.comments) if (!c.archived) anchorByQuote(c.quote, c.id);
@@ -625,6 +627,126 @@ function bindChoices() {
       }
     };
 
+    // 008: on a DIVERGENT choice, offer a "Resolve to:" control so reviewers can
+    // converge on one attributed, optionally-reasoned shared decision. It appears only
+    // on divergence (or once a resolution exists) — a single reviewer / all-agree block
+    // never shows it, so those stay byte-for-byte 004. Any reviewer can set/change/clear;
+    // updates sync to peers over 004's review SSE (fetchState rebuilds this block).
+    const resolveEl = document.createElement('div');
+    resolveEl.className = 'choice-resolve';
+    block.appendChild(resolveEl);
+    let resolveEditing = false; // true while the picker is open on an already-resolved block
+
+    // The set of distinct non-empty option labels currently picked (across reviewers) —
+    // >1 means divergent, mirroring renderPicks' own disagree condition.
+    const distinctLabels = () => {
+      const byReviewer = state.choices[id];
+      const vals =
+        byReviewer && typeof byReviewer === 'object' && !Array.isArray(byReviewer)
+          ? Object.values(byReviewer)
+          : [];
+      const labels = new Set();
+      for (const opt of vals)
+        for (const l of Array.isArray(opt) ? opt : [opt]) if (typeof l === 'string' && l !== '') labels.add(l);
+      return labels;
+    };
+
+    // Optimistically apply the intent locally, then POST it. intent: {option, reason?}
+    // to set/change, or null to clear. syncReview carries only this choice's intent.
+    const postResolution = (intent) => {
+      if (intent === null) delete state.resolutions[id];
+      else state.resolutions[id] = { option: intent.option, reason: intent.reason || '', by: reviewer.id, byName: reviewer.name || '' };
+      resolveEditing = false;
+      renderResolution();
+      syncReview({ [id]: intent });
+    };
+
+    function renderResolution() {
+      resolveEl.innerHTML = '';
+      const resolution = state.resolutions[id];
+      const divergent = distinctLabels().size > 1;
+      // No-friction guard: show nothing unless the block is divergent or already resolved.
+      if (!resolution && !divergent) {
+        resolveEl.hidden = true;
+        return;
+      }
+      resolveEl.hidden = false;
+
+      // Resolved banner (unless we're editing it): "Resolved to <option> — by <name>",
+      // name colored by reviewerId (004 attribution), reason below, + Change / Clear.
+      if (resolution && !resolveEditing) {
+        const line = document.createElement('div');
+        line.className = 'choice-resolved';
+        const lead = document.createElement('span');
+        lead.textContent = 'Resolved to ';
+        const opt = document.createElement('strong');
+        opt.textContent = resolution.option;
+        const by = document.createElement('span');
+        by.className = 'choice-resolved-by';
+        by.textContent = ` — by ${authorLabel({ id: resolution.by, name: resolution.byName })}`;
+        if (resolution.by) by.style.color = authorColor(resolution.by);
+        line.append(lead, opt, by);
+        resolveEl.appendChild(line);
+        if (resolution.reason) {
+          const reasonEl = document.createElement('div');
+          reasonEl.className = 'choice-resolved-reason';
+          reasonEl.textContent = resolution.reason; // untrusted — textContent only
+          resolveEl.appendChild(reasonEl);
+        }
+        const controls = document.createElement('div');
+        controls.className = 'choice-resolve-controls';
+        const changeBtn = document.createElement('button');
+        changeBtn.type = 'button';
+        changeBtn.className = 'btn choice-resolve-change';
+        changeBtn.textContent = 'Change';
+        changeBtn.addEventListener('click', () => {
+          resolveEditing = true;
+          renderResolution();
+        });
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'btn choice-resolve-clear';
+        clearBtn.textContent = 'Clear';
+        clearBtn.addEventListener('click', () => postResolution(null));
+        controls.append(changeBtn, clearBtn);
+        resolveEl.appendChild(controls);
+        return;
+      }
+
+      // Picker: "Resolve to:" + one button per PRESET option + an optional reason input.
+      const label = document.createElement('span');
+      label.className = 'choice-resolve-label';
+      label.textContent = 'Resolve to:';
+      resolveEl.appendChild(label);
+      const reasonInput = document.createElement('input');
+      reasonInput.type = 'text';
+      reasonInput.className = 'choice-resolve-reason';
+      reasonInput.placeholder = 'Why this option? (optional)';
+      if (resolution && resolution.reason) reasonInput.value = resolution.reason;
+      for (const optVal of presets) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn choice-resolve-option';
+        b.textContent = optVal;
+        if (resolution && resolution.option === optVal) b.classList.add('current');
+        b.addEventListener('click', () => postResolution({ option: optVal, reason: reasonInput.value.trim() }));
+        resolveEl.appendChild(b);
+      }
+      resolveEl.appendChild(reasonInput);
+      if (resolution) {
+        // editing an existing resolution — let the reviewer back out to the banner
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'btn choice-resolve-cancel';
+        cancel.textContent = 'Cancel';
+        cancel.addEventListener('click', () => {
+          resolveEditing = false;
+          renderResolution();
+        });
+        resolveEl.appendChild(cancel);
+      }
+    }
+
     // the value an option contributes: for "Other", whatever was typed
     const valueOf = (i) =>
       i.dataset.other ? (otherText ? otherText.value.trim() : '') : i.value;
@@ -639,6 +761,7 @@ function bindChoices() {
       else byReviewer[reviewer.id] = pick;
       refreshSummary();
       renderPicks();
+      renderResolution(); // a pick change can open/close divergence → show/hide the control
       syncReview();
     };
 
@@ -669,6 +792,7 @@ function bindChoices() {
 
     refreshSummary();
     renderPicks();
+    renderResolution();
     if (hasAnswer(myPick(id))) block.classList.add('answered'); // collapse if already answered
   }
 }
@@ -1061,16 +1185,22 @@ function flashHighlight(id) {
   }
 }
 
-async function syncReview() {
+// Sync this tab's review to the server. `resolutions` (008) is an optional per-choice
+// resolve/clear intent ({ choiceId: {option, reason?} | null }) carried only when the
+// reviewer sets/changes/clears a resolution — ordinary comment/pick syncs omit it, so
+// the shared resolutions slot is only ever touched by a deliberate action.
+async function syncReview(resolutions) {
+  const body = {
+    reviewerId: reviewer.id,
+    reviewerName: reviewer.name,
+    comments: state.comments,
+    choices: myChoices(),
+  };
+  if (resolutions) body.resolutions = resolutions;
   await fetch(api('/api/review-state'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      reviewerId: reviewer.id,
-      reviewerName: reviewer.name,
-      comments: state.comments,
-      choices: myChoices(),
-    }),
+    body: JSON.stringify(body),
   }).catch(() => {});
 }
 
