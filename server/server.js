@@ -616,6 +616,35 @@ function mergeChoices(prev, incoming, posterId) {
   return out;
 }
 
+// Apply a POST's resolution intent onto the shared per-choice resolutions map, in
+// place (008). Intent per choiceId: `null` clears; `{ option, reason? }` or a bare
+// option string sets/changes. An option that isn't among the block's declared
+// options (per `specs`, from doc.choiceSpecs), or an unknown choiceId, is IGNORED —
+// validated here so a stray/hand-crafted POST can't inject a bogus resolution. The
+// slot is a single shared value: last-writer-wins, stamped with poster attribution.
+function applyResolutions(resolutions, incoming, specs, poster) {
+  if (!incoming || typeof incoming !== 'object') return;
+  for (const [choiceId, intent] of Object.entries(incoming)) {
+    if (intent === null) {
+      delete resolutions[choiceId];
+      continue;
+    }
+    const spec = specs && specs[choiceId];
+    if (!spec) continue; // unknown choice block — ignore
+    const option = typeof intent === 'string' ? intent : intent && intent.option;
+    if (typeof option !== 'string' || !spec.options.includes(option)) continue; // out of options — ignore
+    const reason =
+      intent && typeof intent === 'object' && typeof intent.reason === 'string' ? intent.reason.trim() : '';
+    resolutions[choiceId] = {
+      option,
+      by: poster.id,
+      byName: poster.name || '',
+      at: new Date().toISOString(),
+      reason,
+    };
+  }
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -879,12 +908,22 @@ const server = http.createServer(async (req, res) => {
       // Per-reviewer choices: record only the poster's picks; peers' picks survive.
       if (body.choices && typeof body.choices === 'object')
         s.review.choices = mergeChoices(s.review.choices, body.choices, posterId);
+      // 008: apply the poster's resolve/clear intent to the shared resolutions map,
+      // validated against the block's declared options (doc.choiceSpecs).
+      if (body.resolutions && typeof body.resolutions === 'object') {
+        if (!isReviewerMap(s.review.resolutions)) s.review.resolutions = {};
+        applyResolutions(s.review.resolutions, body.resolutions, s.doc.choiceSpecs, {
+          id: posterId,
+          name: (authorOf(body) || {}).name,
+        });
+      }
       touch(s);
-      // Live sync: fan the merged review out so other tabs render peers' comments and
-      // choice picks. The poster ignores its own echo by author.id (see the client).
+      // Live sync: fan the merged review out so other tabs render peers' comments,
+      // choice picks, and resolutions. The poster ignores its own echo by author.id.
       broadcast(s, 'review', {
         comments: s.review.comments,
         choices: s.review.choices,
+        resolutions: s.review.resolutions,
         author: { id: posterId },
       });
       persist(s);

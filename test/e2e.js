@@ -1987,6 +1987,70 @@ async function main() {
   );
   await cli('stop', '--session', cfid);
 
+  console.log('issue 008: a reviewer resolves a divergent choice; validated, attributed, broadcast');
+  const r8 = await cli('start', docA, '--no-open');
+  const r8id = r8.id;
+  const r8Events = await captureEvents(r8id);
+  await sleep(100);
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'B', reviewerName: 'Bo', comments: [], choices: { pick: 'A2' } });
+  // A resolves to A2 with a reason.
+  await browser(`/api/review-state?session=${r8id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' },
+    resolutions: { pick: { option: 'A2', reason: 'A2 scales better' } },
+  });
+  const r8State = await browser(`/api/state?session=${r8id}`);
+  check(
+    'a resolution is recorded with option + attribution (by/byName) + reason; picks untouched',
+    r8State.data.review.resolutions.pick &&
+      r8State.data.review.resolutions.pick.option === 'A2' &&
+      r8State.data.review.resolutions.pick.by === 'A' &&
+      r8State.data.review.resolutions.pick.byName === 'Ada' &&
+      r8State.data.review.resolutions.pick.reason === 'A2 scales better' &&
+      typeof r8State.data.review.resolutions.pick.at === 'string' &&
+      r8State.data.review.choices.pick.A === 'A1' && r8State.data.review.choices.pick.B === 'A2',
+    JSON.stringify(r8State.data.review)
+  );
+  // An option not in the block is ignored (validation); unknown choiceId ignored.
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'B', comments: [], resolutions: { pick: 'A9', nope: 'A1' } });
+  const r8State2 = await browser(`/api/state?session=${r8id}`);
+  check(
+    'an out-of-options resolve and an unknown choiceId are ignored (prior resolution intact)',
+    r8State2.data.review.resolutions.pick.option === 'A2' && r8State2.data.review.resolutions.nope === undefined,
+    JSON.stringify(r8State2.data.review.resolutions)
+  );
+  // A bare-option set (no reason) changes the resolution, re-attributes, and blanks the reason.
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'B', reviewerName: 'Bo', comments: [], resolutions: { pick: 'A1' } });
+  const r8State3 = await browser(`/api/state?session=${r8id}`);
+  check(
+    'a bare-option resolve changes option + re-attributes + clears reason',
+    r8State3.data.review.resolutions.pick.option === 'A1' && r8State3.data.review.resolutions.pick.by === 'B' &&
+      (r8State3.data.review.resolutions.pick.reason === '' || r8State3.data.review.resolutions.pick.reason === undefined),
+    JSON.stringify(r8State3.data.review.resolutions)
+  );
+  // Clear returns the choice to unresolved.
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'A', comments: [], resolutions: { pick: null } });
+  const r8State4 = await browser(`/api/state?session=${r8id}`);
+  check(
+    'a null resolve clears the resolution (back to unresolved)',
+    r8State4.data.review.resolutions.pick === undefined,
+    JSON.stringify(r8State4.data.review.resolutions)
+  );
+  // The review SSE delta carries resolutions.
+  let r8Deltas = [];
+  for (let i = 0; i < 40; i++) {
+    r8Deltas = r8Events.events.filter((e) => e.event === 'review');
+    if (r8Deltas.some((e) => 'resolutions' in JSON.parse(e.data))) break;
+    await sleep(25);
+  }
+  check(
+    'the review SSE delta carries resolutions alongside comments + choices',
+    r8Deltas.length && r8Deltas.every((e) => 'resolutions' in JSON.parse(e.data)),
+    JSON.stringify(r8Deltas.map((e) => e.data))
+  );
+  r8Events.close();
+  await cli('stop', '--session', r8id);
+
   console.log('multi-reviewer: reviewer chat carries an author, role stays "reviewer"');
   const ch = await cli('start', docA, '--no-open');
   await browser(`/api/chat?session=${ch.id}`, { text: 'who owns this?', reviewerId: 'A', reviewerName: 'Ada' });
