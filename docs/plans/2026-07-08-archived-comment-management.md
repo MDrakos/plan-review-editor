@@ -8,9 +8,11 @@
 
 **Tech stack:** Vanilla JS (`public/app.js`), no framework. Tests via this project's existing `node test/e2e.js` harness: some checks are static regexes against the served source (`/app.js`, `/style.css`), others (`driveLivenessWiring()`) actually load real `app.js` into a `vm` context with a hand-rolled DOM shim and drive it behaviorally — that's where this plan adds real function-level coverage.
 
-**Why not a server endpoint:** `mergeComments()` (`server/server.js:461-499`) treats "the poster's own comment is absent from the incoming array" as an intentional deletion — but ONLY for comments authored by the poster making that specific request (the `mine`/`emitted` bookkeeping keys everything off `posterId`). If a bulk-clear endpoint deleted a comment authored by reviewer B directly on the server, and reviewer B's browser tab hadn't yet resynced (still holds that comment in its local `state.comments` from before the clear), B's next unrelated `/api/review-state` POST would replay their full stale snapshot — and `mergeComments`' "brand-new poster comment" loop (line 494-498) would re-add it, because from the server's point of view a comment authored by B, present in B's incoming body, and absent from `prev` looks indistinguishable from a genuinely new comment. There's no tombstone. Scoping "clear all" to the reviewer's OWN comments sidesteps this entirely: the only browser that can resurrect a comment is the same one that just deleted it (via its own already-updated local `state.comments`), which is exactly the same shape of interaction the existing single-dismiss already relies on safely.
+**Why not a server endpoint:** `mergeComments()` (`server/server.js:461-499`) treats "the poster's own comment is absent from the incoming array" as an intentional deletion — but ONLY for comments authored by the poster making that specific request (the `mine`/`emitted` bookkeeping keys everything off `posterId`). If a bulk-clear endpoint deleted a comment authored by reviewer B directly on the server, and reviewer B's browser tab hadn't yet resynced (still holds that comment in its local `state.comments` from before the clear), B's next unrelated `/api/review-state` POST would replay their full stale snapshot — and `mergeComments`' "brand-new poster comment" loop (line 494-498) would re-add it, because from the server's point of view a comment authored by B, present in B's incoming body, and absent from `prev` looks indistinguishable from a genuinely new comment. There's no tombstone. Scoping "clear all" to the reviewer's OWN comments sidesteps the cross-author case entirely: the only browser **tab** that can resurrect a comment is the same tab that just deleted it (via its own already-updated local `state.comments`) — the exact interaction the existing single-dismiss already relies on safely.
 
-**Non-goals:** no server endpoint, no change to `deleteComment`, no change to the existing `<details>`/summary collapse-and-count behavior (it already satisfies the issue's "optional" ask).
+**Known, accepted limitation (pre-existing, not introduced by this plan):** `reviewer.id` is persisted in `localStorage` (shared across every tab of the same browser), and the `review` SSE echo-suppression matches on `reviewer.id`, not tab identity. So a *sibling tab* of the same reviewer that hasn't resynced could, in principle, replay a comment this feature just cleared, via the same "brand-new poster comment" path. This risk already exists today for the single ✕ dismiss (`deleteComment`) and for editing/adding comments generally — it is not new to `clearArchived()`, just proportionally larger blast radius per click. Fixing it is a sync-architecture change (tab-scoped identity or a tombstone) out of scope for this plan; noted here so the safety argument above isn't overstated.
+
+**Non-goals:** no server endpoint, no change to `deleteComment`, no change to the existing `<details>`/summary collapse-and-count behavior (it already satisfies the issue's "optional" ask), no fix for the pre-existing cross-tab resurrection limitation above.
 
 ---
 
@@ -109,9 +111,13 @@ function archivedSection(archived) {
   const n = archived.length;
   summary.textContent = `${n} unanchored comment${n === 1 ? '' : 's'} — text no longer in the plan`;
   details.appendChild(summary);
-  // Only offer bulk-clear when the reviewer actually owns an archived comment —
-  // a session full of a peer's archived comments (multi-reviewer) shows none.
-  if (archived.some(ownComment)) {
+  // Only offer bulk-clear when the reviewer actually owns an archived comment
+  // (a session full of a peer's archived comments, multi-reviewer, shows none)
+  // AND the session is actively reviewing (mirrors replyForm's status gate,
+  // line 800) — a rework in flight could re-anchor one of these comments
+  // server-side before its `archived: false` update reaches this tab; clearing
+  // mid-flight on stale data would drop that comment for good (FMEA finding).
+  if (archived.some(ownComment) && state.status === 'reviewing') {
     const clearBtn = document.createElement('button');
     clearBtn.type = 'button';
     clearBtn.className = 'btn clear-archived';
@@ -179,6 +185,11 @@ add:
     /function clearArchived\(/.test(app.body) && /archived\.some\(ownComment\)/.test(app.body)
   );
   check(
+    'the "Clear all" button is gated on owning an archived comment AND an active review status ' +
+      '(a peer-only-archived session shows no button; nor does one mid-rework)',
+    /archived\.some\(ownComment\) && state\.status === 'reviewing'/.test(app.body)
+  );
+  check(
     'the archived section (and its "Clear all" button) only ever renders when at least one comment is archived',
     /if \(archived\.length\) commentListEl\.appendChild\(archivedSection\(archived\)\)/.test(app.body)
   );
@@ -227,3 +238,7 @@ git commit -m "test: cover the archived-comment Clear-all action + style it"
 | Active (anchored) comments and their threads are untouched | Task 1's first behavioral test asserts the active comment survives `clearArchived()` unchanged; `clearArchived()`'s filter predicate only ever matches `c.archived === true`. |
 | A session with no archived comments looks exactly as it does today | Unchanged: `archivedSection()` is still only invoked when `archived.length > 0` (`public/app.js` render call site, covered by Task 2's static check); zero archived comments ⇒ the function (and the new button inside it) never runs. |
 | Optional collapse-all / count badge | Already shipped (`<details>`/`<summary>` with a live count); no changes needed. |
+
+## G4 enumeration (FMEA + DSM)
+
+Both ran at Standard settings before execution. **DSM:** no structural gaps — the plan's reuse of `ownComment()`/`syncReview()`/`/api/review-state` over a new endpoint is confirmed as the lower-coupling choice; no cycles introduced. **FMEA:** primary pass found no uncovered gaps in the core delete logic; the adversarial pass surfaced two real risks, both folded into the plan above — (1) a working-round race where a bulk clear could drop a comment that just re-anchored server-side, mitigated by gating the button on `state.status === 'reviewing'`; (2) the "why not a server endpoint" safety argument was imprecise ("same browser" → "same browser tab"), corrected, with the residual cross-tab-same-reviewer limitation now called out explicitly as pre-existing and out of scope. A `confirm()` guard on the button (raised by DSM, for parity with "End review") was considered and deliberately **not** added, to stay consistent with the existing single-dismiss (`deleteComment`), which also has no confirmation.
