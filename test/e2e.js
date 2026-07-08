@@ -3013,6 +3013,12 @@ async function main() {
     'client shows per-option who-picked badges and a muted disagree hint on choices',
     /choice-picks/.test(app.body) && /choice-disagree/.test(app.body)
   );
+  // issue 011 item 3: don't echo a lone reviewer's own pick back to them — source-regex
+  // smoke check (no DOM rig, matching the suite's convention for choice-block behavior).
+  check(
+    'client suppresses the picks summary when it would only restate the current reviewer\'s own solo pick',
+    /allReviewers\.size === 1 && allReviewers\.has\(reviewer\.id\)/.test(app.body)
+  );
   // issue 008: resolve control — source-regex smoke checks (no DOM rig, matching the suite's convention).
   check(
     'client renders a resolve-to control (renderResolution + choice-resolve class)',

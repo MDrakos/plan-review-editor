@@ -619,6 +619,16 @@ function bindChoices() {
         picksEl.hidden = true;
         return;
       }
+      // A lone reviewer's own pick(s) just restate what they already typed/checked —
+      // most noticeable on a free-text "Other" answer, echoed back verbatim. Suppress
+      // the summary until some OTHER reviewer has weighed in (agreement or divergence),
+      // at which point the tally becomes informative again.
+      const allReviewers = new Set();
+      for (const rids of counts.values()) for (const rid of rids) allReviewers.add(rid);
+      if (allReviewers.size === 1 && allReviewers.has(reviewer.id)) {
+        picksEl.hidden = true;
+        return;
+      }
       picksEl.hidden = false;
       for (const [label, rids] of counts) {
         const tag = document.createElement('span');
