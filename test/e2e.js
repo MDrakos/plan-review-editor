@@ -2124,6 +2124,24 @@ async function main() {
   r8Events.close();
   await cli('stop', '--session', r8id);
 
+  console.log('issue 008: changing a pick after a resolution leaves the resolution intact');
+  const lc8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${lc8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${lc8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${lc8.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2' } },
+  });
+  // B now changes its own pick — the resolution must NOT be disturbed (only an explicit clear re-opens).
+  await browser(`/api/review-state?session=${lc8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A1' } });
+  const lc8State = await browser(`/api/state?session=${lc8.id}`);
+  check(
+    'a reviewer changing its own pick does not clear an existing resolution',
+    lc8State.data.review.resolutions.pick && lc8State.data.review.resolutions.pick.option === 'A2' &&
+      lc8State.data.review.choices.pick.B === 'A1',
+    JSON.stringify(lc8State.data.review)
+  );
+  await cli('stop', '--session', lc8.id);
+
   console.log('multi-reviewer: reviewer chat carries an author, role stays "reviewer"');
   const ch = await cli('start', docA, '--no-open');
   await browser(`/api/chat?session=${ch.id}`, { text: 'who owns this?', reviewerId: 'A', reviewerName: 'Ada' });
