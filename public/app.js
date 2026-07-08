@@ -556,6 +556,12 @@ function connectEvents() {
 const answerText = (v) => (Array.isArray(v) ? v.join(', ') : v || '');
 const hasAnswer = (v) => (Array.isArray(v) ? v.length > 0 : !!v);
 
+// grows a textarea to fit its content, collapsing back down when text is removed
+const autoGrow = (el) => {
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight}px`;
+};
+
 function bindChoices() {
   for (const block of docEl.querySelectorAll('.choice-block')) {
     const id = block.dataset.choiceId;
@@ -769,7 +775,10 @@ function bindChoices() {
           const custom = (multi ? saved : [saved]).filter((v) => v && !presets.has(v))[0];
           if (custom) {
             box.checked = true;
-            if (otherText) otherText.value = custom;
+            if (otherText) {
+              otherText.value = custom;
+              autoGrow(otherText);
+            }
           }
         } else {
           box.checked = multi ? saved.includes(box.value) : saved === box.value;
@@ -782,6 +791,7 @@ function bindChoices() {
       // typing implies choosing "Other" (and, for single-select, deselects the rest)
       otherText.addEventListener('input', () => {
         if (otherBox && !otherBox.checked) otherBox.checked = true;
+        autoGrow(otherText);
         sync();
       });
     }

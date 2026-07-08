@@ -110,7 +110,7 @@ function renderChoice(body) {
     .join('\n');
   // The "Other" answer contributes whatever the reviewer types (see bindChoices).
   const other = spec.other
-    ? `\n<div class="choice-option choice-other"><label><input type="${type}" name="${name}" value="" data-other="true"> <span>Other</span></label><input type="text" class="choice-other-text" placeholder="Type your own answer…"></div>`
+    ? `\n<div class="choice-option choice-other"><label><input type="${type}" name="${name}" value="" data-other="true"> <span>Other</span></label><textarea class="choice-other-text" rows="1" placeholder="Type your own answer…"></textarea></div>`
     : '';
   return `<div class="choice-block" data-choice-id="${escapeHtml(spec.id)}" data-multi="${spec.multi}">
 <p class="choice-prompt">${inline(spec.prompt || 'Choose:')}</p>
