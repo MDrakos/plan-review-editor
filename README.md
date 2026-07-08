@@ -169,10 +169,20 @@ options:
 ```
 ````
 
-Each reviewer's selection comes back in the submit bundle as a per-reviewer map,
-`choices.storage[reviewerId]` — so when several reviewers pick differently, every
-pick is present and the conflict is surfaced rather than overwritten. With one
-reviewer the map simply has a single entry.
+Each choice comes back in the submit bundle as `choices.storage.picks[reviewerId]`
+— a per-reviewer map, so when several reviewers pick differently every pick is
+present and the conflict is surfaced rather than overwritten. With one reviewer the
+map simply has a single entry.
+
+When reviewers diverge, any of them can **resolve** the block to one shared option
+(with an optional reason). The resolution is attributed and reversible: the block
+shows "Resolved to \<option\> — by \<name\>" (colored by reviewer) with change/clear
+controls, and it syncs live to every tab. A resolution persists until it is
+explicitly changed or cleared — changing your own pick never silently undoes it. A
+resolved choice travels in the bundle as `choices.storage.resolved` (`{option, by,
+byName, reason}`) alongside the raw `picks`, so the agent sees the agreed decision
+**and** the underlying split. The resolve control appears only on divergence, so
+single-reviewer and all-agree blocks are unchanged.
 
 ### Comparing versions
 
@@ -200,5 +210,4 @@ dismissible "what changed since your last review" highlight on each new round.
 - [x] Comment threads with agent replies
 - [x] Multiple reviewers on one plan — attribution, live sync, per-reviewer choices
 - [x] Presence indicators — a live top-bar strip of who's viewing now, colored by reviewer, with a per-reviewer tab count
-
-Possible next steps: richer choice conflict resolution.
+- [x] Richer choice-conflict resolution — resolve a divergent choice to one attributed, optionally-reasoned shared decision that travels to the agent alongside the raw picks

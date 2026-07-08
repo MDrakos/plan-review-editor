@@ -5,7 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { renderDiff, renderVersionDiff } = require('./markdown');
+const { renderDiff, renderVersionDiff, parseChoiceSpecs } = require('./markdown');
 const { quoteAnchors } = require('./anchor');
 const { codeVersion } = require('./version');
 
@@ -67,10 +67,14 @@ function blankSession(id) {
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
     lastAgentActivity: null, // ms epoch of the last server-observed agent activity (progress/wait/present); null until the agent does something
     workingSince: null, // ms epoch when the CURRENT working round began; null when not working (set only by submit, cleared by loadDoc)
-    doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [] },
+    doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [], choiceSpecs: {} },
     // blocks: prev render, for the per-round highlight. history: a bounded ring
     // of { version, title, markdown } (last VERSION_HISTORY), for version diffs.
-    review: { comments: [], choices: {} }, // in-progress review, survives refreshes
+    // choiceSpecs: { choiceId: { options, multi, other } } captured at each present,
+    // so a resolve (008) can be validated against a block's declared options.
+    review: { comments: [], choices: {}, resolutions: {} }, // in-progress review, survives refreshes
+    // resolutions: 008's parallel map { choiceId: { option, by, byName, at, reason } };
+    // the shared, attributed decision on a divergent choice, orthogonal to `choices`.
     submissions: [], // completed review bundles, oldest first
     chat: [], // {role: 'reviewer' | 'agent', text, ts}
     progress: [], // {text, ts} steps the agent reports while reworking
@@ -262,10 +266,23 @@ function restoreSessions() {
       // html undefined (a later loadDoc's `version += 1` would go NaN).
       if (data.doc && typeof data.doc === 'object') s.doc = { ...s.doc, ...data.doc };
       if (!Array.isArray(s.doc.history)) s.doc.history = []; // handlers assume it exists
+      // 008: reconstruct choiceSpecs (declared options, used to validate a resolve) from
+      // the current version's retained markdown when it's absent — a pre-008 file has no
+      // choiceSpecs, so without this a resolve on a restored mid-review session would be
+      // silently rejected until the next present. Empty is left empty (a doc with no
+      // choice blocks reconstructs to {} anyway; a post-008 file already has it populated).
+      if (!isReviewerMap(s.doc.choiceSpecs) || !Object.keys(s.doc.choiceSpecs).length) {
+        const latest = s.doc.history[s.doc.history.length - 1];
+        s.doc.choiceSpecs =
+          latest && typeof latest.markdown === 'string' ? parseChoiceSpecs(latest.markdown) : {};
+      }
       if (data.review && typeof data.review === 'object') s.review = data.review;
       // A restored review must have the exact shapes the merge/render code assumes.
       if (!Array.isArray(s.review.comments)) s.review.comments = [];
       if (!isReviewerMap(s.review.choices)) s.review.choices = {};
+      // 008: a resolutions map parallel to choices. A pre-008 file (no key) or a bad
+      // type restores as all-unresolved rather than a booby-trap.
+      if (!isReviewerMap(s.review.resolutions)) s.review.resolutions = {};
       // Migrate a pre-004 flat choice value ({choiceId: option|options[]}) to the
       // per-reviewer shape { reviewerId: option }, keeping the legacy answer under
       // 'anonymous' rather than dropping it on the first post-upgrade merge/render.
@@ -400,6 +417,7 @@ function loadDoc(s, docPath) {
   const markdown = fs.readFileSync(docPath, 'utf8');
   // Highlight what changed since the previous cycle (nothing on the first load).
   const { html, blocks } = renderDiff(markdown, s.doc.blocks);
+  s.doc.choiceSpecs = parseChoiceSpecs(markdown); // 008: declared options for resolve-validation
   s.doc.path = docPath;
   s.doc.title = titleFrom(markdown) || path.basename(docPath);
   s.doc.html = html;
@@ -421,7 +439,10 @@ function loadDoc(s, docPath) {
     ...c,
     archived: !quoteAnchors(c.quote, html),
   }));
-  s.review = { comments: carried, choices: s.review.choices || {} };
+  // Carry choices AND resolutions forward across the rework round: a resolution is an
+  // explicit shared decision (008) that persists until cleared, so re-presenting a
+  // reworked doc must not silently drop it (parallel to how choices survive).
+  s.review = { comments: carried, choices: s.review.choices || {}, resolutions: s.review.resolutions || {} };
   s.progress = []; // the reworked doc is here — the previous round's steps are done
   s.status = 'reviewing';
   s.lastAgentActivity = Date.now(); // shared by /agent/start and /agent/present — either counts as agent activity
@@ -445,11 +466,32 @@ function reviewBundle(s, body, posterId) {
     Array.isArray(body.comments) ? body.comments : [],
     posterId
   );
-  const choices = mergeChoices(
+  const merged = mergeChoices(
     s.review.choices,
     body.choices && typeof body.choices === 'object' ? body.choices : {},
     posterId
   );
+  // 008: emit each choice as { picks, resolved? }. `picks` is 004's raw per-reviewer
+  // split; `resolved` (present only when the choice was explicitly resolved) carries
+  // the shared decision — so the agent sees the agreed value AND the underlying
+  // disagreement, with no silent loss. A resolution only lands in the map after
+  // passing option-validation at write time; the `option` guard here is just
+  // defensive against a hand-edited persisted file.
+  //
+  // Iterate the UNION of choices that have picks and choices that have a resolution:
+  // a resolution is independent of the raw picks (a reviewer may clear their pick after
+  // resolving), so a resolved choice with zero remaining picks must STILL travel — it
+  // emits { picks: {}, resolved } rather than vanishing from the bundle.
+  const resolutions = isReviewerMap(s.review.resolutions) ? s.review.resolutions : {};
+  const choices = {};
+  const choiceIds = new Set([...Object.keys(merged), ...Object.keys(resolutions)]);
+  for (const choiceId of choiceIds) {
+    const entry = { picks: merged[choiceId] || {} };
+    const r = resolutions[choiceId];
+    if (r && typeof r.option === 'string')
+      entry.resolved = { option: r.option, by: r.by, byName: r.byName || '', reason: r.reason || '' };
+    choices[choiceId] = entry;
+  }
   return {
     comments: structuredClone(comments),
     choices: structuredClone(choices),
@@ -599,6 +641,40 @@ function mergeChoices(prev, incoming, posterId) {
   for (const [choiceId, opt] of Object.entries(incoming || {})) {
     if (opt === undefined || opt === null || opt === '' || (Array.isArray(opt) && opt.length === 0)) continue;
     (out[choiceId] || (out[choiceId] = {}))[posterId] = opt;
+  }
+  return out;
+}
+
+// Reconcile a POST's resolution intent against the shared per-choice resolutions map,
+// returning a NEW map (pure, like mergeChoices / mergeComments — the caller reassigns).
+// Intent per choiceId: `null` clears; `{ option, reason? }` or a bare option string
+// sets/changes. An option that isn't among the block's declared options (per `specs`,
+// from doc.choiceSpecs), or an unknown choiceId, is IGNORED — validated here so a
+// stray/hand-crafted POST can't inject a bogus resolution. The slot is a single shared
+// value: last-writer-wins, stamped with poster attribution.
+function applyResolutions(prev, incoming, specs, poster) {
+  const out = isReviewerMap(prev) ? { ...prev } : {};
+  if (!incoming || typeof incoming !== 'object') return out;
+  for (const [choiceId, intent] of Object.entries(incoming)) {
+    if (intent === null) {
+      delete out[choiceId];
+      continue;
+    }
+    // Own-property lookup: a bracket read of a reserved key like "__proto__" would
+    // otherwise return Object.prototype (truthy) and then throw on spec.options.
+    const spec = specs && Object.prototype.hasOwnProperty.call(specs, choiceId) ? specs[choiceId] : null;
+    if (!spec) continue; // unknown choice block — ignore
+    const option = typeof intent === 'string' ? intent : intent && intent.option;
+    if (typeof option !== 'string' || !spec.options.includes(option)) continue; // out of options — ignore
+    const reason =
+      intent && typeof intent === 'object' && typeof intent.reason === 'string' ? intent.reason.trim() : '';
+    out[choiceId] = {
+      option,
+      by: poster.id,
+      byName: poster.name || '',
+      at: new Date().toISOString(),
+      reason,
+    };
   }
   return out;
 }
@@ -866,12 +942,20 @@ const server = http.createServer(async (req, res) => {
       // Per-reviewer choices: record only the poster's picks; peers' picks survive.
       if (body.choices && typeof body.choices === 'object')
         s.review.choices = mergeChoices(s.review.choices, body.choices, posterId);
+      // 008: apply the poster's resolve/clear intent to the shared resolutions map,
+      // validated against the block's declared options (doc.choiceSpecs).
+      if (body.resolutions && typeof body.resolutions === 'object')
+        s.review.resolutions = applyResolutions(s.review.resolutions, body.resolutions, s.doc.choiceSpecs, {
+          id: posterId,
+          name: (authorOf(body) || {}).name,
+        });
       touch(s);
-      // Live sync: fan the merged review out so other tabs render peers' comments and
-      // choice picks. The poster ignores its own echo by author.id (see the client).
+      // Live sync: fan the merged review out so other tabs render peers' comments,
+      // choice picks, and resolutions. The poster ignores its own echo by author.id.
       broadcast(s, 'review', {
         comments: s.review.comments,
         choices: s.review.choices,
+        resolutions: s.review.resolutions,
         author: { id: posterId },
       });
       persist(s);

@@ -28,7 +28,7 @@ let PORT;
 let BASE;
 let env;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
-const { render, renderDiff, renderVersionDiff } = require(path.join(__dirname, '..', 'server', 'markdown'));
+const { render, renderDiff, renderVersionDiff, parseChoiceSpecs } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
 const { quoteAnchors } = require(path.join(__dirname, '..', 'server', 'anchor'));
 
@@ -1205,6 +1205,77 @@ async function persistenceChecks() {
     await sleep(300);
     fs.rmSync(stateDir6b, { recursive: true, force: true });
 
+    // ----- P6b2: a pre-008 session (no resolutions key) restores as all-unresolved -----
+    console.log('persistence: a pre-008 session (no resolutions) restores as all-unresolved (issue 008)');
+    await killP();
+    const stateDir6b2 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-pre008-'));
+    const pre008Id = 'pre008';
+    fs.writeFileSync(
+      path.join(stateDir6b2, `${pre008Id}.json`),
+      JSON.stringify({
+        id: pre008Id,
+        status: 'reviewing',
+        doc: { path: null, title: 'Pre008', html: '<p>x</p>', version: 1, blocks: ['<p>x</p>'], history: [] },
+        // 004 shape: per-reviewer choices, but NO resolutions key and NO doc.choiceSpecs.
+        review: { comments: [], choices: { pick: { A: 'A1', B: 'A2' } } },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b2 });
+    check('persist: server up (pre-008 case)', await waitHealth(true));
+    const pre008 = await p(`/api/state?session=${pre008Id}`);
+    check(
+      'a pre-008 file restores with review.resolutions === {} (unresolved), choices intact',
+      pre008.status === 200 &&
+        pre008.data.review.resolutions &&
+        Object.keys(pre008.data.review.resolutions).length === 0 &&
+        pre008.data.review.choices.pick.A === 'A1' &&
+        pre008.data.review.choices.pick.B === 'A2',
+      JSON.stringify(pre008.data.review)
+    );
+    await stop(pre008Id);
+    await sleep(300);
+    fs.rmSync(stateDir6b2, { recursive: true, force: true });
+
+    // ----- P6b3: a resolution (with reason) round-trips a restart (issue 008) -----
+    console.log('persistence: a choice resolution (with reason) round-trips a server restart (issue 008)');
+    await killP();
+    const stateDir6b3 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-res008-'));
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b3 });
+    check('persist: server up (resolution round-trip case)', await waitHealth(true));
+    const res008 = await p('/agent/start', { path: doc });
+    const res008Id = res008.data.id;
+    // Two reviewers diverge on `pick` (options One/Two); A resolves to Two with a reason.
+    await p(`/api/review-state?session=${res008Id}`, { reviewerId: 'A', comments: [], choices: { pick: 'One' } });
+    await p(`/api/review-state?session=${res008Id}`, { reviewerId: 'B', comments: [], choices: { pick: 'Two' } });
+    await p(`/api/review-state?session=${res008Id}`, {
+      reviewerId: 'A', reviewerName: 'Ada', comments: [],
+      resolutions: { pick: { option: 'Two', reason: 'Two handles the edge case' } },
+    });
+    // wait for the debounced flush to write the resolution to disk, then kill & restart
+    await waitFile(res008Id, (st) => st.review && st.review.resolutions && st.review.resolutions.pick);
+    await killP();
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b3 });
+    check('persist: server restarts (resolution round-trip case)', await waitHealth(true));
+    const restoredRes = await p(`/api/state?session=${res008Id}`);
+    check(
+      'a resolution + reason + attribution survives a restart',
+      restoredRes.status === 200 &&
+        restoredRes.data.review.resolutions.pick &&
+        restoredRes.data.review.resolutions.pick.option === 'Two' &&
+        restoredRes.data.review.resolutions.pick.by === 'A' &&
+        restoredRes.data.review.resolutions.pick.byName === 'Ada' &&
+        restoredRes.data.review.resolutions.pick.reason === 'Two handles the edge case',
+      JSON.stringify(restoredRes.data.review.resolutions)
+    );
+    await stop(res008Id);
+    await sleep(300);
+    fs.rmSync(stateDir6b3, { recursive: true, force: true });
+
     // ----- P6c: a submitted bundle is de-aliased from live session objects -----
     // mergeComments returns peer comments by reference; reviewBundle structuredClones the
     // result so a later /agent/reply (which mutates s.review.comments[i].replies in place)
@@ -1425,6 +1496,23 @@ async function main() {
     !/data-other/.test(noOther) && /choice-option/.test(noOther)
   );
 
+  // issue 008: the server captures each choice block's declared options so a resolve
+  // can be validated against them.
+  const specs = parseChoiceSpecs(
+    '# T\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n\n```choice\nid: multi\nmulti: true\noptions:\n  - X\n  - Y\n```\n'
+  );
+  check(
+    'parseChoiceSpecs returns declared options per choice id',
+    specs.pick && specs.pick.options.join(',') === 'A1,A2' && specs.pick.multi === false &&
+      specs.multi && specs.multi.multi === true && specs.multi.options.join(',') === 'X,Y',
+    JSON.stringify(specs)
+  );
+  check(
+    'parseChoiceSpecs ignores a malformed choice (no id or no options)',
+    Object.keys(parseChoiceSpecs('```choice\nprompt: no id\noptions:\n  - A\n```\n')).length === 0,
+    JSON.stringify(parseChoiceSpecs('```choice\nprompt: no id\n```\n'))
+  );
+
   console.log('doc changes: re-render highlights new/changed blocks; first render is clean');
   const firstRender = renderDiff('# T\n\nAlpha.\n\nBeta.\n', null);
   check(
@@ -1565,10 +1653,11 @@ async function main() {
   });
   const subEv = await waitSubmit;
   check(
-    'submit delivers comments, note, and a free-text Other choice value',
+    'submit delivers comments, note, and a free-text Other choice value (picks-only, unresolved)',
     subEv.type === 'submit' &&
       subEv.comments.length === 1 &&
-      subEv.choices.pick.anonymous === 'a custom third option' &&
+      subEv.choices.pick.picks.anonymous === 'a custom third option' && // 008: choices now nested under `picks`
+      !('resolved' in subEv.choices.pick) &&
       subEv.note === 'almost there'
   );
   const stWorking = await cli('status', '--session', id);
@@ -1621,6 +1710,43 @@ async function main() {
   const reApprove = await browser(`/api/approve?session=${ap.id}`, {});
   check('cannot approve again once done', reApprove.status === 409, `status=${reApprove.status}`);
   await cli('stop', '--session', ap.id);
+
+  console.log('issue 008: submit bundle carries resolved (+reason) + raw picks; unresolved carries picks only');
+  const b8 = await cli('start', docA, '--no-open');
+  const b8id = b8.id;
+  await browser(`/api/review-state?session=${b8id}`, { reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${b8id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${b8id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' },
+    resolutions: { pick: { option: 'A2', reason: 'perf' } },
+  });
+  const b8Wait = cli('wait', '--session', b8id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${b8id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' }, note: 'go' });
+  const b8Ev = await b8Wait;
+  check(
+    'a resolved choice emits { resolved: {option, by, reason}, picks: {reviewerId: option} }',
+    b8Ev.type === 'submit' &&
+      b8Ev.choices.pick.resolved && b8Ev.choices.pick.resolved.option === 'A2' &&
+      b8Ev.choices.pick.resolved.by === 'A' && b8Ev.choices.pick.resolved.reason === 'perf' &&
+      b8Ev.choices.pick.picks.A === 'A1' && b8Ev.choices.pick.picks.B === 'A2',
+    JSON.stringify(b8Ev.choices)
+  );
+  await cli('stop', '--session', b8id);
+
+  console.log('issue 008: an unresolved choice emits picks only (no resolved key)');
+  const u8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${u8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  const u8Wait = cli('wait', '--session', u8.id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${u8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' }, note: 'x' });
+  const u8Ev = await u8Wait;
+  check(
+    'an unresolved choice emits { picks } with no resolved key',
+    u8Ev.choices.pick && u8Ev.choices.pick.picks.A === 'A1' && !('resolved' in u8Ev.choices.pick),
+    JSON.stringify(u8Ev.choices)
+  );
+  await cli('stop', '--session', u8.id);
 
   console.log('rework progress: steps accumulate while working, clear on present');
   const pr = await cli('start', docA, '--no-open');
@@ -1934,6 +2060,147 @@ async function main() {
   );
   await cli('stop', '--session', cfid);
 
+  console.log('issue 008: a reviewer resolves a divergent choice; validated, attributed, broadcast');
+  const r8 = await cli('start', docA, '--no-open');
+  const r8id = r8.id;
+  const r8Events = await captureEvents(r8id);
+  await sleep(100);
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'B', reviewerName: 'Bo', comments: [], choices: { pick: 'A2' } });
+  // A resolves to A2 with a reason.
+  await browser(`/api/review-state?session=${r8id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' },
+    resolutions: { pick: { option: 'A2', reason: 'A2 scales better' } },
+  });
+  const r8State = await browser(`/api/state?session=${r8id}`);
+  check(
+    'a resolution is recorded with option + attribution (by/byName) + reason; picks untouched',
+    r8State.data.review.resolutions.pick &&
+      r8State.data.review.resolutions.pick.option === 'A2' &&
+      r8State.data.review.resolutions.pick.by === 'A' &&
+      r8State.data.review.resolutions.pick.byName === 'Ada' &&
+      r8State.data.review.resolutions.pick.reason === 'A2 scales better' &&
+      typeof r8State.data.review.resolutions.pick.at === 'string' &&
+      r8State.data.review.choices.pick.A === 'A1' && r8State.data.review.choices.pick.B === 'A2',
+    JSON.stringify(r8State.data.review)
+  );
+  // An option not in the block is ignored (validation); unknown choiceId ignored.
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'B', comments: [], resolutions: { pick: 'A9', nope: 'A1' } });
+  const r8State2 = await browser(`/api/state?session=${r8id}`);
+  check(
+    'an out-of-options resolve and an unknown choiceId are ignored (prior resolution intact)',
+    r8State2.data.review.resolutions.pick.option === 'A2' && r8State2.data.review.resolutions.nope === undefined,
+    JSON.stringify(r8State2.data.review.resolutions)
+  );
+  // A bare-option set (no reason) changes the resolution, re-attributes, and blanks the reason.
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'B', reviewerName: 'Bo', comments: [], resolutions: { pick: 'A1' } });
+  const r8State3 = await browser(`/api/state?session=${r8id}`);
+  check(
+    'a bare-option resolve changes option + re-attributes + clears reason',
+    r8State3.data.review.resolutions.pick.option === 'A1' && r8State3.data.review.resolutions.pick.by === 'B' &&
+      (r8State3.data.review.resolutions.pick.reason === '' || r8State3.data.review.resolutions.pick.reason === undefined),
+    JSON.stringify(r8State3.data.review.resolutions)
+  );
+  // Clear returns the choice to unresolved.
+  await browser(`/api/review-state?session=${r8id}`, { reviewerId: 'A', comments: [], resolutions: { pick: null } });
+  const r8State4 = await browser(`/api/state?session=${r8id}`);
+  check(
+    'a null resolve clears the resolution (back to unresolved)',
+    r8State4.data.review.resolutions.pick === undefined,
+    JSON.stringify(r8State4.data.review.resolutions)
+  );
+  // The review SSE delta carries resolutions.
+  let r8Deltas = [];
+  for (let i = 0; i < 40; i++) {
+    r8Deltas = r8Events.events.filter((e) => e.event === 'review');
+    if (r8Deltas.some((e) => 'resolutions' in JSON.parse(e.data))) break;
+    await sleep(25);
+  }
+  check(
+    'the review SSE delta carries resolutions alongside comments + choices',
+    r8Deltas.length && r8Deltas.every((e) => 'resolutions' in JSON.parse(e.data)),
+    JSON.stringify(r8Deltas.map((e) => e.data))
+  );
+  r8Events.close();
+  await cli('stop', '--session', r8id);
+
+  console.log('issue 008: changing a pick after a resolution leaves the resolution intact');
+  const lc8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${lc8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${lc8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${lc8.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2' } },
+  });
+  // B now changes its own pick — the resolution must NOT be disturbed (only an explicit clear re-opens).
+  await browser(`/api/review-state?session=${lc8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A1' } });
+  const lc8State = await browser(`/api/state?session=${lc8.id}`);
+  check(
+    'a reviewer changing its own pick does not clear an existing resolution',
+    lc8State.data.review.resolutions.pick && lc8State.data.review.resolutions.pick.option === 'A2' &&
+      lc8State.data.review.choices.pick.B === 'A1',
+    JSON.stringify(lc8State.data.review)
+  );
+  await cli('stop', '--session', lc8.id);
+
+  console.log('issue 008: a resolution survives even after every raw pick is cleared (no silent loss)');
+  const nl8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${nl8.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2', reason: 'agreed' } },
+  });
+  // Both reviewers now clear their own picks — the shared resolution must still travel.
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'A', comments: [], choices: {} });
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'B', comments: [], choices: {} });
+  const nl8Wait = cli('wait', '--session', nl8.id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${nl8.id}`, { reviewerId: 'A', comments: [], choices: {}, note: 'go' });
+  const nl8Ev = await nl8Wait;
+  check(
+    'a resolved choice with no remaining picks still emits { resolved, picks:{} } (spec: no silent loss)',
+    nl8Ev.type === 'submit' &&
+      nl8Ev.choices.pick && nl8Ev.choices.pick.resolved && nl8Ev.choices.pick.resolved.option === 'A2' &&
+      nl8Ev.choices.pick.resolved.reason === 'agreed' &&
+      nl8Ev.choices.pick.picks && Object.keys(nl8Ev.choices.pick.picks).length === 0,
+    JSON.stringify(nl8Ev.choices)
+  );
+  await cli('stop', '--session', nl8.id);
+
+  console.log('issue 008: a __proto__ / non-string resolve intent is ignored, never crashes the request');
+  const pp8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${pp8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  // A crafted __proto__ key must not 500 or pollute; a non-string / array option must be ignored.
+  // JSON.parse is used so the payload carries a genuine own "__proto__" key (an object
+  // literal would set the prototype and drop it) — this is the hostile-direct-POST case.
+  const ppResp = await browser(`/api/review-state?session=${pp8.id}`, {
+    reviewerId: 'A', comments: [],
+    resolutions: JSON.parse('{"__proto__":"A1","pick":42,"other":["A1","A2"]}'),
+  });
+  const pp8State = await browser(`/api/state?session=${pp8.id}`);
+  check(
+    'a __proto__ key + non-string option are ignored (200, no resolution recorded, no pollution)',
+    ppResp.status === 200 &&
+      Object.keys(pp8State.data.review.resolutions).length === 0 &&
+      pp8State.data.review.choices.pick.A === 'A1',
+    `status=${ppResp.status} resolutions=${JSON.stringify(pp8State.data.review.resolutions)}`
+  );
+  await cli('stop', '--session', pp8.id);
+
+  console.log('issue 008: the resolution reason is trimmed server-side');
+  const tr8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${tr8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${tr8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${tr8.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2', reason: '  spaced out  ' } },
+  });
+  const tr8State = await browser(`/api/state?session=${tr8.id}`);
+  check(
+    'the stored reason is trimmed',
+    tr8State.data.review.resolutions.pick && tr8State.data.review.resolutions.pick.reason === 'spaced out',
+    JSON.stringify(tr8State.data.review.resolutions.pick)
+  );
+  await cli('stop', '--session', tr8.id);
+
   console.log('multi-reviewer: reviewer chat carries an author, role stays "reviewer"');
   const ch = await cli('start', docA, '--no-open');
   await browser(`/api/chat?session=${ch.id}`, { text: 'who owns this?', reviewerId: 'A', reviewerName: 'Ada' });
@@ -1993,8 +2260,9 @@ async function main() {
     JSON.stringify(sbEv.comments)
   );
   check(
-    'the submit bundle carries the full per-reviewer choice map (the conflict survives)',
-    sbEv.choices.pick && sbEv.choices.pick.A === 'A1' && sbEv.choices.pick.B === 'A2' && sbEv.note === 'consolidated',
+    'the submit bundle carries the full per-reviewer choice map under picks (the conflict survives; unresolved so no resolved key)',
+    sbEv.choices.pick && sbEv.choices.pick.picks.A === 'A1' && sbEv.choices.pick.picks.B === 'A2' &&
+      !('resolved' in sbEv.choices.pick) && sbEv.note === 'consolidated',
     JSON.stringify(sbEv.choices)
   );
   // The submit must NOT have mutated the shared draft (mirror today's behavior): the
@@ -2024,12 +2292,13 @@ async function main() {
   });
   const oneEv = await oneWait;
   check(
-    'single reviewer: bundle is exactly their one comment + a one-entry choice map',
+    'single reviewer: bundle is exactly their one comment + a one-entry picks map (unresolved)',
     oneEv.type === 'submit' &&
       oneEv.comments.length === 1 &&
       oneEv.comments[0].id === 's1' &&
-      Object.keys(oneEv.choices.pick).length === 1 &&
-      oneEv.choices.pick.solo === 'A1',
+      Object.keys(oneEv.choices.pick.picks).length === 1 &&
+      oneEv.choices.pick.picks.solo === 'A1' &&
+      !('resolved' in oneEv.choices.pick),
     JSON.stringify({ comments: oneEv.comments, choices: oneEv.choices })
   );
   await cli('stop', '--session', one.id);
@@ -2091,6 +2360,29 @@ async function main() {
     JSON.stringify(carried.data.review)
   );
   await cli('stop', '--session', cy.id);
+
+  console.log('issue 008: a re-present carries a choice resolution forward (persists until cleared)');
+  const rcDoc = path.join(dir, 'planreview-e2e-carry-res.md');
+  const rcChoice = '\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n';
+  fs.writeFileSync(rcDoc, '# Carry Res\n\nShared body line.' + rcChoice);
+  const rcr = await cli('start', rcDoc, '--no-open');
+  await browser(`/api/review-state?session=${rcr.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${rcr.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${rcr.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2', reason: 'carry me' } },
+  });
+  fs.writeFileSync(rcDoc, '# Carry Res\n\nShared body line.\n\nA reworked addition.' + rcChoice);
+  await cli('present', rcDoc, '--session', rcr.id);
+  const rcCarried = await browser(`/api/state?session=${rcr.id}`);
+  check(
+    'loadDoc carries the resolution (option + reason + attribution) forward across a re-present',
+    rcCarried.data.review.resolutions.pick &&
+      rcCarried.data.review.resolutions.pick.option === 'A2' &&
+      rcCarried.data.review.resolutions.pick.by === 'A' &&
+      rcCarried.data.review.resolutions.pick.reason === 'carry me',
+    JSON.stringify(rcCarried.data.review.resolutions)
+  );
+  await cli('stop', '--session', rcr.id);
 
   console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
   const dv = path.join(dir, 'planreview-e2e-versions.md');
@@ -2720,6 +3012,27 @@ async function main() {
   check(
     'client shows per-option who-picked badges and a muted disagree hint on choices',
     /choice-picks/.test(app.body) && /choice-disagree/.test(app.body)
+  );
+  // issue 008: resolve control — source-regex smoke checks (no DOM rig, matching the suite's convention).
+  check(
+    'client renders a resolve-to control (renderResolution + choice-resolve class)',
+    /function renderResolution\(/.test(app.body) && /choice-resolve/.test(app.body)
+  );
+  check(
+    'the resolve control is gated on divergence or an existing resolution (no-friction guard)',
+    /if \(!resolution && !divergent\)/.test(app.body)
+  );
+  check(
+    'resolve/change/clear intent is posted through syncReview (set + null clear)',
+    /syncReview\(\{ \[id\]: intent \}\)/.test(app.body) && /postResolution\(null\)/.test(app.body)
+  );
+  check(
+    'the resolved banner colors the resolver name via the shared --author-color convention',
+    /setProperty\('--author-color', authorColor\(resolution\.by\)\)/.test(app.body)
+  );
+  check(
+    'css styles the resolve control (choice-resolve + choice-resolved)',
+    /\.choice-resolve\b/.test(css.body) && /\.choice-resolved\b/.test(css.body)
   );
   check('client shows the reviewer name on chat lines', /chat-author/.test(app.body));
   // presence (issue 007): identity rides the SSE connection; a presence handler + strip render.

@@ -73,7 +73,12 @@ shows a "reworking" overlay until you `present` again.
       "text": "the reviewer's comment about it", "ts": 1783032851932,
       "author": { "id": "5f3c…", "name": "Ada" } }
   ],
-  "choices": { "storage": { "5f3c…": "In-process", "9b1d…": "Redis" } },
+  "choices": {
+    "storage": {
+      "picks": { "5f3c…": "In-process", "9b1d…": "Redis" },
+      "resolved": { "option": "In-process", "by": "5f3c…", "byName": "Ada", "reason": "no external dep for localhost" }
+    }
+  },
   "note": "overall note typed next to the submit button",
   "docVersion": 1,
   "submittedAt": "2026-07-02T22:54:12.907Z"
@@ -94,10 +99,14 @@ shows a "reworking" overlay until you `present` again.
   `planreview reply <commentId> "<answer>" --session <id>`; it threads under
   that comment and the reviewers' follow-ups ride back in the next bundle's
   `comments[].replies`. See **Replying to a comment** below.
-- `choices` maps each `id` from a ` ```choice ` fence to a **per-reviewer** map
-  of `{ reviewerId: selected option }` (the option is an array when the block
-  sets `multi: true`). When reviewers pick differently, every pick is present —
-  the conflict is surfaced, never overwritten. See **Multiple reviewers**.
+- `choices` maps each `id` from a ` ```choice ` fence to `{ picks, resolved? }`.
+  `picks` is a **per-reviewer** map of `{ reviewerId: selected option }` (the
+  option is an array when the block sets `multi: true`) — when reviewers pick
+  differently, every pick is present, so the conflict is surfaced, never
+  overwritten. `resolved` is present only when a reviewer explicitly resolved a
+  divergent choice: `{ option, by, byName, reason }` (the shared decision, who set
+  it, and an optional reason). You get the agreed value **and** the raw split. See
+  **Choice-conflict resolution** and **Multiple reviewers**.
 - Rework the document, then `planreview present <file> --session <id>` — the
   browser reloads it in place and a fresh review round begins. Every re-present
   after the first automatically highlights the blocks that changed since the
@@ -144,7 +153,7 @@ to `done`, independent of what the agent does next.
 {
   "type": "approve",
   "comments": [],
-  "choices": { "storage": { "5f3c…": "In-process" } },
+  "choices": { "storage": { "picks": { "5f3c…": "In-process" } } },
   "note": "ship it",
   "docVersion": 3,
   "submittedAt": "2026-07-03T18:12:00.000Z"
@@ -191,22 +200,46 @@ options:
 
 `id` and at least one option are required; a malformed block falls back to
 rendering as plain code. The reviewers' answers arrive in `submit.choices` (and
-`approve.choices`) as a per-reviewer map `{ id: { reviewerId: option } }` —
-every reviewer's pick for each block, so a divergence is visible rather than
-silently overwritten (the UI shows a per-option who-picked badge and a muted
-"reviewers disagree" hint). With a single reviewer the map simply has one entry.
+`approve.choices`) as `{ id: { picks, resolved? } }`. `picks` is a per-reviewer
+map `{ reviewerId: option }` — every reviewer's pick for each block, so a
+divergence is visible rather than silently overwritten (the UI shows a per-option
+who-picked badge and a muted "reviewers disagree" hint). With a single reviewer
+`picks` simply has one entry.
 
 By default each block also renders a free-text **"Other"** answer (a radio or
 checkbox plus a text field). If a reviewer types there, their entry in
-`choices[id]` holds the typed string — indistinguishable in shape from a preset
-answer, so no special handling is needed. Add `other: false` to omit it and
-require one of the listed options.
+`choices[id].picks` holds the typed string — indistinguishable in shape from a
+preset answer, so no special handling is needed. Add `other: false` to omit it
+and require one of the listed options.
 
 **Answers persist across cycles.** A re-present keeps every reviewer's prior
-`choices`. So if you keep a choice block in the reworked doc, a reviewer isn't
-re-asked — their own previous pick shows collapsed, with a "Change" option — and
-`submit`/`approve` still report the current per-reviewer value for every
-answered `id`.
+`choices` (and any `resolutions`). So if you keep a choice block in the reworked
+doc, a reviewer isn't re-asked — their own previous pick shows collapsed, with a
+"Change" option — and `submit`/`approve` still report the current per-reviewer
+value for every answered `id`.
+
+## Choice-conflict resolution
+
+When reviewers diverge on a choice, any of them can **resolve** it to a single
+shared option (with an optional free-text `reason`). This is an explicit,
+attributed decision — no voting, no locking. The resolve control appears only on a
+divergent block, so single-reviewer and all-agree blocks are unchanged.
+
+- A resolved choice carries `resolved: { option, by, byName, reason }` in the
+  bundle **alongside** the raw `picks` — you see the agreed value *and* the
+  underlying split, with nothing lost. An unresolved choice carries `picks` only
+  (no `resolved` key).
+- A resolution **persists until explicitly changed or cleared** — it is
+  independent of the raw picks, so a reviewer changing their own pick never
+  silently undoes it. Re-opening the choice is a deliberate **clear** (which
+  returns the block to the unresolved split).
+- Set/change/clear go through `POST /api/review-state` in a `resolutions` field:
+  `{ choiceId: { option, reason? } }` (or a bare `{ choiceId: option }`) to
+  set/change, `{ choiceId: null }` to clear. The server validates `option`
+  against the block's declared options (an out-of-options value or unknown
+  `choiceId` is ignored), stamps `{ option, by, byName, at, reason }`
+  (last-writer-wins on the single shared slot), and broadcasts a `review` delta so
+  every tab re-syncs live. Resolutions round-trip a server restart.
 
 ## Comment & thread persistence
 
@@ -242,14 +275,16 @@ together; a single-reviewer session behaves exactly as before.
   untouched, so no one can clobber another's. Replies are the exception: any
   reviewer may reply to any comment, and replies are append-only (never removed
   by a peer's sync). The archived flag stays server-authoritative.
-- **Choices** are per-reviewer (`{ id: { reviewerId: option } }`), so a conflict
-  is surfaced, not overwritten.
+- **Choices** are per-reviewer (`picks: { reviewerId: option }`), so a conflict is
+  surfaced, not overwritten; a divergent choice can be **resolved** to one shared,
+  attributed decision (see **Choice-conflict resolution**).
 - **Live sync.** A `POST /api/review-state` broadcasts a `review` SSE event so
-  other open tabs re-sync and render peers' comments and picks live; a tab
-  ignores the echo of its own change.
+  other open tabs re-sync and render peers' comments, picks, and resolutions live;
+  a tab ignores the echo of its own change.
 - **Submit consolidates.** Any reviewer can submit; the one bundle carries every
-  reviewer's attributed comments plus the full per-reviewer choice map, with no
-  loss. The status state machine is unchanged — the agent still reworks once.
+  reviewer's attributed comments plus each choice's full per-reviewer `picks` (and
+  any `resolved` decision), with no loss. The status state machine is unchanged —
+  the agent still reworks once.
 
 ## Version history and diffs
 
@@ -294,7 +329,7 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | GET | `/api/state?session=` | browser | full session state (doc — incl. `doc.versions` — review, chat, progress, status, `workingSince`, `lastAgentActivity`, clients) |
 | GET | `/api/diff?session=` | browser | annotated diff between two retained versions (`&from=`/`&to=` optional); 400s outside the retention ring |
 | GET | `/events?session=` | browser | SSE stream: `doc`, `chat`, `comment-reply`, `review`, `progress`, `status` |
-| POST | `/api/review-state?session=` | browser | persist in-progress comments/choices (carries `reviewerId`; broadcasts a `review` delta) |
+| POST | `/api/review-state?session=` | browser | persist in-progress comments/choices/resolutions (carries `reviewerId`; broadcasts a `review` delta) |
 | POST | `/api/chat?session=` | browser | reviewer chat message (queued for the agent) |
 | POST | `/api/submit?session=` | browser | submit a review round (→ `working`; queued as `submit`) |
 | POST | `/api/approve?session=` | browser | approve & finish (→ `done`; queued as `approve`) |

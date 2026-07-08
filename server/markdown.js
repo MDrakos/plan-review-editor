@@ -41,9 +41,12 @@ function renderFence(lang, body) {
 //     - Redis
 //     - In-process
 //   ```
-function renderChoice(body) {
-  // `other` (default true) appends a free-text "Other" answer, like the CLI's
-  // AskUserQuestion; set `other: false` to force a choice from the listed options.
+// Parse ONE ```choice fence body into its spec. Shared by renderChoice (which then
+// builds HTML) and parseChoiceSpecs (which the server uses to validate a resolve
+// against the block's declared options), so the two never disagree about a block.
+// `other` (default true) appends a free-text "Other" answer, like the CLI's
+// AskUserQuestion; set `other: false` to force a choice from the listed options.
+function parseChoiceSpec(body) {
   const spec = { id: '', prompt: '', multi: false, other: true, options: [] };
   let inOptions = false;
   for (const raw of body.split('\n')) {
@@ -60,6 +63,39 @@ function renderChoice(body) {
       else if (kv[1] === 'id' || kv[1] === 'prompt') spec[kv[1]] = kv[2].trim();
     }
   }
+  return spec;
+}
+
+// Scan a markdown document for every well-formed ```choice fence and return
+// { choiceId: { options, multi, other } }. Malformed blocks (no id / no options,
+// exactly the ones renderChoice falls back to code on) are skipped. Fence detection
+// mirrors renderBlocks so the two never disagree about what counts as a fence.
+function parseChoiceSpecs(markdown) {
+  const lines = String(markdown).replace(/\r\n/g, '\n').split('\n');
+  const out = {};
+  let i = 0;
+  while (i < lines.length) {
+    const fence = lines[i].match(/^```(\S*)\s*$/);
+    if (!fence) {
+      i++;
+      continue;
+    }
+    const body = [];
+    i++;
+    while (i < lines.length && !/^```\s*$/.test(lines[i])) body.push(lines[i++]);
+    i++; // closing fence
+    if (fence[1] !== 'choice') continue;
+    const spec = parseChoiceSpec(body.join('\n'));
+    // Skip a reserved id like "__proto__": `out[spec.id] = …` would set the map's
+    // prototype instead of a real entry, silently corrupting choiceSpecs.
+    if (spec.id && spec.id !== '__proto__' && spec.options.length)
+      out[spec.id] = { options: spec.options, multi: spec.multi, other: spec.other };
+  }
+  return out;
+}
+
+function renderChoice(body) {
+  const spec = parseChoiceSpec(body);
   if (!spec.id || !spec.options.length) {
     // malformed block: fall back to showing it as code
     return `<pre><code class="language-choice">${escapeHtml(body)}</code></pre>`;
@@ -356,4 +392,4 @@ function renderVersionDiff(fromMarkdown, toMarkdown) {
   return { html };
 }
 
-module.exports = { render, renderDiff, renderVersionDiff, escapeHtml };
+module.exports = { render, renderDiff, renderVersionDiff, escapeHtml, parseChoiceSpecs };

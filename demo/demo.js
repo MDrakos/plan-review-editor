@@ -121,8 +121,17 @@ function printSummary(ev) {
   const keys = Object.keys(choices);
   if (keys.length) {
     for (const k of keys) {
-      const v = choices[k];
-      console.log(`     • ${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+      // 008 bundle shape: choices[k] = { picks: {reviewerId: option}, resolved? }.
+      const c = choices[k] || {};
+      if (c.resolved && c.resolved.option) {
+        const who = c.resolved.byName || c.resolved.by || 'someone';
+        const why = c.resolved.reason ? ` — ${c.resolved.reason}` : '';
+        console.log(`     • ${k}: ${c.resolved.option} (resolved by ${who})${why}`);
+      } else {
+        const picks = c.picks && typeof c.picks === 'object' ? Object.values(c.picks) : [];
+        const flat = [...new Set(picks.flatMap((v) => (Array.isArray(v) ? v : [v])))];
+        console.log(`     • ${k}: ${flat.length ? flat.join(', ') : '(no pick)'}`);
+      }
     }
   } else {
     console.log('     (no questions answered)');

@@ -1071,6 +1071,61 @@ mark.hl.active { background: var(--mark-active); }
   color: var(--ink-soft);
   align-self: center;
 }
+
+/* ---------- choice-conflict resolution (008) ---------- */
+/* Shown only on a divergent (or already-resolved) choice block. */
+.choice-resolve {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.choice-resolve-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.choice-resolve-option {
+  padding: 2px 10px;
+  font-size: 13px;
+  flex: none;
+}
+.choice-resolve-option.current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.choice-resolve-reason {
+  flex: 1;
+  min-width: 140px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.choice-resolve-reason:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.choice-resolved {
+  font-size: 13px;
+  font-weight: 600;
+  flex-basis: 100%;
+}
+.choice-resolved-by { font-weight: 600; color: var(--author-color, var(--ink-soft)); }
+.choice-resolved-reason {
+  flex-basis: 100%;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--ink-soft);
+}
+.choice-resolve-controls { display: flex; gap: 6px; }
+.choice-resolve-change,
+.choice-resolve-clear,
+.choice-resolve-cancel { padding: 2px 10px; font-size: 12px; flex: none; }
+
 /* ---------- presence strip (who is viewing now) ---------- */
 .presence {
   display: inline-flex;
