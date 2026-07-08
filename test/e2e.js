@@ -3127,6 +3127,10 @@ async function main() {
     'stylesheet keeps the author-row in normal document flow (reserves space instead of overlaying text)',
     /\.card-author-row\s*\{[^}]*\}/.test(css.body) && !/\.card-author-row\s*\{[^}]*position:\s*absolute/.test(css.body)
   );
+  check(
+    'the author-row reserves the same right-gutter as the ✎/✕ icons, so a long name never grows under them',
+    /\.card-author-row\s*\{[^}]*margin:\s*0\s*48px/.test(css.body)
+  );
 
   await cli('stop', '--session', guard.id);
 
