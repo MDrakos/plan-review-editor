@@ -1064,8 +1064,6 @@ function viewCard(c) {
 
   const actions = document.createElement('div');
   actions.className = 'card-actions';
-  // Attribute the card to its author (color-coded) so reviewers can tell who said what.
-  if (c.author) actions.appendChild(authorBadge(c.author));
   // Edit/Delete are offered only for this reviewer's OWN comments — the server rejects
   // edits/deletes to a peer's comment, so showing the controls would just invite a
   // no-op. A peer's comment is read-only here (but its reply thread stays open to all).
@@ -1094,7 +1092,17 @@ function viewCard(c) {
   const body = document.createElement('p');
   body.textContent = c.text;
 
-  card.append(actions, quote, body, renderThread(c));
+  card.append(actions);
+  // Attribute the card to its author (color-coded) so reviewers can tell who said what.
+  // This is its own in-flow row above the quote, not part of the absolutely-positioned
+  // .card-actions icon row, so a wide name pill never overlaps the comment text.
+  if (c.author) {
+    const authorRow = document.createElement('div');
+    authorRow.className = 'card-author-row';
+    authorRow.appendChild(authorBadge(c.author));
+    card.append(authorRow);
+  }
+  card.append(quote, body, renderThread(c));
   card.addEventListener('click', () => {
     if (!c.archived) flashHighlight(c.id);
   });

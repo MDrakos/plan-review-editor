@@ -505,6 +505,10 @@ html, body {
   gap: 2px;
 }
 
+.card-author-row {
+  margin: 0 48px 4px 0; /* clear the edit + delete buttons, same as the blockquote below */
+}
+
 .icon-btn {
   border: none;
   background: none;

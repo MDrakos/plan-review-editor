@@ -3115,6 +3115,18 @@ async function main() {
     'client wires the reviewer follow-up (replyForm → reviewer role → syncReview)',
     /replyForm/.test(app.body) && /role: 'reviewer'/.test(app.body) && /syncReview\(\)/.test(app.body)
   );
+  // issue 011 item 2: the author badge gets its own in-flow row above the comment body
+  // instead of living inside the absolutely-positioned .card-actions icon row, so it can
+  // never overlap the comment text regardless of comment length.
+  check(
+    'client renders the author badge in its own row, not inside .card-actions',
+    /className = 'card-author-row'/.test(app.body) &&
+      !/actions\.appendChild\(authorBadge/.test(app.body)
+  );
+  check(
+    'stylesheet keeps the author-row in normal document flow (reserves space instead of overlaying text)',
+    /\.card-author-row\s*\{[^}]*\}/.test(css.body) && !/\.card-author-row\s*\{[^}]*position:\s*absolute/.test(css.body)
+  );
 
   await cli('stop', '--session', guard.id);
 
