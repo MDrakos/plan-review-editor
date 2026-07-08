@@ -842,8 +842,36 @@ function archivedSection(archived) {
   const n = archived.length;
   summary.textContent = `${n} unanchored comment${n === 1 ? '' : 's'} — text no longer in the plan`;
   details.appendChild(summary);
+  // Only offer bulk-clear when the reviewer actually owns an archived comment
+  // (a session full of a peer's archived comments, multi-reviewer, shows none)
+  // AND the session is actively reviewing (mirrors replyForm's status gate,
+  // line 800) — a rework in flight could re-anchor one of these comments
+  // server-side before its `archived: false` update reaches this tab; clearing
+  // mid-flight on stale data would drop that comment for good (FMEA finding).
+  if (archived.some(ownComment) && state.status === 'reviewing') {
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.className = 'btn clear-archived';
+    clearBtn.textContent = 'Clear all';
+    clearBtn.title = 'Dismiss all of your archived comments';
+    clearBtn.addEventListener('click', clearArchived);
+    details.appendChild(clearBtn);
+  }
   for (const c of archived) details.appendChild(viewCard(c));
   return details;
+}
+
+// Dismiss every archived comment this reviewer owns, in one action — never a
+// peer's (mirrors the existing edit/delete ownership rule in viewCard()). Reuses
+// the same author-scoped sync path as an individual dismiss (deleteComment):
+// filter locally, then let syncReview()/mergeComments do the rest, so a peer's
+// stale tab can never resurrect what this reviewer just cleared.
+function clearArchived() {
+  const keep = state.comments.filter((c) => !(c.archived && ownComment(c)));
+  if (keep.length === state.comments.length) return;
+  state.comments = keep;
+  renderComments();
+  syncReview();
 }
 
 // The reply thread under a comment: each reply as a small bubble, plus (for an

@@ -374,6 +374,44 @@ async function driveLivenessWiring() {
     nameRenderedViaTitle && !innerHtmlHasPayload,
     JSON.stringify({ nameRenderedViaTitle, innerHtmlHasPayload })
   );
+
+  // ---------- archived-comment management (issue 010) ----------
+  // Drive clearArchived() against the real, loaded app.js state (not just a
+  // source regex) so the "own comments only" scoping and the "active comments
+  // untouched" invariant are actually exercised, not merely asserted to exist.
+  vm.runInContext(
+    `state.comments = [
+      { id: 'a1', quote: 'q1', text: 'active', archived: false },
+      { id: 'r1', quote: 'q2', text: 'mine, archived', archived: true },
+      { id: 'r2', quote: 'q3', text: 'mine too, archived', archived: true },
+      { id: 'p1', quote: 'q4', text: "peer's archived", archived: true, author: { id: 'peer-1' } },
+    ];`,
+    ctx
+  );
+  vm.runInContext('clearArchived()', ctx);
+  const afterClear = vm.runInContext('state.comments', ctx);
+  check(
+    "clearArchived: removes only the reviewer's own archived comments (a peer's survives)",
+    afterClear.length === 2 &&
+      afterClear.some((c) => c.id === 'a1') &&
+      afterClear.some((c) => c.id === 'p1') &&
+      !afterClear.some((c) => c.id === 'r1' || c.id === 'r2'),
+    JSON.stringify(afterClear.map((c) => c.id))
+  );
+  check(
+    'clearArchived: the surviving active comment is untouched (still archived: false)',
+    afterClear.find((c) => c.id === 'a1').archived === false
+  );
+
+  vm.runInContext(`state.comments = [{ id: 'a1', quote: 'q1', text: 'active', archived: false }];`, ctx);
+  const beforeNoop = vm.runInContext('state.comments', ctx);
+  vm.runInContext('clearArchived()', ctx);
+  const afterNoop = vm.runInContext('state.comments', ctx);
+  check(
+    'clearArchived: a no-op (nothing archived-and-own) leaves state.comments untouched',
+    afterNoop === beforeNoop,
+    'expected the same array reference when there is nothing to clear'
+  );
 }
 
 // ---------- liveness refresh accuracy (issue 009 T3) ----------
