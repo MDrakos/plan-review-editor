@@ -1241,6 +1241,41 @@ async function persistenceChecks() {
     await sleep(300);
     fs.rmSync(stateDir6b2, { recursive: true, force: true });
 
+    // ----- P6b3: a resolution (with reason) round-trips a restart (issue 008) -----
+    console.log('persistence: a choice resolution (with reason) round-trips a server restart (issue 008)');
+    await killP();
+    const stateDir6b3 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-res008-'));
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b3 });
+    check('persist: server up (resolution round-trip case)', await waitHealth(true));
+    const res008 = await p('/agent/start', { path: doc });
+    const res008Id = res008.data.id;
+    // Two reviewers diverge on `pick` (options One/Two); A resolves to Two with a reason.
+    await p(`/api/review-state?session=${res008Id}`, { reviewerId: 'A', comments: [], choices: { pick: 'One' } });
+    await p(`/api/review-state?session=${res008Id}`, { reviewerId: 'B', comments: [], choices: { pick: 'Two' } });
+    await p(`/api/review-state?session=${res008Id}`, {
+      reviewerId: 'A', reviewerName: 'Ada', comments: [],
+      resolutions: { pick: { option: 'Two', reason: 'Two handles the edge case' } },
+    });
+    // wait for the debounced flush to write the resolution to disk, then kill & restart
+    await waitFile(res008Id, (st) => st.review && st.review.resolutions && st.review.resolutions.pick);
+    await killP();
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b3 });
+    check('persist: server restarts (resolution round-trip case)', await waitHealth(true));
+    const restoredRes = await p(`/api/state?session=${res008Id}`);
+    check(
+      'a resolution + reason + attribution survives a restart',
+      restoredRes.status === 200 &&
+        restoredRes.data.review.resolutions.pick &&
+        restoredRes.data.review.resolutions.pick.option === 'Two' &&
+        restoredRes.data.review.resolutions.pick.by === 'A' &&
+        restoredRes.data.review.resolutions.pick.byName === 'Ada' &&
+        restoredRes.data.review.resolutions.pick.reason === 'Two handles the edge case',
+      JSON.stringify(restoredRes.data.review.resolutions)
+    );
+    await stop(res008Id);
+    await sleep(300);
+    fs.rmSync(stateDir6b3, { recursive: true, force: true });
+
     // ----- P6c: a submitted bundle is de-aliased from live session objects -----
     // mergeComments returns peer comments by reference; reviewBundle structuredClones the
     // result so a later /agent/reply (which mutates s.review.comments[i].replies in place)
