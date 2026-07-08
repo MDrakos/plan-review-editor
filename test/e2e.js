@@ -354,6 +354,202 @@ async function driveLivenessWiring() {
   );
 }
 
+// ---------- liveness refresh accuracy (issue 009 T3) ----------
+//
+// driveLivenessWiring above proves a LIVE tab's timer/staleness lifecycle is
+// correct. These scenarios prove a REFRESHED tab is correct too: app.js must
+// seed workingStartTs/lastSignalTs from the server-reported workingSince /
+// lastAgentActivity (carried on GET /api/state and on the `status` SSE event)
+// rather than always restarting the clock at Date.now(). Each scenario gets
+// its own fresh VM context/session — unlike driveLivenessWiring's one long
+// story — since each needs a different boot payload and must not disturb the
+// existing scenario's assertions.
+//
+// Factored out of driveLivenessWiring's inline setup so each scenario below
+// can boot its own isolated shim with its own fake clock and fake state.
+function bootLivenessHarness(fakeState, initialNow) {
+  const clock = { now: initialNow }; // mutable box so Date.now() can be advanced after boot
+  let timers = [];
+  let tid = 1;
+  const pump = () => { for (const t of [...timers]) t.fn(); }; // one tick of every live interval
+
+  const makeEl = () => ({
+    textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
+    className: '', dataset: {}, style: { setProperty() {}, removeProperty() {} },
+    classList: { add() {}, remove() {}, contains: () => false },
+    addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
+    append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
+    scrollIntoView() {}, focus() {}, setSelectionRange() {},
+    querySelector: () => makeEl(), querySelectorAll: () => [], contains: () => false,
+    getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), cloneRange() { return this; },
+  });
+  const els = {};
+  const getEl = (id) => (els[id] || (els[id] = makeEl()));
+
+  let es = null;
+  const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
+
+  const ctx = vm.createContext({
+    window: {},
+    document: {
+      getElementById: getEl, querySelector: () => makeEl(), querySelectorAll: () => [], addEventListener() {},
+      createElement: () => makeEl(), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({}) }),
+      createTreeWalker: () => ({ nextNode: () => null, currentNode: null }), title: '',
+    },
+    location: { pathname: '/s/abc' },
+    EventSource: function () { es = { onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
+    fetch: () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }),
+    setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
+    clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
+    setTimeout: () => 0, clearTimeout: () => {},
+    Date: { now: () => clock.now }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
+    crypto: { randomUUID: () => `shim-uuid-${tid++}` },
+    localStorage: (() => {
+      const m = new Map();
+      return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+    })(),
+    JSON, Math, Number, String, Array, Object, Boolean, console, Promise, encodeURIComponent, decodeURIComponent,
+  });
+
+  const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
+  load('liveness.js');
+  load('app.js');
+
+  const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
+  return { clock, pump, fire, flush, getEl, timerCount: () => timers.length };
+}
+
+async function driveLivenessRefreshAccuracy() {
+  // Scenario 1: a refresh mid-round shows the REAL elapsed time, not 0:00.
+  {
+    const workingSince = 1_000_000;
+    const lastAgentActivity = workingSince + 5000;
+    const now = workingSince + 12000; // boot 12s into a round already underway
+    const fakeState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'working',
+      workingSince,
+      lastAgentActivity,
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+    };
+    const h = bootLivenessHarness(fakeState, now);
+    await h.flush(); // boot fetchState() settles
+    const overlay = h.getEl('working-overlay');
+    const elapsed = h.getEl('working-elapsed');
+    check(
+      'liveness refresh: overlay is visible on a mid-round boot',
+      overlay.hidden === false,
+      String(overlay.hidden)
+    );
+    check(
+      'liveness refresh: mid-round boot paints the REAL elapsed time (0:12), not 0:00',
+      elapsed.textContent === '0:12' && elapsed.textContent !== '0:00',
+      elapsed.textContent
+    );
+  }
+
+  // Scenario 2 (FM-4): a malformed activity payload never produces "NaN s".
+  {
+    const now = 2_000_000;
+    const fakeState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'working',
+      workingSince: 'not-a-number',
+      lastAgentActivity: 'also-not-a-number',
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+    };
+    const h = bootLivenessHarness(fakeState, now);
+    await h.flush();
+    const elapsed = h.getEl('working-elapsed');
+    const stale = h.getEl('working-stale');
+    check(
+      'liveness refresh FM-4: garbage workingSince/lastAgentActivity falls back to Date.now() (0:00)',
+      elapsed.textContent === '0:00',
+      elapsed.textContent
+    );
+    check(
+      'liveness refresh FM-4: the staleness hint never renders "NaN" and stays hidden',
+      stale.hidden === true && !/NaN/.test(stale.textContent),
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+    h.pump(); // one more tick for good measure — still must never go NaN
+    check(
+      'liveness refresh FM-4: still no "NaN" after a tick',
+      !/NaN/.test(elapsed.textContent) && !/NaN/.test(stale.textContent),
+      JSON.stringify({ e: elapsed.textContent, s: stale.textContent })
+    );
+  }
+
+  // Scenario 3 (FM-9): a future workingSince (clock skew) clamps to 0:00, no crash.
+  {
+    const now = 3_000_000;
+    const workingSince = now + 5000; // ahead of "now" — simulated clock skew
+    const fakeState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'working',
+      workingSince,
+      lastAgentActivity: workingSince,
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+    };
+    const h = bootLivenessHarness(fakeState, now);
+    await h.flush();
+    const elapsed = h.getEl('working-elapsed');
+    const stale = h.getEl('working-stale');
+    check(
+      'liveness refresh FM-9: a future workingSince clamps the first tick to 0:00 (no negative/garbage)',
+      elapsed.textContent === '0:00',
+      elapsed.textContent
+    );
+    check(
+      'liveness refresh FM-9: the staleness hint stays hidden under clock skew',
+      stale.hidden === true,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+  }
+
+  // Scenario 4 (FM-2/FM-11): a stray workingSince on a terminal status is inert —
+  // e.g. /agent/stop firing mid-round, which the server now allows. The 'ended'
+  // branch of setStatus never reads `activity`, so this must produce the exact
+  // same clean teardown as a bare {status:'ended'} event.
+  {
+    const now = 4_000_000;
+    const fakeState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'reviewing',
+      workingSince: null,
+      lastAgentActivity: null,
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+    };
+    const h = bootLivenessHarness(fakeState, now);
+    await h.flush(); // boots into 'reviewing', no timer yet
+    const workingSince = now - 3000; // a real round already 3s underway
+    h.fire('status', { status: 'working', workingSince, lastAgentActivity: workingSince });
+    check(
+      'liveness refresh FM-2/FM-11 setup: a real round is running before the stray-stop event',
+      h.timerCount() === 1,
+      String(h.timerCount())
+    );
+    // /agent/stop mid-round: the server now allows this and still carries the
+    // (now-stale) workingSince/lastAgentActivity fields on the terminal event.
+    h.fire('status', { status: 'ended', workingSince, lastAgentActivity: workingSince });
+    const elapsed = h.getEl('working-elapsed');
+    const stale = h.getEl('working-stale');
+    check(
+      'liveness refresh FM-2/FM-11: a stray workingSince on a terminal status is inert — clean teardown',
+      h.timerCount() === 0 && elapsed.textContent === '' && stale.hidden === true,
+      JSON.stringify({ timers: h.timerCount(), elapsed: elapsed.textContent, staleHidden: stale.hidden })
+    );
+  }
+}
+
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
 //
 // Unlike the checks above (which drive the CLI-managed shared server on PORT),
@@ -993,6 +1189,9 @@ async function main() {
 
   console.log('working-overlay liveness: overlay timer/hint lifecycle (real app.js in a DOM shim)');
   await driveLivenessWiring();
+
+  console.log('working-overlay liveness: refresh-accurate elapsed timer + staleness hint (issue 009 T3)');
+  await driveLivenessRefreshAccuracy();
 
   console.log('safeguard: a server running stale code is restarted on start');
   // occupy the port with a server that reports old code + no active sessions
