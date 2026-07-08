@@ -650,6 +650,13 @@ html, body {
   border-bottom-left-radius: 0;
 }
 
+/* the caret is not its own block: hovering anywhere in the control recolors
+   both halves together, so the divider reads as one button, not a seam */
+.split-btn:hover #submit-btn:not(.approve),
+.split-btn:hover #submit-btn:not(.approve) + .split-caret {
+  background: var(--accent-hover);
+}
+
 /* approve mode recolors both halves to the terminal "success" action */
 #submit-btn.approve,
 #submit-btn.approve + .split-caret {
@@ -657,8 +664,8 @@ html, body {
   border-color: var(--success);
   color: var(--on-success);
 }
-#submit-btn.approve:hover,
-#submit-btn.approve + .split-caret:hover { background: var(--success-hover); }
+.split-btn:hover #submit-btn.approve,
+.split-btn:hover #submit-btn.approve + .split-caret { background: var(--success-hover); }
 
 .split-menu {
   position: absolute;

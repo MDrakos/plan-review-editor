@@ -2987,6 +2987,62 @@ async function main() {
     /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css.body),
     'missing [hidden] { display: none !important }'
   );
+  {
+    // issue 011 #5: the split-button caret must not read as its own block —
+    // hovering anywhere in .split-btn should recolor both halves together,
+    // in both the default and approve-mode colors, and the hairline divider
+    // (the one thing that should still visually separate them) must remain.
+    const rules = [...css.body.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+      selector: m[1].replace(/\s+/g, ' ').trim(),
+      body: m[2],
+    }));
+    const findRule = (pred) => rules.find(pred);
+    const hasClass = (sel, cls) => sel.split(',').some((part) => part.includes(cls));
+
+    const dividerRule = findRule((r) => hasClass(r.selector, '.split-caret') && !r.selector.includes(':hover'));
+    check(
+      'split-caret keeps a border-left hairline divider',
+      !!dividerRule && /border-left:\s*1px solid/.test(dividerRule.body),
+      'no border-left hairline found on .split-caret'
+    );
+
+    const defaultHoverRule = findRule(
+      (r) =>
+        hasClass(r.selector, '.split-btn:hover') &&
+        r.selector.includes('#submit-btn') &&
+        hasClass(r.selector, '.split-caret') &&
+        !r.selector.includes('#submit-btn.approve')
+    );
+    check(
+      'hovering the split button recolors submit-btn and the caret together (default mode)',
+      !!defaultHoverRule && /background:\s*var\(--accent-hover\)/.test(defaultHoverRule.body),
+      'no shared .split-btn:hover rule recoloring both #submit-btn and .split-caret'
+    );
+
+    const approveHoverRule = findRule(
+      (r) =>
+        hasClass(r.selector, '.split-btn:hover') &&
+        r.selector.includes('#submit-btn.approve') &&
+        hasClass(r.selector, '.split-caret')
+    );
+    check(
+      'hovering the split button recolors submit-btn and the caret together (approve mode)',
+      !!approveHoverRule && /background:\s*var\(--success-hover\)/.test(approveHoverRule.body),
+      'no shared .split-btn:hover rule recoloring both halves in approve mode'
+    );
+
+    const approveRestRule = findRule(
+      (r) =>
+        !r.selector.includes(':hover') &&
+        r.selector.includes('#submit-btn.approve') &&
+        hasClass(r.selector, '.split-caret')
+    );
+    check(
+      'approve-mode recolors the whole control at rest, not just #submit-btn',
+      !!approveRestRule && /background:\s*var\(--success\)/.test(approveRestRule.body),
+      'no rule recoloring both #submit-btn.approve and its .split-caret at rest'
+    );
+  }
   const app = await text('/app.js');
   check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
   check(
