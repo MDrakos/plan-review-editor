@@ -556,10 +556,12 @@ function connectEvents() {
 const answerText = (v) => (Array.isArray(v) ? v.join(', ') : v || '');
 const hasAnswer = (v) => (Array.isArray(v) ? v.length > 0 : !!v);
 
-// grows a textarea to fit its content, collapsing back down when text is removed
+// grows a textarea to fit its content, collapsing back down when text is removed.
+// scrollHeight excludes border, but box-sizing:border-box height includes it —
+// add back offsetHeight - clientHeight (the border width) or the bottom line clips.
 const autoGrow = (el) => {
   el.style.height = 'auto';
-  el.style.height = `${el.scrollHeight}px`;
+  el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
 };
 
 function bindChoices() {

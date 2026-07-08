@@ -1021,15 +1021,12 @@ mark.hl.active { background: var(--mark-active); }
   min-height: 30px;
   resize: none;
   overflow: hidden;
-  box-sizing: border-box;
+  word-wrap: break-word;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 8px;
   font: inherit;
   font-size: 14px;
-  line-height: 1.4;
-  white-space: pre-wrap;
-  word-wrap: break-word;
   background: var(--surface);
   color: var(--ink);
 }
