@@ -2992,12 +2992,22 @@ async function main() {
     // hovering anywhere in .split-btn should recolor both halves together,
     // in both the default and approve-mode colors, and the hairline divider
     // (the one thing that should still visually separate them) must remain.
-    const rules = [...css.body.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    const cssNoComments = css.body.replace(/\/\*[\s\S]*?\*\//g, '');
+    const rules = [...cssNoComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
       selector: m[1].replace(/\s+/g, ' ').trim(),
       body: m[2],
     }));
     const findRule = (pred) => rules.find(pred);
     const hasClass = (sel, cls) => sel.split(',').some((part) => part.includes(cls));
+    // The hover-sync condition must be scoped to the two buttons themselves via
+    // :has(#submit-btn:hover, .split-caret:hover) — NOT a bare .split-btn:hover,
+    // which would also fire while hovering the open dropdown menu (#submit-menu
+    // is a .split-btn descendant too, see public/index.html), falsely recoloring
+    // the button while the pointer is over a menu item instead.
+    const hasSyncedHoverCondition = (sel) => {
+      const m = sel.match(/\.split-btn:has\(([^)]*)\)/);
+      return !!m && /#submit-btn:hover/.test(m[1]) && /\.split-caret:hover/.test(m[1]);
+    };
 
     const dividerRule = findRule((r) => hasClass(r.selector, '.split-caret') && !r.selector.includes(':hover'));
     check(
@@ -3006,29 +3016,34 @@ async function main() {
       'no border-left hairline found on .split-caret'
     );
 
+    check(
+      'split-btn hover sync is not a bare .split-btn:hover (that also fires when hovering the open dropdown menu)',
+      !/\.split-btn:hover\b/.test(cssNoComments),
+      'found a bare .split-btn:hover selector — also matches hovering .split-menu, a .split-btn descendant'
+    );
+
     const defaultHoverRule = findRule(
       (r) =>
-        hasClass(r.selector, '.split-btn:hover') &&
-        r.selector.includes('#submit-btn') &&
-        hasClass(r.selector, '.split-caret') &&
-        !r.selector.includes('#submit-btn.approve')
+        hasSyncedHoverCondition(r.selector) &&
+        r.selector.includes('#submit-btn:not(.approve)') &&
+        hasClass(r.selector, '.split-caret')
     );
     check(
-      'hovering the split button recolors submit-btn and the caret together (default mode)',
+      'hovering submit-btn or the caret recolors both together (default mode), scoped away from the menu',
       !!defaultHoverRule && /background:\s*var\(--accent-hover\)/.test(defaultHoverRule.body),
-      'no shared .split-btn:hover rule recoloring both #submit-btn and .split-caret'
+      'no :has()-scoped rule recoloring both #submit-btn and .split-caret on hover'
     );
 
     const approveHoverRule = findRule(
       (r) =>
-        hasClass(r.selector, '.split-btn:hover') &&
+        hasSyncedHoverCondition(r.selector) &&
         r.selector.includes('#submit-btn.approve') &&
         hasClass(r.selector, '.split-caret')
     );
     check(
-      'hovering the split button recolors submit-btn and the caret together (approve mode)',
+      'hovering submit-btn or the caret recolors both together (approve mode), scoped away from the menu',
       !!approveHoverRule && /background:\s*var\(--success-hover\)/.test(approveHoverRule.body),
-      'no shared .split-btn:hover rule recoloring both halves in approve mode'
+      'no :has()-scoped rule recoloring both halves in approve mode on hover'
     );
 
     const approveRestRule = findRule(
