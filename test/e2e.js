@@ -2142,6 +2142,65 @@ async function main() {
   );
   await cli('stop', '--session', lc8.id);
 
+  console.log('issue 008: a resolution survives even after every raw pick is cleared (no silent loss)');
+  const nl8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${nl8.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2', reason: 'agreed' } },
+  });
+  // Both reviewers now clear their own picks — the shared resolution must still travel.
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'A', comments: [], choices: {} });
+  await browser(`/api/review-state?session=${nl8.id}`, { reviewerId: 'B', comments: [], choices: {} });
+  const nl8Wait = cli('wait', '--session', nl8.id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${nl8.id}`, { reviewerId: 'A', comments: [], choices: {}, note: 'go' });
+  const nl8Ev = await nl8Wait;
+  check(
+    'a resolved choice with no remaining picks still emits { resolved, picks:{} } (spec: no silent loss)',
+    nl8Ev.type === 'submit' &&
+      nl8Ev.choices.pick && nl8Ev.choices.pick.resolved && nl8Ev.choices.pick.resolved.option === 'A2' &&
+      nl8Ev.choices.pick.resolved.reason === 'agreed' &&
+      nl8Ev.choices.pick.picks && Object.keys(nl8Ev.choices.pick.picks).length === 0,
+    JSON.stringify(nl8Ev.choices)
+  );
+  await cli('stop', '--session', nl8.id);
+
+  console.log('issue 008: a __proto__ / non-string resolve intent is ignored, never crashes the request');
+  const pp8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${pp8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  // A crafted __proto__ key must not 500 or pollute; a non-string / array option must be ignored.
+  // JSON.parse is used so the payload carries a genuine own "__proto__" key (an object
+  // literal would set the prototype and drop it) — this is the hostile-direct-POST case.
+  const ppResp = await browser(`/api/review-state?session=${pp8.id}`, {
+    reviewerId: 'A', comments: [],
+    resolutions: JSON.parse('{"__proto__":"A1","pick":42,"other":["A1","A2"]}'),
+  });
+  const pp8State = await browser(`/api/state?session=${pp8.id}`);
+  check(
+    'a __proto__ key + non-string option are ignored (200, no resolution recorded, no pollution)',
+    ppResp.status === 200 &&
+      Object.keys(pp8State.data.review.resolutions).length === 0 &&
+      pp8State.data.review.choices.pick.A === 'A1',
+    `status=${ppResp.status} resolutions=${JSON.stringify(pp8State.data.review.resolutions)}`
+  );
+  await cli('stop', '--session', pp8.id);
+
+  console.log('issue 008: the resolution reason is trimmed server-side');
+  const tr8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${tr8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${tr8.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${tr8.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2', reason: '  spaced out  ' } },
+  });
+  const tr8State = await browser(`/api/state?session=${tr8.id}`);
+  check(
+    'the stored reason is trimmed',
+    tr8State.data.review.resolutions.pick && tr8State.data.review.resolutions.pick.reason === 'spaced out',
+    JSON.stringify(tr8State.data.review.resolutions.pick)
+  );
+  await cli('stop', '--session', tr8.id);
+
   console.log('multi-reviewer: reviewer chat carries an author, role stays "reviewer"');
   const ch = await cli('start', docA, '--no-open');
   await browser(`/api/chat?session=${ch.id}`, { text: 'who owns this?', reviewerId: 'A', reviewerName: 'Ada' });
@@ -2301,6 +2360,29 @@ async function main() {
     JSON.stringify(carried.data.review)
   );
   await cli('stop', '--session', cy.id);
+
+  console.log('issue 008: a re-present carries a choice resolution forward (persists until cleared)');
+  const rcDoc = path.join(dir, 'planreview-e2e-carry-res.md');
+  const rcChoice = '\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n';
+  fs.writeFileSync(rcDoc, '# Carry Res\n\nShared body line.' + rcChoice);
+  const rcr = await cli('start', rcDoc, '--no-open');
+  await browser(`/api/review-state?session=${rcr.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${rcr.id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${rcr.id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2', reason: 'carry me' } },
+  });
+  fs.writeFileSync(rcDoc, '# Carry Res\n\nShared body line.\n\nA reworked addition.' + rcChoice);
+  await cli('present', rcDoc, '--session', rcr.id);
+  const rcCarried = await browser(`/api/state?session=${rcr.id}`);
+  check(
+    'loadDoc carries the resolution (option + reason + attribution) forward across a re-present',
+    rcCarried.data.review.resolutions.pick &&
+      rcCarried.data.review.resolutions.pick.option === 'A2' &&
+      rcCarried.data.review.resolutions.pick.by === 'A' &&
+      rcCarried.data.review.resolutions.pick.reason === 'carry me',
+    JSON.stringify(rcCarried.data.review.resolutions)
+  );
+  await cli('stop', '--session', rcr.id);
 
   console.log('version history: bounded ring, arbitrary-pair diff, removals across a span');
   const dv = path.join(dir, 'planreview-e2e-versions.md');
@@ -2930,6 +3012,27 @@ async function main() {
   check(
     'client shows per-option who-picked badges and a muted disagree hint on choices',
     /choice-picks/.test(app.body) && /choice-disagree/.test(app.body)
+  );
+  // issue 008: resolve control — source-regex smoke checks (no DOM rig, matching the suite's convention).
+  check(
+    'client renders a resolve-to control (renderResolution + choice-resolve class)',
+    /function renderResolution\(/.test(app.body) && /choice-resolve/.test(app.body)
+  );
+  check(
+    'the resolve control is gated on divergence or an existing resolution (no-friction guard)',
+    /if \(!resolution && !divergent\)/.test(app.body)
+  );
+  check(
+    'resolve/change/clear intent is posted through syncReview (set + null clear)',
+    /syncReview\(\{ \[id\]: intent \}\)/.test(app.body) && /postResolution\(null\)/.test(app.body)
+  );
+  check(
+    'the resolved banner colors the resolver name via the shared --author-color convention',
+    /setProperty\('--author-color', authorColor\(resolution\.by\)\)/.test(app.body)
+  );
+  check(
+    'css styles the resolve control (choice-resolve + choice-resolved)',
+    /\.choice-resolve\b/.test(css.body) && /\.choice-resolved\b/.test(css.body)
   );
   check('client shows the reviewer name on chat lines', /chat-author/.test(app.body));
   // presence (issue 007): identity rides the SSE connection; a presence handler + strip render.

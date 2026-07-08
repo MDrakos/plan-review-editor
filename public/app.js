@@ -588,22 +588,19 @@ function bindChoices() {
     const picksEl = document.createElement('div');
     picksEl.className = 'choice-picks';
     block.appendChild(picksEl);
-    const renderPicks = () => {
+    // Count who picked each option label across ALL reviewers → Map<label, reviewerId[]>,
+    // skipping empty/non-string labels (FM-10). Shared by renderPicks (badges + the
+    // "reviewers disagree" hint) and the 008 resolve control (divergence = >1 label), so
+    // the divergence rule lives in ONE place. Guards the shape (DSM-13): a pre-004
+    // restored session can hold a legacy scalar/array here until its first post-restore
+    // sync; Object.entries on a string would yield per-character garbage. Only a plain
+    // nested object counts.
+    const pickCounts = () => {
       const byReviewer = state.choices[id];
-      // Guard the shape (DSM-13): a pre-004 restored session can still hold a legacy
-      // scalar/array here until its first post-restore sync; Object.entries on a string
-      // would yield per-character garbage badges. Only a plain nested object renders.
       const entries =
         byReviewer && typeof byReviewer === 'object' && !Array.isArray(byReviewer)
           ? Object.entries(byReviewer) // [reviewerId, option]
           : [];
-      picksEl.innerHTML = '';
-      if (!entries.length) {
-        picksEl.hidden = true;
-        return;
-      }
-      picksEl.hidden = false;
-      // count per option label, skipping empty/non-string labels (FM-10)
       const counts = new Map();
       for (const [rid, opt] of entries) {
         for (const label of Array.isArray(opt) ? opt : [opt]) {
@@ -612,6 +609,17 @@ function bindChoices() {
           counts.get(label).push(rid);
         }
       }
+      return counts;
+    };
+
+    const renderPicks = () => {
+      const counts = pickCounts();
+      picksEl.innerHTML = '';
+      if (!counts.size) {
+        picksEl.hidden = true;
+        return;
+      }
+      picksEl.hidden = false;
       for (const [label, rids] of counts) {
         const tag = document.createElement('span');
         tag.className = 'choice-pick';
@@ -637,20 +645,6 @@ function bindChoices() {
     block.appendChild(resolveEl);
     let resolveEditing = false; // true while the picker is open on an already-resolved block
 
-    // The set of distinct non-empty option labels currently picked (across reviewers) —
-    // >1 means divergent, mirroring renderPicks' own disagree condition.
-    const distinctLabels = () => {
-      const byReviewer = state.choices[id];
-      const vals =
-        byReviewer && typeof byReviewer === 'object' && !Array.isArray(byReviewer)
-          ? Object.values(byReviewer)
-          : [];
-      const labels = new Set();
-      for (const opt of vals)
-        for (const l of Array.isArray(opt) ? opt : [opt]) if (typeof l === 'string' && l !== '') labels.add(l);
-      return labels;
-    };
-
     // Optimistically apply the intent locally, then POST it. intent: {option, reason?}
     // to set/change, or null to clear. syncReview carries only this choice's intent.
     const postResolution = (intent) => {
@@ -664,7 +658,7 @@ function bindChoices() {
     function renderResolution() {
       resolveEl.innerHTML = '';
       const resolution = state.resolutions[id];
-      const divergent = distinctLabels().size > 1;
+      const divergent = pickCounts().size > 1;
       // No-friction guard: show nothing unless the block is divergent or already resolved.
       if (!resolution && !divergent) {
         resolveEl.hidden = true;
@@ -684,7 +678,9 @@ function bindChoices() {
         const by = document.createElement('span');
         by.className = 'choice-resolved-by';
         by.textContent = ` — by ${authorLabel({ id: resolution.by, name: resolution.byName })}`;
-        if (resolution.by) by.style.color = authorColor(resolution.by);
+        // Color by reviewerId via --author-color, the same custom-property convention
+        // chat/comment/presence attribution uses (the .choice-resolved-by CSS reads it).
+        if (resolution.by) by.style.setProperty('--author-color', authorColor(resolution.by));
         line.append(lead, opt, by);
         resolveEl.appendChild(line);
         if (resolution.reason) {

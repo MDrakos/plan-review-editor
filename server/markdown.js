@@ -86,7 +86,9 @@ function parseChoiceSpecs(markdown) {
     i++; // closing fence
     if (fence[1] !== 'choice') continue;
     const spec = parseChoiceSpec(body.join('\n'));
-    if (spec.id && spec.options.length)
+    // Skip a reserved id like "__proto__": `out[spec.id] = …` would set the map's
+    // prototype instead of a real entry, silently corrupting choiceSpecs.
+    if (spec.id && spec.id !== '__proto__' && spec.options.length)
       out[spec.id] = { options: spec.options, multi: spec.multi, other: spec.other };
   }
   return out;
