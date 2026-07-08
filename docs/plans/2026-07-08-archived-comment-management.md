@@ -289,6 +289,14 @@ Conformance mode — the story (issue 010's 3 acceptance criteria) and the FMEA/
 - **Scope boundary:** none — test-only addition, no production code changed
 - **Exercised by:** `driveLivenessWiring()`, a third fixture alongside FX-1/FX-2
 
+### FX-8 — clearArchived refuses to act once status is no longer 'reviewing', even if its button is stale in the DOM
+- **Mode:** conformance
+- **Inputs:** `state.status = 'working'`, `state.comments` containing the reviewer's own archived comment, then call `clearArchived()` directly (simulating a click on a button that rendered while `'reviewing'` and never got torn down)
+- **Expected:** `state.comments` unchanged (same reference), no sync fired
+- **Source:** pre-PR `logic` reviewer (Important finding: `archivedSection()`'s render-time gate is necessary but not sufficient — `setStatus()` never re-renders the sidebar, so a button rendered while reviewing stays present and bound through a status flip to `'working'`; the code's own comment claimed this was closed when it wasn't). Fixed by adding `if (state.status !== 'reviewing') return;` as the first line of `clearArchived()` itself — the same defense-in-depth pattern `submitReview()`/`approveReview()` already use (`public/app.js:1076`, `:1091`).
+- **Scope boundary:** `clearArchived()`'s new guard clause only
+- **Exercised by:** `driveLivenessWiring()`, a fourth fixture; note this fixture requires resetting `state.status = 'reviewing'` at the top of the whole archived-comment test block first, since the preceding liveness checks leave it as `'ended'`
+
 ---
 
 ## Spec coverage check

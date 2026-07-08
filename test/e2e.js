@@ -379,12 +379,16 @@ async function driveLivenessWiring() {
   // Drive clearArchived() against the real, loaded app.js state (not just a
   // source regex) so the "own comments only" scoping and the "active comments
   // untouched" invariant are actually exercised, not merely asserted to exist.
+  // The liveness checks above leave state.status as 'ended' — clearArchived()
+  // now refuses to act outside 'reviewing' (see its own guard), so every
+  // fixture in this section needs an explicit reset first.
   // r3 carries an EXPLICIT author matching this tab's reviewer id — the shape
   // every real comment gets (app.js stamps `author: author()` on creation) —
   // so this exercises ownComment()'s `c.author.id === reviewer.id` branch, not
   // just its `!c.author` legacy fallback (which r1/r2 alone would only cover).
   vm.runInContext(
-    `state.comments = [
+    `state.status = 'reviewing';
+    state.comments = [
       { id: 'a1', quote: 'q1', text: 'active', archived: false },
       { id: 'r1', quote: 'q2', text: 'mine, archived', archived: true },
       { id: 'r2', quote: 'q3', text: 'mine too, archived', archived: true },
@@ -449,6 +453,31 @@ async function driveLivenessWiring() {
     afterPeerOnly === beforePeerOnly && fetchCalls === beforePeerOnlyFetch,
     `sameRef=${afterPeerOnly === beforePeerOnly} Δfetch=${fetchCalls - beforePeerOnlyFetch}`
   );
+
+  // Race (pre-PR logic review finding): the "Clear all" button, once rendered
+  // while reviewing, stays in the DOM and bound through a status flip to
+  // 'working' — setStatus() (app.js:144) never re-renders the sidebar, neither
+  // does submitReview() or the 'status' SSE handler. A stale click could land
+  // after the flip. clearArchived() must refuse to act once status is no
+  // longer 'reviewing', regardless of what a stale button click carries.
+  vm.runInContext(
+    `state.comments = [
+      { id: 'a1', quote: 'q1', text: 'active', archived: false },
+      { id: 'r1', quote: 'q2', text: 'mine, archived', archived: true },
+    ];
+    state.status = 'working';`,
+    ctx
+  );
+  const beforeWorking = vm.runInContext('state.comments', ctx);
+  const beforeWorkingFetch = fetchCalls;
+  vm.runInContext('clearArchived()', ctx);
+  const afterWorking = vm.runInContext('state.comments', ctx);
+  check(
+    'clearArchived: refuses to act while status is not "reviewing" (closes the stale-button race)',
+    afterWorking === beforeWorking && fetchCalls === beforeWorkingFetch,
+    `sameRef=${afterWorking === beforeWorking} Δfetch=${fetchCalls - beforeWorkingFetch}`
+  );
+  vm.runInContext(`state.status = 'reviewing';`, ctx); // restore in case ctx is inspected further
 }
 
 // ---------- liveness refresh accuracy (issue 009 T3) ----------

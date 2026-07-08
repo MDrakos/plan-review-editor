@@ -866,7 +866,14 @@ function archivedSection(archived) {
 // the same author-scoped sync path as an individual dismiss (deleteComment):
 // filter locally, then let syncReview()/mergeComments do the rest, so a peer's
 // stale tab can never resurrect what this reviewer just cleared.
+//
+// The status re-check below (not just the render-time gate in archivedSection())
+// is load-bearing: setStatus() never re-renders the sidebar, so a "Clear all"
+// button rendered while reviewing stays in the DOM and bound through a status
+// flip to 'working' — a stale click must still be refused here, on data that
+// may have re-anchored server-side since the last render (pre-PR logic finding).
 function clearArchived() {
+  if (state.status !== 'reviewing') return;
   const keep = state.comments.filter((c) => !(c.archived && ownComment(c)));
   if (keep.length === state.comments.length) return;
   state.comments = keep;
