@@ -454,12 +454,14 @@ async function persistenceChecks() {
       'chat',
       'doc',
       'id',
+      'lastAgentActivity',
       'progress',
       'queue',
       'review',
       'status',
       'submissions',
       'touched',
+      'workingSince',
     ];
     check(
       'persist: the on-disk file is exactly the serializable allowlist (no live handles)',
@@ -532,6 +534,17 @@ async function persistenceChecks() {
       'kill -9 restore: the restored session has no live clients (empty sse/waiters)',
       restored.data.clients === 0,
       `clients=${restored.data.clients}`
+    );
+    check(
+      'kill -9 restore: lastAgentActivity and workingSince round-trip exactly (set before the crash)',
+      typeof before.lastAgentActivity === 'number' &&
+        typeof before.workingSince === 'number' &&
+        restored.data.lastAgentActivity === before.lastAgentActivity &&
+        restored.data.workingSince === before.workingSince,
+      JSON.stringify({
+        before: { lastAgentActivity: before.lastAgentActivity, workingSince: before.workingSince },
+        after: { lastAgentActivity: restored.data.lastAgentActivity, workingSince: restored.data.workingSince },
+      })
     );
     const page = await pageText(`/s/${id}`);
     check('kill -9 restore: /s/<id> resolves after restart', page.ok);
@@ -640,6 +653,39 @@ async function persistenceChecks() {
     );
     await stop(gid);
     await sleep(300);
+
+    // ----- P4b: FM-1 restore guard — a malformed/missing liveness field falls back to null -----
+    console.log('persistence: a malformed lastAgentActivity type and a missing workingSince fall back to null (FM-1)');
+    await killP();
+    const stateDir4b = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-badtypes-'));
+    const badId = 'badtypes1';
+    fs.writeFileSync(
+      path.join(stateDir4b, `${badId}.json`),
+      JSON.stringify({
+        id: badId,
+        status: 'reviewing',
+        doc: { path: null, title: 'BadTypes', html: '<p>Hi</p>', version: 1, blocks: ['<p>Hi</p>'], history: [] },
+        review: { comments: [], choices: {} },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+        lastAgentActivity: 'yesterday', // wrong type — must never pass through
+        // workingSince intentionally omitted entirely
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir4b });
+    check('persist: server up (bad-types case)', await waitHealth(true));
+    const badState = await p(`/api/state?session=${badId}`);
+    check(
+      'FM-1: a wrong-typed lastAgentActivity and a missing workingSince both restore as null, not a crash',
+      badState.status === 200 && badState.data.lastAgentActivity === null && badState.data.workingSince === null,
+      JSON.stringify(badState.status === 200 ? { lastAgentActivity: badState.data.lastAgentActivity, workingSince: badState.data.workingSince } : badState.status)
+    );
+    await stop(badId);
+    await sleep(300);
+    fs.rmSync(stateDir4b, { recursive: true, force: true });
 
     // ----- P5: PLANREVIEW_PERSIST=0 does no disk I/O -----
     console.log('persistence: PLANREVIEW_PERSIST=0 does no disk I/O');
@@ -1176,6 +1222,11 @@ async function main() {
     apState.data.status === 'done',
     apState.data.status
   );
+  check(
+    'FM-5: approve never sets workingSince (only submit does)',
+    apState.data.workingSince === null,
+    JSON.stringify(apState.data.workingSince)
+  );
   const apEv = await cli('wait', '--session', ap.id, '--timeout', '3');
   check(
     'agent gets an approve event carrying the final bundle',
@@ -1208,6 +1259,66 @@ async function main() {
     JSON.stringify({ status: afterPresent.data.status, progress: afterPresent.data.progress })
   );
   await cli('stop', '--session', pr.id);
+
+  console.log('liveness tracking: server-side lastAgentActivity/workingSince (issue 009)');
+  const lt = await cli('start', docA, '--no-open');
+  const ltState0 = await browser(`/api/state?session=${lt.id}`);
+  check(
+    // start's own loadDoc call already bumps lastAgentActivity (it's shared with
+    // /agent/present, and the initial present is itself agent activity); workingSince
+    // stays null until the first submit.
+    'a fresh session starts with lastAgentActivity set by the initial present, workingSince still null',
+    typeof ltState0.data.lastAgentActivity === 'number' &&
+      Math.abs(Date.now() - ltState0.data.lastAgentActivity) < 5000 &&
+      ltState0.data.workingSince === null,
+    JSON.stringify({ lastAgentActivity: ltState0.data.lastAgentActivity, workingSince: ltState0.data.workingSince })
+  );
+
+  await cli('progress', 'doing something', '--session', lt.id);
+  const ltAfterProgress = await browser(`/api/state?session=${lt.id}`);
+  check(
+    '/agent/progress bumps lastAgentActivity to ~now',
+    typeof ltAfterProgress.data.lastAgentActivity === 'number' &&
+      Math.abs(Date.now() - ltAfterProgress.data.lastAgentActivity) < 5000,
+    JSON.stringify(ltAfterProgress.data.lastAgentActivity)
+  );
+
+  const beforeWait = ltAfterProgress.data.lastAgentActivity;
+  await sleep(20);
+  await cli('wait', '--session', lt.id, '--timeout', '1'); // times out (no queued event) but still bumps
+  const ltAfterWait = await browser(`/api/state?session=${lt.id}`);
+  check(
+    '/agent/wait bumps lastAgentActivity on receipt, even when it times out',
+    typeof ltAfterWait.data.lastAgentActivity === 'number' && ltAfterWait.data.lastAgentActivity >= beforeWait,
+    JSON.stringify(ltAfterWait.data.lastAgentActivity)
+  );
+
+  await browser(`/api/submit?session=${lt.id}`, { comments: [], choices: {}, note: '' });
+  const ltAfterSubmit = await browser(`/api/state?session=${lt.id}`);
+  check(
+    'submit sets workingSince to ~now and status to working',
+    ltAfterSubmit.data.status === 'working' &&
+      typeof ltAfterSubmit.data.workingSince === 'number' &&
+      Math.abs(Date.now() - ltAfterSubmit.data.workingSince) < 5000,
+    JSON.stringify({ status: ltAfterSubmit.data.status, workingSince: ltAfterSubmit.data.workingSince })
+  );
+
+  fs.appendFileSync(docA, '\n(lt reworked)\n');
+  await cli('present', docA, '--session', lt.id);
+  const ltAfterPresent = await browser(`/api/state?session=${lt.id}`);
+  check(
+    'present clears workingSince back to null, returns to reviewing, and bumps lastAgentActivity again',
+    ltAfterPresent.data.workingSince === null &&
+      ltAfterPresent.data.status === 'reviewing' &&
+      typeof ltAfterPresent.data.lastAgentActivity === 'number' &&
+      Math.abs(Date.now() - ltAfterPresent.data.lastAgentActivity) < 5000,
+    JSON.stringify({
+      workingSince: ltAfterPresent.data.workingSince,
+      status: ltAfterPresent.data.status,
+      lastAgentActivity: ltAfterPresent.data.lastAgentActivity,
+    })
+  );
+  await cli('stop', '--session', lt.id);
 
   console.log('answered questions persist across cycles; an un-anchored comment is archived, never dropped');
   const q = await cli('start', docA, '--no-open');
@@ -1465,6 +1576,11 @@ async function main() {
     sbDraft.data.review.comments.length === 1 && sbDraft.data.review.comments[0].id === 'a1',
     JSON.stringify(sbDraft.data.review.comments)
   );
+  check(
+    'T4: workingSince is session-scoped — set by reviewer B\'s submit exactly like a single-reviewer submit',
+    typeof sbDraft.data.workingSince === 'number' && Math.abs(Date.now() - sbDraft.data.workingSince) < 5000,
+    JSON.stringify(sbDraft.data.workingSince)
+  );
   await cli('stop', '--session', sbid);
 
   console.log('single-reviewer regression: one reviewer behaves exactly as before (union = just theirs)');
@@ -1508,6 +1624,14 @@ async function main() {
     'FM-3: only ONE submit event was enqueued (agent reworks once)',
     rcEv1.type === 'submit' && rcEv2.type === 'timeout',
     JSON.stringify({ e1: rcEv1.type, e2: rcEv2.type })
+  );
+  const rcState = await browser(`/api/state?session=${rc.id}`);
+  check(
+    'FM-6: after the concurrent-submit race, workingSince is set exactly once and status is working',
+    rcState.data.status === 'working' &&
+      typeof rcState.data.workingSince === 'number' &&
+      Math.abs(Date.now() - rcState.data.workingSince) < 5000,
+    JSON.stringify({ status: rcState.data.status, workingSince: rcState.data.workingSince })
   );
   await cli('stop', '--session', rc.id);
 

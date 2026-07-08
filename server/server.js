@@ -65,6 +65,8 @@ function blankSession(id) {
   return {
     id,
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
+    lastAgentActivity: null, // ms epoch of the last server-observed agent activity (progress/wait/present); null until the agent does something
+    workingSince: null, // ms epoch when the CURRENT working round began; null when not working (set only by submit, cleared by loadDoc)
     doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [] },
     // blocks: prev render, for the per-round highlight. history: a bounded ring
     // of { version, title, markdown } (last VERSION_HISTORY), for version diffs.
@@ -124,6 +126,12 @@ function removeSession(s) {
   armIdleShutdownIfEmpty();
 }
 
+// The liveness slice of session state, shared by /api/state and every 'status'
+// SSE broadcast so a client (or a page refresh) always sees the same shape.
+function statusPayload(s) {
+  return { status: s.status, lastAgentActivity: s.lastAgentActivity, workingSince: s.workingSince };
+}
+
 function sessionSummary(s) {
   return {
     id: s.id,
@@ -155,6 +163,8 @@ function serialize(s) {
   return {
     id: s.id,
     status: s.status,
+    lastAgentActivity: s.lastAgentActivity,
+    workingSince: s.workingSince,
     doc: s.doc, // includes doc.blocks so the next present still diffs correctly
     review: s.review,
     submissions: s.submissions,
@@ -267,6 +277,8 @@ function restoreSessions() {
       if (Array.isArray(data.progress)) s.progress = data.progress;
       if (Array.isArray(data.queue)) s.queue = data.queue;
       if (typeof data.touched === 'number') s.touched = data.touched; // honor age so the sweep still reaps
+      if (typeof data.lastAgentActivity === 'number') s.lastAgentActivity = data.lastAgentActivity;
+      if (typeof data.workingSince === 'number') s.workingSince = data.workingSince;
       sessions.set(s.id, s);
     } catch (err) {
       console.error(`planreview: skipping unreadable session file ${name}: ${err.message}`);
@@ -412,6 +424,8 @@ function loadDoc(s, docPath) {
   s.review = { comments: carried, choices: s.review.choices || {} };
   s.progress = []; // the reworked doc is here — the previous round's steps are done
   s.status = 'reviewing';
+  s.lastAgentActivity = Date.now(); // shared by /agent/start and /agent/present — either counts as agent activity
+  s.workingSince = null; // whatever working round was running, if any, just ended — unconditional
   touch(s);
   persist(s); // covers /agent/start and /agent/present
 }
@@ -732,7 +746,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname === '/api/state') {
       touch(s);
       return sendJson(res, 200, {
-        status: s.status,
+        ...statusPayload(s),
         // versions: the retained version numbers (oldest→newest) the client can
         // diff between. Numbers only — the markdown source stays server-side.
         doc: {
@@ -836,7 +850,7 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && pathname === '/api/end') {
       s.status = 'ended';
       touch(s);
-      broadcast(s, 'status', { status: s.status });
+      broadcast(s, 'status', statusPayload(s));
       enqueueAgentEvent(s, { type: 'end' });
       persist(s);
       return sendJson(res, 200, { ok: true });
@@ -882,8 +896,9 @@ const server = http.createServer(async (req, res) => {
       s.submissions.push(bundle);
       s.progress = []; // start the rework round with a clean progress log
       s.status = approve ? 'done' : 'working';
+      if (!approve) s.workingSince = Date.now(); // a fresh working round begins — never set on approve (FM-5)
       touch(s);
-      broadcast(s, 'status', { status: s.status });
+      broadcast(s, 'status', statusPayload(s));
       enqueueAgentEvent(s, { type: verb, ...bundle });
       persist(s);
       return sendJson(res, 200, { ok: true });
@@ -901,6 +916,7 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'GET' && pathname === '/agent/wait') {
       touch(s);
+      s.lastAgentActivity = Date.now(); // the agent asked for the next event — that's activity, regardless of outcome
       const event = s.queue.shift();
       if (event) return sendJson(res, 200, event);
       const waiter = { res, timer: null };
@@ -965,6 +981,7 @@ const server = http.createServer(async (req, res) => {
       const msg = { text, ts: Date.now() };
       s.progress.push(msg);
       touch(s);
+      s.lastAgentActivity = Date.now();
       broadcast(s, 'progress', msg);
       persist(s);
       return sendJson(res, 200, { ok: true });
@@ -972,7 +989,7 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && pathname === '/agent/stop') {
       s.status = 'ended';
-      broadcast(s, 'status', { status: s.status });
+      broadcast(s, 'status', statusPayload(s));
       sendJson(res, 200, { ok: true });
       // let the response and the SSE frame flush, then drop just this session
       setTimeout(() => removeSession(s), 200);
