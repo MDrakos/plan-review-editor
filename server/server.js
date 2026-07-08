@@ -458,11 +458,26 @@ function reviewBundle(s, body, posterId) {
     Array.isArray(body.comments) ? body.comments : [],
     posterId
   );
-  const choices = mergeChoices(
+  const merged = mergeChoices(
     s.review.choices,
     body.choices && typeof body.choices === 'object' ? body.choices : {},
     posterId
   );
+  // 008: emit each choice as { picks, resolved? }. `picks` is 004's raw per-reviewer
+  // split; `resolved` (present only when the choice was explicitly resolved) carries
+  // the shared decision — so the agent sees the agreed value AND the underlying
+  // disagreement, with no silent loss. A resolution only lands in the map after
+  // passing option-validation at write time; the `option` guard here is just
+  // defensive against a hand-edited persisted file.
+  const resolutions = isReviewerMap(s.review.resolutions) ? s.review.resolutions : {};
+  const choices = {};
+  for (const [choiceId, picks] of Object.entries(merged)) {
+    const entry = { picks };
+    const r = resolutions[choiceId];
+    if (r && typeof r.option === 'string')
+      entry.resolved = { option: r.option, by: r.by, byName: r.byName || '', reason: r.reason || '' };
+    choices[choiceId] = entry;
+  }
   return {
     comments: structuredClone(comments),
     choices: structuredClone(choices),

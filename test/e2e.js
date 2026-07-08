@@ -1618,10 +1618,11 @@ async function main() {
   });
   const subEv = await waitSubmit;
   check(
-    'submit delivers comments, note, and a free-text Other choice value',
+    'submit delivers comments, note, and a free-text Other choice value (picks-only, unresolved)',
     subEv.type === 'submit' &&
       subEv.comments.length === 1 &&
-      subEv.choices.pick.anonymous === 'a custom third option' &&
+      subEv.choices.pick.picks.anonymous === 'a custom third option' && // 008: choices now nested under `picks`
+      !('resolved' in subEv.choices.pick) &&
       subEv.note === 'almost there'
   );
   const stWorking = await cli('status', '--session', id);
@@ -1674,6 +1675,43 @@ async function main() {
   const reApprove = await browser(`/api/approve?session=${ap.id}`, {});
   check('cannot approve again once done', reApprove.status === 409, `status=${reApprove.status}`);
   await cli('stop', '--session', ap.id);
+
+  console.log('issue 008: submit bundle carries resolved (+reason) + raw picks; unresolved carries picks only');
+  const b8 = await cli('start', docA, '--no-open');
+  const b8id = b8.id;
+  await browser(`/api/review-state?session=${b8id}`, { reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' } });
+  await browser(`/api/review-state?session=${b8id}`, { reviewerId: 'B', comments: [], choices: { pick: 'A2' } });
+  await browser(`/api/review-state?session=${b8id}`, {
+    reviewerId: 'A', reviewerName: 'Ada', comments: [], choices: { pick: 'A1' },
+    resolutions: { pick: { option: 'A2', reason: 'perf' } },
+  });
+  const b8Wait = cli('wait', '--session', b8id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${b8id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' }, note: 'go' });
+  const b8Ev = await b8Wait;
+  check(
+    'a resolved choice emits { resolved: {option, by, reason}, picks: {reviewerId: option} }',
+    b8Ev.type === 'submit' &&
+      b8Ev.choices.pick.resolved && b8Ev.choices.pick.resolved.option === 'A2' &&
+      b8Ev.choices.pick.resolved.by === 'A' && b8Ev.choices.pick.resolved.reason === 'perf' &&
+      b8Ev.choices.pick.picks.A === 'A1' && b8Ev.choices.pick.picks.B === 'A2',
+    JSON.stringify(b8Ev.choices)
+  );
+  await cli('stop', '--session', b8id);
+
+  console.log('issue 008: an unresolved choice emits picks only (no resolved key)');
+  const u8 = await cli('start', docA, '--no-open');
+  await browser(`/api/review-state?session=${u8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' } });
+  const u8Wait = cli('wait', '--session', u8.id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${u8.id}`, { reviewerId: 'A', comments: [], choices: { pick: 'A1' }, note: 'x' });
+  const u8Ev = await u8Wait;
+  check(
+    'an unresolved choice emits { picks } with no resolved key',
+    u8Ev.choices.pick && u8Ev.choices.pick.picks.A === 'A1' && !('resolved' in u8Ev.choices.pick),
+    JSON.stringify(u8Ev.choices)
+  );
+  await cli('stop', '--session', u8.id);
 
   console.log('rework progress: steps accumulate while working, clear on present');
   const pr = await cli('start', docA, '--no-open');
@@ -2110,8 +2148,9 @@ async function main() {
     JSON.stringify(sbEv.comments)
   );
   check(
-    'the submit bundle carries the full per-reviewer choice map (the conflict survives)',
-    sbEv.choices.pick && sbEv.choices.pick.A === 'A1' && sbEv.choices.pick.B === 'A2' && sbEv.note === 'consolidated',
+    'the submit bundle carries the full per-reviewer choice map under picks (the conflict survives; unresolved so no resolved key)',
+    sbEv.choices.pick && sbEv.choices.pick.picks.A === 'A1' && sbEv.choices.pick.picks.B === 'A2' &&
+      !('resolved' in sbEv.choices.pick) && sbEv.note === 'consolidated',
     JSON.stringify(sbEv.choices)
   );
   // The submit must NOT have mutated the shared draft (mirror today's behavior): the
@@ -2141,12 +2180,13 @@ async function main() {
   });
   const oneEv = await oneWait;
   check(
-    'single reviewer: bundle is exactly their one comment + a one-entry choice map',
+    'single reviewer: bundle is exactly their one comment + a one-entry picks map (unresolved)',
     oneEv.type === 'submit' &&
       oneEv.comments.length === 1 &&
       oneEv.comments[0].id === 's1' &&
-      Object.keys(oneEv.choices.pick).length === 1 &&
-      oneEv.choices.pick.solo === 'A1',
+      Object.keys(oneEv.choices.pick.picks).length === 1 &&
+      oneEv.choices.pick.picks.solo === 'A1' &&
+      !('resolved' in oneEv.choices.pick),
     JSON.stringify({ comments: oneEv.comments, choices: oneEv.choices })
   );
   await cli('stop', '--session', one.id);
