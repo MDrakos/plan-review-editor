@@ -505,10 +505,6 @@ html, body {
   gap: 2px;
 }
 
-.card-author-row {
-  margin: 0 48px 4px 0; /* clear the edit + delete buttons, same as the blockquote below */
-}
-
 .icon-btn {
   border: none;
   background: none;
@@ -1034,6 +1030,9 @@ mark.hl.active { background: var(--mark-active); }
 .choice-other-text:focus { outline: 2px solid var(--accent); border-color: transparent; }
 
 /* ---------- multi-reviewer attribution ---------- */
+.card-author-row {
+  margin: 0 48px 4px 0; /* clear the edit + delete buttons, same as the blockquote below */
+}
 .author-badge {
   display: inline-block;
   font-size: 11px;
