@@ -981,7 +981,7 @@ const server = http.createServer(async (req, res) => {
       const msg = { text, ts: Date.now() };
       s.progress.push(msg);
       touch(s);
-      s.lastAgentActivity = Date.now();
+      s.lastAgentActivity = msg.ts;
       broadcast(s, 'progress', msg);
       persist(s);
       return sendJson(res, 200, { ok: true });
