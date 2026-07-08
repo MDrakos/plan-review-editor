@@ -448,6 +448,30 @@ async function driveLivenessRefreshAccuracy() {
       elapsed.textContent === '0:12' && elapsed.textContent !== '0:00',
       elapsed.textContent
     );
+
+    // Extend scenario 1 to prove lastSignalTs is really Math.max(lastAgentActivity,
+    // workingSince) rather than workingSince alone. lastAgentActivity (1_005_000) is
+    // 5s AFTER workingSince (1_000_000), so the two candidate staleness deadlines
+    // land 5s apart: since-alone would cross the 40s threshold at now=1_040_000;
+    // the correct max-based lastSignalTs (1_005_000) crosses it 5s later, at
+    // now=1_045_000. Landing the clock in between (1_042_000) is hidden under the
+    // correct implementation but would already show under a since-alone regression
+    // that silently dropped the Math.max computation — the exact gap this closes.
+    const stale = h.getEl('working-stale');
+    h.clock.now = workingSince + 42000; // 1_042_000: past since-based deadline, before last-based deadline
+    h.pump();
+    check(
+      'liveness refresh: Math.max(last, since) — hint stays hidden between the since-only and last-based deadlines',
+      stale.hidden === true,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+    h.clock.now = workingSince + 46000; // 1_046_000: past the correct (last-based) deadline too
+    h.pump();
+    check(
+      'liveness refresh: Math.max(last, since) — hint finally appears once the last-based deadline passes',
+      stale.hidden === false,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
   }
 
   // Scenario 2 (FM-4): a malformed activity payload never produces "NaN s".
@@ -546,6 +570,48 @@ async function driveLivenessRefreshAccuracy() {
       'liveness refresh FM-2/FM-11: a stray workingSince on a terminal status is inert — clean teardown',
       h.timerCount() === 0 && elapsed.textContent === '' && stale.hidden === true,
       JSON.stringify({ timers: h.timerCount(), elapsed: elapsed.textContent, staleHidden: stale.hidden })
+    );
+  }
+
+  // Scenario 5 (FM-4 mixed payload): the failure mode Number.isFinite actually
+  // guards against is a MIXED payload — one field a real timestamp, the other
+  // garbage — not both-garbage (scenario 2 above; both-garbage happens to land on
+  // NaN either way, since formatElapsed/stalenessHint already clamp NaN, so it
+  // passes identically with or without the guard and proves nothing on its own).
+  // With a naive `??`/`||` fallback, Math.max(garbageString, validNumber) still
+  // coerces to NaN (Math.max always Numbers both args), which would permanently
+  // poison lastSignalTs for the rest of the round: Date.now() - NaN is always NaN,
+  // and stalenessHint's `!(NaN >= threshold)` is true, so it returns null forever
+  // — the staleness advisory would be silently, permanently disabled. The correct
+  // Number.isFinite guard instead falls the garbage field back to `since`, keeping
+  // lastSignalTs a real number so staleness detection keeps working.
+  {
+    const now = 5_000_000;
+    const workingSince = now - 5000; // a real round already 5s underway
+    const fakeState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'working',
+      workingSince,
+      lastAgentActivity: 'garbage', // the other field is garbage — the mixed case
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+    };
+    const h = bootLivenessHarness(fakeState, now);
+    await h.flush();
+    const elapsed = h.getEl('working-elapsed');
+    const stale = h.getEl('working-stale');
+    check(
+      'liveness refresh FM-4 mixed: a valid workingSince paints the real elapsed time (0:05), proving it was not discarded',
+      elapsed.textContent === '0:05',
+      elapsed.textContent
+    );
+    h.clock.now = workingSince + 40000; // now - workingSince === 40000: past the staleness threshold
+    h.pump();
+    check(
+      'liveness refresh FM-4 mixed: garbage lastAgentActivity does not poison Math.max into NaN — the staleness hint still fires',
+      stale.hidden === false && !/NaN/.test(stale.textContent),
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
     );
   }
 }
