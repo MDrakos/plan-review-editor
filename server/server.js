@@ -42,6 +42,13 @@ const PERSIST_DEBOUNCE_MS = Number(process.env.PLANREVIEW_PERSIST_MS || 250);
 // be diffed against.
 const VERSION_HISTORY = Number(process.env.PLANREVIEW_VERSION_HISTORY || 10);
 
+// Presence (issue 007). How long to coalesce join/leave churn before broadcasting the
+// roster once, and the max distinct reviewers tracked per session — a bound so a runaway
+// client (or a buggy script opening many connections with fresh ids) can't grow the
+// roster Map, and the frame it re-broadcasts, without limit.
+const PRESENCE_DEBOUNCE_MS = Number(process.env.PLANREVIEW_PRESENCE_MS || 200);
+const MAX_PRESENCE = Number(process.env.PLANREVIEW_MAX_PRESENCE || 200);
+
 // ---------- sessions ----------
 //
 // Every agent's plan lives in its own session, keyed by a short id. Nothing is
@@ -66,6 +73,11 @@ function blankSession(id) {
     chat: [], // {role: 'reviewer' | 'agent', text, ts}
     progress: [], // {text, ts} steps the agent reports while reworking
     sse: new Set(), // browser tabs watching this session (never persisted)
+    // Live roster of who is viewing, keyed by reviewerId: one entry per reviewer, N
+    // open tabs. Derived state — never serialized (a restart comes back empty until
+    // tabs reconnect). presenceTimer debounces the join/leave broadcast.
+    presence: new Map(),
+    presenceTimer: null,
     queue: [], // agent events awaiting a wait
     waiters: [], // {res, timer} in-flight /agent/wait long-polls (never persisted)
     touched: Date.now(),
@@ -106,6 +118,7 @@ function removeSession(s) {
     }
   }
   s.sse.clear();
+  clearTimeout(s.presenceTimer); // no dangling presence-broadcast timer on a torn-down session
   sessions.delete(s.id);
   deletePersisted(s); // cancel any pending flush + delete the file (no resurrection)
   armIdleShutdownIfEmpty();
@@ -290,6 +303,62 @@ setInterval(() => {
 function broadcast(s, event, data) {
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of s.sse) client.write(frame);
+}
+
+// ---------- presence (who is viewing now) ----------
+//
+// A per-session, live-only roster keyed by reviewerId: one entry per reviewer, `count`
+// open tabs. Join/leave mutate the Map synchronously (so /api/state reflects it at once);
+// the broadcast is debounced so reconnect churn and multi-tab bursts collapse to one
+// roster frame. Never serialized — a restored session starts empty until tabs reconnect.
+
+function presenceRoster(s) {
+  return [...s.presence.values()].map((p) => ({
+    id: p.id,
+    name: p.name,
+    connectedAt: p.connectedAt,
+    count: p.count,
+  }));
+}
+
+// Register a connection under `id`. Returns true if this connection took a reference (so
+// the caller's close handler knows to release exactly one) — false only when a NEW id is
+// refused at the cap. A later tab may freshen a nameless entry's label, but an empty name
+// never blanks an existing one.
+function presenceJoin(s, id, name) {
+  const entry = s.presence.get(id);
+  if (entry) {
+    entry.count += 1;
+    if (name) entry.name = name;
+  } else {
+    if (s.presence.size >= MAX_PRESENCE) return false;
+    s.presence.set(id, { id, name, connectedAt: Date.now(), count: 1 });
+  }
+  schedulePresenceBroadcast(s);
+  return true;
+}
+
+function presenceLeave(s, id) {
+  const entry = s.presence.get(id);
+  if (!entry) return;
+  entry.count -= 1;
+  if (entry.count <= 0) s.presence.delete(id); // last tab closed — they've left
+  schedulePresenceBroadcast(s);
+}
+
+// Schedule-once debounce, same idiom as persist() but with the timer stored on the session
+// (a live handle beside sse/waiters) rather than in an external Map — there's no separate
+// `presenceTimers` to look for. The first change arms the flush; later changes inside the
+// window ride along; the flush broadcasts the CURRENT roster. The sessions.has guard —
+// before arming AND inside the flush — keeps a close event that fires after teardown
+// (removeSession → res.end() → async 'close') from arming a broadcast on a dead session.
+function schedulePresenceBroadcast(s) {
+  if (s.presenceTimer || !sessions.has(s.id)) return;
+  s.presenceTimer = setTimeout(() => {
+    s.presenceTimer = null;
+    if (!sessions.has(s.id)) return;
+    broadcast(s, 'presence', presenceRoster(s));
+  }, PRESENCE_DEBOUNCE_MS);
 }
 
 // ---------- agent event queue ----------
@@ -676,6 +745,7 @@ const server = http.createServer(async (req, res) => {
         chat: s.chat,
         progress: s.progress,
         clients: s.sse.size,
+        presence: presenceRoster(s), // live roster; a (re)connecting tab hydrates it at once
       });
     }
 
@@ -722,8 +792,30 @@ const server = http.createServer(async (req, res) => {
       });
       res.write('retry: 1000\n\n');
       s.sse.add(res);
+      // Identity rides the SSE query so this tab joins the presence roster. Truncated so
+      // an oversized value can't bloat the roster we re-broadcast. A blank rid stays
+      // anonymous — no presence entry, no broadcast — so curl / an old client / the plain
+      // test helpers behave exactly as before. `joined` is captured per-connection (not
+      // stashed on res) so cleanup releases exactly one ref, once (idempotent against a
+      // duplicate teardown).
+      const rid = (reqUrl.searchParams.get('rid') || '').trim().slice(0, 100);
+      const rname = (reqUrl.searchParams.get('rname') || '').trim().slice(0, 100);
+      let joined = rid ? presenceJoin(s, rid, rname) : false;
       touch(s);
-      req.on('close', () => s.sse.delete(res));
+      const cleanup = () => {
+        s.sse.delete(res);
+        if (joined) {
+          joined = false;
+          presenceLeave(s, rid);
+        }
+      };
+      req.on('close', cleanup);
+      // A long-lived SSE response can emit a socket 'error' (a reset/broken pipe). With no
+      // listener that surfaces as an uncaught 'error' and crashes the whole process (every
+      // session with it) — verified: an ERR_STREAM_WRITE_AFTER_END on the stream is
+      // uncatchable by a try/catch around write and only a listener neutralizes it. So give
+      // every stream an error sink that also cleans up (idempotent with 'close').
+      res.on('error', cleanup);
       return;
     }
 

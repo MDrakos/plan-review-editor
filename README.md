@@ -199,6 +199,6 @@ dismissible "what changed since your last review" highlight on each new round.
 - [x] Persist sessions to disk so they survive a server restart
 - [x] Comment threads with agent replies
 - [x] Multiple reviewers on one plan — attribution, live sync, per-reviewer choices
+- [x] Presence indicators — a live top-bar strip of who's viewing now, colored by reviewer, with a per-reviewer tab count
 
-Possible next steps: presence indicators (who's viewing now), and richer choice
-conflict resolution.
+Possible next steps: richer choice conflict resolution.
