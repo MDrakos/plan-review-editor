@@ -474,9 +474,9 @@ chatFormEl.addEventListener('submit', async (e) => {
 // rname is optional. An identity-less connection (not possible from this client, but
 // e.g. curl) stays anonymous and registers no presence.
 function eventsUrl() {
-  let u = `${api('/events')}&rid=${encodeURIComponent(reviewer.id)}`;
-  if (reviewer.name) u += `&rname=${encodeURIComponent(reviewer.name)}`;
-  return u;
+  let qs = `rid=${encodeURIComponent(reviewer.id)}`;
+  if (reviewer.name) qs += `&rname=${encodeURIComponent(reviewer.name)}`;
+  return api(`/events?${qs}`); // let api() append &session=… last, matching the /api/diff call
 }
 
 function connectEvents() {
@@ -753,15 +753,19 @@ function authorLabel(a) {
   return a.id ? a.id.slice(0, 8) : 'anonymous';
 }
 
-// A two-letter monogram for a presence avatar: initials from the name (first + last
-// word), else the head of the id. Falls back to '?' so a malformed entry never throws.
+// A monogram for a presence avatar: initials from the name (first + last word, or the
+// first two letters of a lone name), else the head of the id. Code-point aware so an
+// emoji/astral first letter isn't split into a broken surrogate. Coerces a non-string
+// name to '' so a malformed roster frame can never throw here (FM-12).
 function initials(name, id) {
-  const n = (name || '').trim();
+  const n = (typeof name === 'string' ? name : '').trim();
   if (n) {
-    const parts = n.split(/\s+/);
-    return (parts[0][0] + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
+    const words = n.split(/\s+/);
+    const cp = (w) => [...w][0] || '';
+    const mono = words.length > 1 ? cp(words[0]) + cp(words[words.length - 1]) : [...words[0]].slice(0, 2).join('');
+    return mono.toUpperCase();
   }
-  return (id || '?').slice(0, 2).toUpperCase();
+  return [...(typeof id === 'string' ? id : '?')].slice(0, 2).join('').toUpperCase() || '?';
 }
 
 // The live "who is viewing now" strip in the top bar: one color-coded avatar per present

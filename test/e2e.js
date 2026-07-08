@@ -221,7 +221,7 @@ async function driveLivenessWiring() {
       createTreeWalker: () => ({ nextNode: () => null, currentNode: null }), title: '',
     },
     location: { pathname: '/s/abc' },
-    EventSource: function () { es = { onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
+    EventSource: function (url) { es = { _url: url, onopen: null, _h: {}, addEventListener(t, fn) { this._h[t] = fn; } }; return es; },
     fetch: () => { fetchCalls++; return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(fakeState) }); },
     setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
     clearInterval: (id) => { timers = timers.filter((t) => t.id !== id); },
@@ -310,22 +310,48 @@ async function driveLivenessWiring() {
   await flush();
   check('review: this tab ignores its own echo (no re-sync)', fetchCalls === beforeOwn, `Δ=${fetchCalls - beforeOwn}`);
 
-  // presence (issue 007): firing a roster must render without throwing, must never route
-  // an (untrusted) reviewer name through innerHTML (TM-3), and must tolerate a malformed
-  // or non-array payload (FM-12).
-  const presenceEl = getEl('presence');
+  // presence (issue 007): the SSE connection must carry this tab's reviewer id so the
+  // server can roster it — assert the URL the real connectEvents() built (not just that
+  // an unused helper exists in source).
+  check(
+    'presence: connectEvents opens the SSE carrying the reviewer id (rid=<our id>)',
+    !!es && typeof es._url === 'string' && es._url.includes('rid=' + encodeURIComponent(myId)),
+    es && es._url
+  );
+
+  // Firing a roster must render without throwing, must tolerate malformed / non-array /
+  // non-string-name payloads (FM-12), and — the security-relevant one — an untrusted name
+  // must reach the DOM only via textContent/title, NEVER innerHTML (TM-3). The shim's
+  // appendChild is a no-op, so inspecting the container proves nothing; spy on
+  // createElement to capture the avatars actually built and inspect THEM.
+  const createdEls = [];
+  const realCreate = ctx.document.createElement;
+  ctx.document.createElement = (tag) => { const el = realCreate(tag); createdEls.push(el); return el; };
+  const XSS = '<img src=x onerror=alert(1)>';
   let presenceThrew = null;
   try {
     fire('presence', [{ id: 'peer1', name: 'Peer One', connectedAt: 1, count: 1 }, { id: myId, name: 'Me', connectedAt: 1, count: 2 }]);
-    fire('presence', [{ id: 'evil', name: '<img src=x onerror=alert(1)>', connectedAt: 1, count: 1 }]);
+    fire('presence', [{ id: 'evil', name: XSS, connectedAt: 1, count: 1 }]);
+    fire('presence', [{ id: 'num', name: 42, connectedAt: 1, count: 1 }]); // non-string name
     fire('presence', [{}]);
     fire('presence', [{ id: 'x' }]);
     fire('presence', null);
   } catch (e) {
     presenceThrew = e;
   }
-  check('presence: rendering a roster (incl. an HTML-payload name + malformed entries) never throws (FM-12)', !presenceThrew, presenceThrew && presenceThrew.message);
-  check('presence: the reviewer name never reaches innerHTML — textContent/title only (TM-3)', !/<img/.test(presenceEl.innerHTML), presenceEl.innerHTML);
+  ctx.document.createElement = realCreate;
+  check(
+    'presence: rendering a roster (HTML/non-string name, malformed, non-array) never throws (FM-12)',
+    !presenceThrew,
+    presenceThrew && presenceThrew.message
+  );
+  const innerHtmlHasPayload = createdEls.some((el) => typeof el.innerHTML === 'string' && el.innerHTML.includes('<img'));
+  const nameRenderedViaTitle = createdEls.some((el) => (el.title || '').includes(XSS));
+  check(
+    'presence: an untrusted name reaches title/textContent but NEVER innerHTML (TM-3)',
+    nameRenderedViaTitle && !innerHtmlHasPayload,
+    JSON.stringify({ nameRenderedViaTitle, innerHtmlHasPayload })
+  );
 }
 
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
@@ -467,10 +493,15 @@ async function persistenceChecks() {
       livePres.some((r) => r.id === 'ghost' && r.count === 1),
       JSON.stringify(livePres)
     );
+    // Force a debounced disk flush WHILE the roster is non-empty, so the "no presence key"
+    // assertion proves a real mid-connection flush omits it — not just the earlier flush
+    // that happened before anyone connected.
+    await p(`/api/chat?session=${id}`, { text: 'flush with a reviewer present' });
+    const flushed = await waitFile(id, (st) => (st.chat || []).some((c) => c.text === 'flush with a reviewer present'));
     check(
-      'presence: the persisted session file never contains a presence key (derived state, AC4)',
-      before && !('presence' in before) && !('presence' in (readState(id) || {})),
-      JSON.stringify(readState(id) && Object.keys(readState(id)))
+      'presence: a disk flush taken while a reviewer is present still omits presence (derived state, AC4)',
+      flushed && !('presence' in flushed) && !('presenceTimer' in flushed),
+      JSON.stringify(flushed && Object.keys(flushed))
     );
     presCtl.abort(); // drop the SSE before the kill so it can't linger
 
@@ -1971,13 +2002,38 @@ async function main() {
   await cli('stop', '--session', truncId);
 
   // FM-4 / TM-7: the roster map is capped (PLANREVIEW_MAX_PRESENCE=4 in this run) so a
-  // runaway client can't grow it — and the O(N) broadcast — without bound.
+  // runaway client can't grow it — and the O(N) broadcast — without bound. Only NEW ids
+  // are refused; an already-present reviewer can still add tabs.
   const capSess = await cli('start', docA, '--no-open');
   const capId = capSess.id;
   const capConns = [];
-  for (let i = 0; i < 6; i++) capConns.push(await captureEvents(capId, `cap${i}`));
+  for (let i = 0; i < 6; i++) capConns.push(await captureEvents(capId, `cap${i}`)); // cap4, cap5 refused at the cap
   const capped = await waitPresence(capId, (r) => r.length >= 4);
-  check('presence: the roster is capped so distinct-rid growth is bounded (FM-4/TM-7)', capped.length === 4, `size=${capped.length}`);
+  check('presence: a NEW reviewer past the cap is refused so growth is bounded (FM-4/TM-7)', capped.length === 4, `size=${capped.length}`);
+  const cap0extra = await captureEvents(capId, 'cap0'); // already present → a further tab is allowed
+  const capB = await waitPresence(capId, (r) => byId(r, 'cap0') && byId(r, 'cap0').count === 2);
+  check(
+    'presence: an already-present reviewer can add a tab past the cap',
+    byId(capB, 'cap0').count === 2 && capB.length === 4,
+    JSON.stringify(capB.map((x) => [x.id, x.count]))
+  );
+  // FM-5 / TM-10: free a slot, let a previously-refused id really join, then close its
+  // ORIGINAL (refused) connection — whose joined=false must make that close a no-op, never
+  // deleting the now-live entry a different connection owns.
+  capConns[1].close(); // free cap1's slot
+  await waitPresence(capId, (r) => !byId(r, 'cap1'));
+  const cap4live = await captureEvents(capId, 'cap4'); // under the cap now → really joins
+  await waitPresence(capId, (r) => byId(r, 'cap4'));
+  capConns[4].close(); // the original, refused cap4 connection closes
+  await sleep(80 * 2);
+  const capC = await presenceOf(capId);
+  check(
+    'presence: a refused connection\'s close never deletes a later real entry for the same id (FM-5/TM-10)',
+    !!byId(capC, 'cap4') && byId(capC, 'cap4').count === 1,
+    JSON.stringify(capC.map((x) => [x.id, x.count]))
+  );
+  cap0extra.close();
+  cap4live.close();
   for (const c of capConns) c.close();
   await cli('stop', '--session', capId);
 
@@ -2032,29 +2088,41 @@ async function main() {
   for (const c of churnConns) c.close();
   await cli('stop', '--session', churnId);
 
-  // FM-3: broadcast() must survive a write to a socket that died between reaps. Presence
-  // fires broadcasts far more often than before, so one dead socket must never crash the
-  // fan-out (and every other session with it). Open raw SSE sockets, kill them hard, and
-  // force a broadcast (a chat message) while each may still be in s.sse.
-  console.log('presence: a dead SSE socket never crashes the broadcast fan-out (FM-3)');
+  // FM-9 / DSM teardown race: stopping a session while presence-tracked tabs are open —
+  // whose 'close' fires asynchronously AFTER removeSession has cleared s.sse, dropped the
+  // presence timer, and deleted the session — must never crash (the post-teardown
+  // presenceLeave hits the sessions.has guard). Also covers a stop raced against a
+  // just-armed presence broadcast.
+  console.log('presence: stopping a session with open tabs never crashes (teardown race, FM-9)');
+  const tdSess = await cli('start', docA, '--no-open');
+  const tdId = tdSess.id;
+  const td1 = await captureEvents(tdId, 'ann');
+  const td2 = await captureEvents(tdId, 'ben');
+  await waitPresence(tdId, (r) => r.length === 2);
+  const td3 = await captureEvents(tdId, 'cat'); // arms a fresh presence-broadcast window
+  await cli('stop', '--session', tdId); // teardown races the armed timer + the closes below
+  td1.close();
+  td2.close();
+  td3.close();
+  await sleep(80 * 3);
+  check('presence: the server survives a stop raced against open tabs + an armed broadcast', await serverAlive(), 'server crashed on teardown race');
+  const tdGone = await browser(`/api/state?session=${tdId}`);
+  check('presence: the stopped session is fully gone (no lingering roster/timer)', tdGone.status === 404, `status=${tdGone.status}`);
+
+  // Rapid connect/disconnect churn (each a join+leave broadcast) never destabilizes the
+  // fan-out, and a stable subscriber stays correctly rostered through it.
+  console.log('presence: rapid connect/disconnect churn keeps the fan-out stable');
   const resSess = await cli('start', docA, '--no-open');
   const resId = resSess.id;
   const survivor = await captureEvents(resId, 'survivor');
   await waitPresence(resId, (r) => byId(r, 'survivor'));
   for (let i = 0; i < 15; i++) {
-    await new Promise((resolve) => {
-      const sock = net.connect(PORT, '127.0.0.1', () => {
-        sock.write(`GET /events?session=${resId} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n`); // anonymous, cap-independent
-        setTimeout(() => { sock.destroy(); resolve(); }, 10);
-      });
-      sock.on('error', () => resolve());
-    });
-    await browser(`/api/chat?session=${resId}`, { text: `ping ${i}` }); // broadcasts to every sse, incl. the just-killed one
+    const churn = await captureEvents(resId, `churn${i % 3}`); // ≤3 distinct + survivor ≤ cap
+    churn.close();
   }
-  await sleep(150);
-  check('presence: the server survives broadcasting to dead sockets (FM-3)', await serverAlive(), 'server crashed under dead-socket churn');
-  const survives = await presenceOf(resId);
-  check('presence: a healthy subscriber still holds a valid roster after the churn', Array.isArray(survives) && !!byId(survives, 'survivor'), JSON.stringify(survives));
+  const survives = await waitPresence(resId, (r) => r.length === 1 && byId(r, 'survivor'));
+  check('presence: the server stays up through rapid presence churn', await serverAlive(), 'server crashed under churn');
+  check('presence: a stable subscriber is still correctly rostered after churn', !!byId(survives, 'survivor') && byId(survives, 'survivor').count === 1, JSON.stringify(survives));
   survivor.close();
   await cli('stop', '--session', resId);
   await cli('stop', '--session', pid);
