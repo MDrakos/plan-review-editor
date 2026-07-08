@@ -3011,13 +3011,13 @@ async function main() {
 
     const dividerRule = findRule((r) => hasClass(r.selector, '.split-caret') && !r.selector.includes(':hover'));
     check(
-      'split-caret keeps a border-left hairline divider',
+      'stylesheet keeps a border-left hairline divider on the split-caret',
       !!dividerRule && /border-left:\s*1px solid/.test(dividerRule.body),
       'no border-left hairline found on .split-caret'
     );
 
     check(
-      'split-btn hover sync is not a bare .split-btn:hover (that also fires when hovering the open dropdown menu)',
+      'stylesheet scopes split-btn hover sync away from the dropdown menu (not a bare .split-btn:hover)',
       !/\.split-btn:hover\b/.test(cssNoComments),
       'found a bare .split-btn:hover selector — also matches hovering .split-menu, a .split-btn descendant'
     );
@@ -3029,7 +3029,7 @@ async function main() {
         hasClass(r.selector, '.split-caret')
     );
     check(
-      'hovering submit-btn or the caret recolors both together (default mode), scoped away from the menu',
+      'stylesheet recolors submit-btn and the caret together on hover (default mode), scoped away from the menu',
       !!defaultHoverRule && /background:\s*var\(--accent-hover\)/.test(defaultHoverRule.body),
       'no :has()-scoped rule recoloring both #submit-btn and .split-caret on hover'
     );
@@ -3041,7 +3041,7 @@ async function main() {
         hasClass(r.selector, '.split-caret')
     );
     check(
-      'hovering submit-btn or the caret recolors both together (approve mode), scoped away from the menu',
+      'stylesheet recolors submit-btn and the caret together on hover (approve mode), scoped away from the menu',
       !!approveHoverRule && /background:\s*var\(--success-hover\)/.test(approveHoverRule.body),
       'no :has()-scoped rule recoloring both halves in approve mode on hover'
     );
@@ -3053,7 +3053,7 @@ async function main() {
         hasClass(r.selector, '.split-caret')
     );
     check(
-      'approve-mode recolors the whole control at rest, not just #submit-btn',
+      'stylesheet recolors the whole split-btn control in approve mode at rest, not just #submit-btn',
       !!approveRestRule && /background:\s*var\(--success\)/.test(approveRestRule.body),
       'no rule recoloring both #submit-btn.approve and its .split-caret at rest'
     );
