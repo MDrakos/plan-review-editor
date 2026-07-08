@@ -3017,7 +3017,7 @@ async function main() {
   // smoke check (no DOM rig, matching the suite's convention for choice-block behavior).
   check(
     'client suppresses the picks summary when it would only restate the current reviewer\'s own solo pick',
-    /allReviewers\.size === 1 && allReviewers\.has\(reviewer\.id\)/.test(app.body)
+    /reviewers\.size === 1 && reviewers\.has\(reviewer\.id\)/.test(app.body)
   );
   // issue 008: resolve control — source-regex smoke checks (no DOM rig, matching the suite's convention).
   check(
