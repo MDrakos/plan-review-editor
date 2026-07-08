@@ -614,6 +614,56 @@ async function driveLivenessRefreshAccuracy() {
       JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
     );
   }
+
+  // Scenario 6 (FX-7): a LEFTOVER lastAgentActivity from a PREVIOUS round can be
+  // numerically SMALLER (older) than the new round's workingSince — this is the
+  // exact scenario that motivates Math.max(last, since) instead of using `last`
+  // alone. Same discrimination technique as scenario 1: land the clock between
+  // the WRONG (last-alone) deadline and the CORRECT (max-based) one, and prove
+  // the stale, older lastAgentActivity does not make the hint fire early.
+  {
+    const STALE = liveness.STALE_THRESHOLD_MS;
+    const workingSince = 6_000_000;
+    const lastAgentActivity = workingSince - 5000; // stale, from a prior round — OLDER than workingSince
+    const now = workingSince + 10000; // boot 10s into the new round
+    const fakeState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'working',
+      workingSince,
+      lastAgentActivity,
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+    };
+    const h = bootLivenessHarness(fakeState, now);
+    await h.flush();
+    const elapsed = h.getEl('working-elapsed');
+    const stale = h.getEl('working-stale');
+    check(
+      'liveness refresh FX-7: mid-round boot paints the real elapsed time (0:10) despite a stale, older lastAgentActivity',
+      elapsed.textContent === '0:10',
+      elapsed.textContent
+    );
+
+    // Wrong (last-alone) deadline: lastAgentActivity + STALE = (workingSince - 5000) + STALE.
+    // Correct (max-based) deadline: workingSince + STALE — 5s later, since workingSince
+    // is the larger (more recent) of the two candidates and Math.max must pick it.
+    h.clock.now = workingSince - 5000 + STALE + 2000; // past the WRONG deadline, still before the correct one
+    h.pump();
+    check(
+      'liveness refresh FX-7: Math.max(last, since) — the stale, older lastAgentActivity does not win; hint stays hidden past the wrong last-alone deadline',
+      stale.hidden === true,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+
+    h.clock.now = workingSince + STALE + 2000; // past the CORRECT (max-based) deadline
+    h.pump();
+    check(
+      'liveness refresh FX-7: Math.max(last, since) — past the correct max-based deadline, the hint finally appears',
+      stale.hidden === false,
+      JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
+    );
+  }
 }
 
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
@@ -948,6 +998,39 @@ async function persistenceChecks() {
     await stop(badId);
     await sleep(300);
     fs.rmSync(stateDir4b, { recursive: true, force: true });
+
+    // ----- P4b (mirror): the same guard applies to the OTHER field/direction -----
+    console.log('persistence: a malformed workingSince type and a missing lastAgentActivity fall back to null (FM-1 mirror)');
+    await killP();
+    const stateDir4c = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-badtypes2-'));
+    const badId2 = 'badtypes2';
+    fs.writeFileSync(
+      path.join(stateDir4c, `${badId2}.json`),
+      JSON.stringify({
+        id: badId2,
+        status: 'working',
+        doc: { path: null, title: 'BadTypes2', html: '<p>Hi</p>', version: 1, blocks: ['<p>Hi</p>'], history: [] },
+        review: { comments: [], choices: {} },
+        submissions: [],
+        chat: [],
+        progress: [],
+        queue: [],
+        touched: Date.now(),
+        workingSince: 'yesterday', // wrong type — must never pass through
+        // lastAgentActivity intentionally omitted entirely
+      })
+    );
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir4c });
+    check('persist: server up (bad-types mirror case)', await waitHealth(true));
+    const badState2 = await p(`/api/state?session=${badId2}`);
+    check(
+      'FM-1 mirror: a wrong-typed workingSince and a missing lastAgentActivity both restore as null, not a crash',
+      badState2.status === 200 && badState2.data.workingSince === null && badState2.data.lastAgentActivity === null,
+      JSON.stringify(badState2.status === 200 ? { workingSince: badState2.data.workingSince, lastAgentActivity: badState2.data.lastAgentActivity } : badState2.status)
+    );
+    await stop(badId2);
+    await sleep(300);
+    fs.rmSync(stateDir4c, { recursive: true, force: true });
 
     // ----- P5: PLANREVIEW_PERSIST=0 does no disk I/O -----
     console.log('persistence: PLANREVIEW_PERSIST=0 does no disk I/O');
@@ -1584,6 +1667,49 @@ async function main() {
     })
   );
   await cli('stop', '--session', lt.id);
+
+  // The block above only ever reads workingSince/lastAgentActivity back through
+  // GET /api/state. A regression that reverted just ONE of the three
+  // `broadcast(s, 'status', statusPayload(s))` call sites back to the old
+  // `{status: s.status}` shape would pass every check above, since /api/state is
+  // a separate code path — but a LIVE, already-connected tab only ever sees the
+  // SSE frame. Use captureEvents to assert the actual broadcast payload.
+  console.log('liveness tracking: the SSE "status" broadcast frame itself carries workingSince/lastAgentActivity, not just /api/state (issue 009 gap)');
+  const sseLt = await cli('start', docA, '--no-open');
+  const sseLtEvents = await captureEvents(sseLt.id);
+  await sleep(100); // let the SSE connection establish before triggering a broadcast
+  await browser(`/api/submit?session=${sseLt.id}`, { comments: [], choices: {}, note: '' });
+  await sleep(150);
+  const submitFrame = sseLtEvents.events.filter((e) => e.event === 'status').pop();
+  const submitData = submitFrame ? JSON.parse(submitFrame.data) : null;
+  check(
+    'SSE: the "status" broadcast frame for /api/submit carries status:working and a recent workingSince',
+    !!submitData &&
+      submitData.status === 'working' &&
+      typeof submitData.workingSince === 'number' &&
+      Math.abs(Date.now() - submitData.workingSince) < 5000,
+    JSON.stringify(submitData)
+  );
+
+  // Drive /agent/stop (the CLI 'stop' command) on the SAME session, mid-round.
+  // Per FM-2/FM-11 a stray non-null workingSince riding along on the terminal
+  // 'ended' broadcast is expected and intentional — this just confirms the
+  // broadcast frame (not /api/state) really carries it, proving statusPayload(s)
+  // is wired at this call site too.
+  await cli('stop', '--session', sseLt.id);
+  await sleep(150);
+  sseLtEvents.close();
+  const endedFrame = sseLtEvents.events.filter((e) => e.event === 'status').pop();
+  const endedData = endedFrame ? JSON.parse(endedFrame.data) : null;
+  check(
+    'SSE: the "status" broadcast frame for /agent/stop carries status:ended and still surfaces the stray workingSince (FM-2/FM-11)',
+    !!endedData &&
+      endedData.status === 'ended' &&
+      typeof endedData.workingSince === 'number' &&
+      submitData &&
+      endedData.workingSince === submitData.workingSince,
+    JSON.stringify({ submitData, endedData })
+  );
 
   console.log('answered questions persist across cycles; an un-anchored comment is archived, never dropped');
   const q = await cli('start', docA, '--no-open');
