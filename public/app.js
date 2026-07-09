@@ -24,6 +24,7 @@ function api(pathname) {
 
 const REVIEWER_ID_KEY = 'pr.reviewerId';
 const REVIEWER_NAME_KEY = 'pr.reviewerName';
+const REVIEWER_NAME_ASKED_KEY = 'pr.reviewerNameAsked';
 
 function loadReviewerId() {
   let id = '';
@@ -62,6 +63,30 @@ const reviewer = {
     }
   },
 };
+
+// A first-time reviewer has no name yet, so the header used to fall back to a slice
+// of their id hash. Ask once, on the reviewer's first visit, so the header reads like
+// a name instead. Dismissing (Cancel, or a blank/whitespace answer) doesn't re-prompt
+// on the next load — it's remembered via a separate "asked" flag so a reviewer who'd
+// rather stay nameless isn't nagged every time — and renderIdentity() falls back to a
+// neutral placeholder rather than the raw hash (see identityLabel() below).
+function maybePromptForName() {
+  if (reviewer.name) return;
+  let asked = false;
+  try {
+    asked = localStorage.getItem(REVIEWER_NAME_ASKED_KEY) === '1';
+  } catch {
+    /* storage blocked — treat as not-yet-asked; we'll just ask again next load too */
+  }
+  if (asked) return;
+  const answer = prompt('Your name (shown to other reviewers on this plan):', '');
+  try {
+    localStorage.setItem(REVIEWER_NAME_ASKED_KEY, '1');
+  } catch {
+    /* ignore */
+  }
+  if (answer && answer.trim()) reviewer.name = answer.trim();
+}
 
 // The author stamp for a comment/reply this tab creates.
 function author() {
@@ -1411,13 +1436,23 @@ function truncate(s, n) {
 // ---------- identity affordance ----------
 // A small "you are <name> (edit)" chip. Editing the name updates localStorage and
 // re-syncs so peers see the new label on this tab's future mutations.
+
+// This tab's own label for the "you are" chip: the reviewer's name, else a neutral
+// placeholder — never the raw id hash. Unlike authorLabel() (used for OTHER
+// reviewers' attribution in comments/badges/tooltips, where the hash is kept as a
+// disambiguating fallback), there's only ever one "you" in this slot, so there's no
+// collision to disambiguate.
+function identityLabel() {
+  return reviewer.name || 'Reviewer';
+}
+
 function renderIdentity() {
   const el = document.getElementById('identity');
   if (!el) return;
   el.innerHTML = '';
   const label = document.createElement('span');
   label.className = 'identity-name';
-  label.textContent = `you are ${authorLabel({ id: reviewer.id, name: reviewer.name })}`;
+  label.textContent = `you are ${identityLabel()}`;
   label.style.setProperty('--author-color', authorColor(reviewer.id));
   const edit = document.createElement('button');
   edit.className = 'btn identity-edit';
@@ -1434,6 +1469,7 @@ function renderIdentity() {
 
 // ---------- boot ----------
 
+maybePromptForName();
 renderIdentity();
 renderPresence();
 fetchState();
