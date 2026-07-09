@@ -3004,12 +3004,18 @@ async function main() {
     // which would also fire while hovering the open dropdown menu (#submit-menu
     // is a .split-btn descendant too, see public/index.html), falsely recoloring
     // the button while the pointer is over a menu item instead.
+    // Exact-set check, not just "contains" — a rule with an extra trigger
+    // appended (e.g. `.split-item:hover`, reintroducing the menu-hover bug)
+    // must fail this, not silently pass because the two required triggers
+    // are still present among others.
     const hasSyncedHoverCondition = (sel) => {
       const m = sel.match(/\.split-btn:has\(([^)]*)\)/);
-      return !!m && /#submit-btn:hover/.test(m[1]) && /\.split-caret:hover/.test(m[1]);
+      if (!m) return false;
+      const triggers = m[1].split(',').map((s) => s.trim());
+      return triggers.length === 2 && triggers.includes('#submit-btn:hover') && triggers.includes('.split-caret:hover');
     };
 
-    const dividerRule = findRule((r) => hasClass(r.selector, '.split-caret') && !r.selector.includes(':hover'));
+    const dividerRule = findRule((r) => r.selector === '.split-caret');
     check(
       'stylesheet keeps a border-left hairline divider on the split-caret',
       !!dividerRule && /border-left:\s*1px solid/.test(dividerRule.body),
