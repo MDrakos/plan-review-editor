@@ -203,8 +203,10 @@ rendering as plain code. The reviewers' answers arrive in `submit.choices` (and
 `approve.choices`) as `{ id: { picks, resolved? } }`. `picks` is a per-reviewer
 map `{ reviewerId: option }` — every reviewer's pick for each block, so a
 divergence is visible rather than silently overwritten (the UI shows a per-option
-who-picked badge and a muted "reviewers disagree" hint). With a single reviewer
-`picks` simply has one entry.
+who-picked badge and a muted "reviewers disagree" hint) once more than one
+reviewer has answered. With a single reviewer, `picks` has one entry, but the UI
+suppresses the badge — it would only echo that reviewer's own answer back to
+them — and shows it again once a second reviewer weighs in.
 
 By default each block also renders a free-text **"Other"** answer (a radio or
 checkbox plus a text field). If a reviewer types there, their entry in

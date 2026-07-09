@@ -594,7 +594,9 @@ function bindChoices() {
     // the divergence rule lives in ONE place. Guards the shape (DSM-13): a pre-004
     // restored session can hold a legacy scalar/array here until its first post-restore
     // sync; Object.entries on a string would yield per-character garbage. Only a plain
-    // nested object counts.
+    // nested object counts. Also tracks the flat set of distinct reviewers who've picked
+    // ANYTHING here (across all labels), so renderPicks can tell "just me" from "others
+    // too" without re-deriving reviewer identity from the label buckets a second time.
     const pickCounts = () => {
       const byReviewer = state.choices[id];
       const entries =
@@ -602,20 +604,30 @@ function bindChoices() {
           ? Object.entries(byReviewer) // [reviewerId, option]
           : [];
       const counts = new Map();
+      const reviewers = new Set();
       for (const [rid, opt] of entries) {
         for (const label of Array.isArray(opt) ? opt : [opt]) {
           if (typeof label !== 'string' || label === '') continue;
           if (!counts.has(label)) counts.set(label, []);
           counts.get(label).push(rid);
+          reviewers.add(rid);
         }
       }
-      return counts;
+      return { counts, reviewers };
     };
 
     const renderPicks = () => {
-      const counts = pickCounts();
+      const { counts, reviewers } = pickCounts();
       picksEl.innerHTML = '';
       if (!counts.size) {
+        picksEl.hidden = true;
+        return;
+      }
+      // A lone reviewer's own pick(s) just restate what they already typed/checked —
+      // most noticeable on a free-text "Other" answer, echoed back verbatim. Suppress
+      // the summary until some OTHER reviewer has weighed in (agreement or divergence),
+      // at which point the tally becomes informative again.
+      if (reviewers.size === 1 && reviewers.has(reviewer.id)) {
         picksEl.hidden = true;
         return;
       }
@@ -658,7 +670,7 @@ function bindChoices() {
     function renderResolution() {
       resolveEl.innerHTML = '';
       const resolution = state.resolutions[id];
-      const divergent = pickCounts().size > 1;
+      const divergent = pickCounts().counts.size > 1;
       // No-friction guard: show nothing unless the block is divergent or already resolved.
       if (!resolution && !divergent) {
         resolveEl.hidden = true;
