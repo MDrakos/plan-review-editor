@@ -1012,12 +1012,16 @@ mark.hl.active { background: var(--mark-active); }
 .choice-change { padding: 3px 12px; flex: none; }
 
 /* the free-text "Other" row: radio/checkbox + label, then a stretchy text field */
-.choice-other { align-items: center; }
-.choice-other > label { display: flex; align-items: center; gap: 8px; cursor: pointer; white-space: nowrap; }
+.choice-other { align-items: flex-start; }
+.choice-other > label { display: flex; align-items: center; gap: 8px; cursor: pointer; padding-top: 4px; }
 
 .choice-other-text {
   flex: 1;
   min-width: 120px;
+  min-height: 30px;
+  resize: none;
+  overflow: hidden;
+  word-wrap: break-word;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 4px 8px;

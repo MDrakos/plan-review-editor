@@ -1490,6 +1490,11 @@ async function main() {
     'a choice block renders a free-text Other input by default',
     /data-other="true"/.test(withOther) && /choice-other-text/.test(withOther)
   );
+  check(
+    'the Other field is a textarea (wraps + auto-grows) not a single-line input',
+    /<textarea class="choice-other-text"[^>]*><\/textarea>/.test(withOther) &&
+      !/<input[^>]*class="choice-other-text"/.test(withOther)
+  );
   const noOther = render('```choice\nid: q\nprompt: Pick\nother: false\noptions:\n  - A\n  - B\n```\n');
   check(
     'other: false omits the free-text input',
