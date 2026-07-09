@@ -2992,6 +2992,83 @@ async function main() {
     /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css.body),
     'missing [hidden] { display: none !important }'
   );
+  {
+    // issue 011 #5: the split-button caret must not read as its own block —
+    // hovering anywhere in .split-btn should recolor both halves together,
+    // in both the default and approve-mode colors, and the hairline divider
+    // (the one thing that should still visually separate them) must remain.
+    const cssNoComments = css.body.replace(/\/\*[\s\S]*?\*\//g, '');
+    const rules = [...cssNoComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+      selector: m[1].replace(/\s+/g, ' ').trim(),
+      body: m[2],
+    }));
+    const findRule = (pred) => rules.find(pred);
+    const hasClass = (sel, cls) => sel.split(',').some((part) => part.includes(cls));
+    // The hover-sync condition must be scoped to the two buttons themselves via
+    // :has(#submit-btn:hover, .split-caret:hover) — NOT a bare .split-btn:hover,
+    // which would also fire while hovering the open dropdown menu (#submit-menu
+    // is a .split-btn descendant too, see public/index.html), falsely recoloring
+    // the button while the pointer is over a menu item instead.
+    // Exact-set check, not just "contains" — a rule with an extra trigger
+    // appended (e.g. `.split-item:hover`, reintroducing the menu-hover bug)
+    // must fail this, not silently pass because the two required triggers
+    // are still present among others.
+    const hasSyncedHoverCondition = (sel) => {
+      const m = sel.match(/\.split-btn:has\(([^)]*)\)/);
+      if (!m) return false;
+      const triggers = m[1].split(',').map((s) => s.trim());
+      return triggers.length === 2 && triggers.includes('#submit-btn:hover') && triggers.includes('.split-caret:hover');
+    };
+
+    const dividerRule = findRule((r) => r.selector === '.split-caret');
+    check(
+      'stylesheet keeps a border-left hairline divider on the split-caret',
+      !!dividerRule && /border-left:\s*1px solid/.test(dividerRule.body),
+      'no border-left hairline found on .split-caret'
+    );
+
+    check(
+      'stylesheet scopes split-btn hover sync away from the dropdown menu (not a bare .split-btn:hover)',
+      !/\.split-btn:hover\b/.test(cssNoComments),
+      'found a bare .split-btn:hover selector — also matches hovering .split-menu, a .split-btn descendant'
+    );
+
+    const defaultHoverRule = findRule(
+      (r) =>
+        hasSyncedHoverCondition(r.selector) &&
+        r.selector.includes('#submit-btn:not(.approve)') &&
+        hasClass(r.selector, '.split-caret')
+    );
+    check(
+      'stylesheet recolors submit-btn and the caret together on hover (default mode), scoped away from the menu',
+      !!defaultHoverRule && /background:\s*var\(--accent-hover\)/.test(defaultHoverRule.body),
+      'no :has()-scoped rule recoloring both #submit-btn and .split-caret on hover'
+    );
+
+    const approveHoverRule = findRule(
+      (r) =>
+        hasSyncedHoverCondition(r.selector) &&
+        r.selector.includes('#submit-btn.approve') &&
+        hasClass(r.selector, '.split-caret')
+    );
+    check(
+      'stylesheet recolors submit-btn and the caret together on hover (approve mode), scoped away from the menu',
+      !!approveHoverRule && /background:\s*var\(--success-hover\)/.test(approveHoverRule.body),
+      'no :has()-scoped rule recoloring both halves in approve mode on hover'
+    );
+
+    const approveRestRule = findRule(
+      (r) =>
+        !r.selector.includes(':hover') &&
+        r.selector.includes('#submit-btn.approve') &&
+        hasClass(r.selector, '.split-caret')
+    );
+    check(
+      'stylesheet recolors the whole split-btn control in approve mode at rest, not just #submit-btn',
+      !!approveRestRule && /background:\s*var\(--success\)/.test(approveRestRule.body),
+      'no rule recoloring both #submit-btn.approve and its .split-caret at rest'
+    );
+  }
   const app = await text('/app.js');
   check('client is session-scoped (reads /s/<id> and passes ?session=)', /function api\(/.test(app.body) && /session=/.test(app.body));
   check(

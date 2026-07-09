@@ -650,6 +650,15 @@ html, body {
   border-bottom-left-radius: 0;
 }
 
+/* the caret is not its own block: hovering either half recolors both
+   together, so the divider reads as one button, not a seam. Scoped via
+   :has() to the two buttons themselves (not a bare .split-btn:hover) since
+   the dropdown menu is also a .split-btn descendant and must not trigger it */
+.split-btn:has(#submit-btn:hover, .split-caret:hover) #submit-btn:not(.approve),
+.split-btn:has(#submit-btn:hover, .split-caret:hover) #submit-btn:not(.approve) + .split-caret {
+  background: var(--accent-hover);
+}
+
 /* approve mode recolors both halves to the terminal "success" action */
 #submit-btn.approve,
 #submit-btn.approve + .split-caret {
@@ -657,8 +666,8 @@ html, body {
   border-color: var(--success);
   color: var(--on-success);
 }
-#submit-btn.approve:hover,
-#submit-btn.approve + .split-caret:hover { background: var(--success-hover); }
+.split-btn:has(#submit-btn:hover, .split-caret:hover) #submit-btn.approve,
+.split-btn:has(#submit-btn:hover, .split-caret:hover) #submit-btn.approve + .split-caret { background: var(--success-hover); }
 
 .split-menu {
   position: absolute;
