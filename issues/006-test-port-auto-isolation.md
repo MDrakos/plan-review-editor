@@ -1,7 +1,7 @@
 # Enhancement: auto-isolate the e2e test port so parallel runs never collide
 
 **Type:** enhancement (dev-experience / test reliability)
-**Status:** open, groomed 2026-07-07, recommended first pick
+**Status:** done — merged 2026-07-08 in PR #8
 **Area:** `test/e2e.js` (port selection), the shared server it drives
 
 ## Problem

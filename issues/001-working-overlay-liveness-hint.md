@@ -1,7 +1,7 @@
 # Enhancement: surface agent liveness while the review is in the "working" state
 
 **Type:** enhancement (UX robustness)
-**Status:** open — ready to pick up
+**Status:** done — merged 2026-07-07 in PR #2
 **Area:** `public/app.js` (working overlay), `server/server.js` (session status)
 
 ## Problem

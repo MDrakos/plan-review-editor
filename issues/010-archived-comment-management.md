@@ -1,7 +1,7 @@
 # Enhancement: archived-comment management (bound the carried-forward threads)
 
 **Type:** enhancement (polish)
-**Status:** open, groomed 2026-07-07, lowest priority
+**Status:** done — merged 2026-07-08 in PR #10
 **Area:** `server/server.js` (`loadDoc` carry-forward), `public/app.js` (archived section UI)
 **Builds on:** 002 (comment threads that survive a re-present or archive)
 

@@ -1,7 +1,7 @@
 # Enhancement: multiple reviewers on one plan
 
 **Type:** enhancement (feature — likely needs a brainstorming pass first)
-**Status:** open — spec written, not yet scheduled
+**Status:** done — merged 2026-07-07 in PR #6
 **Area:** `server/server.js` (review model, identity, merge), `public/app.js` (attribution, live sync)
 
 ## Problem

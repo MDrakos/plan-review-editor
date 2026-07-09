@@ -1,7 +1,7 @@
 # Enhancement: persist sessions to disk so they survive a server restart
 
 **Type:** enhancement (robustness) — **scheduled for implementation**
-**Status:** open — needs the design decisions below locked, then implement
+**Status:** done — merged 2026-07-07 in PR #5
 **Area:** `server/server.js` (session lifecycle, all mutation sites, startup restore)
 
 ## Problem

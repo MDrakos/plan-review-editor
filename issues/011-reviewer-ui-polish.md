@@ -1,7 +1,7 @@
 # Polish: reviewer UI cleanup (identity, sidebar, choice inputs, submit button)
 
 **Type:** polish (five small, independent frontend fixes)
-**Status:** open, groomed 2026-07-08
+**Status:** done — all five items merged 2026-07-09 in PRs #13–#17
 **Area:** `public/app.js`, `public/style.css`, `public/index.html`, `server/markdown.js`
 **Source:** reviewer-UI screenshot review, 2026-07-08
 
