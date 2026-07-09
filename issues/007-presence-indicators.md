@@ -1,7 +1,7 @@
 # Enhancement: presence indicators (who is viewing the session now)
 
 **Type:** enhancement (feature)
-**Status:** open, groomed 2026-07-07
+**Status:** done — merged 2026-07-08 in PR #9
 **Area:** `server/server.js` (SSE connect/disconnect, presence set), `public/app.js` (presence UI)
 **Builds on:** 004 (reviewer identity + attribution), the existing SSE fan-out
 

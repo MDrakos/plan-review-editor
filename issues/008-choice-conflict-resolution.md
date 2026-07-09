@@ -1,7 +1,7 @@
 # Enhancement: richer choice-conflict resolution
 
 **Type:** enhancement (feature, likely a short brainstorm first)
-**Status:** open, groomed 2026-07-07
+**Status:** done — merged 2026-07-08 in PR #12
 **Area:** `server/server.js` (choice model, submit bundle), `public/app.js` (choice block UI)
 **Builds on:** 004 (per-reviewer choices + surfaced split)
 

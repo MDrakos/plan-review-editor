@@ -1,7 +1,7 @@
 # Enhancement: diff view between document versions
 
 **Type:** enhancement (feature)
-**Status:** open — spec written, not yet scheduled
+**Status:** done — merged 2026-07-07 in PR #3
 **Area:** `server/markdown.js` (diff rendering), `server/server.js` (version retention),
 `public/app.js` (diff toggle)
 

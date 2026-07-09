@@ -1,7 +1,7 @@
 # Enhancement: comment threads — let the agent reply to a specific inline comment
 
 **Type:** enhancement (feature)
-**Status:** open — spec written, not yet scheduled
+**Status:** done — merged 2026-07-07 in PR #4
 **Area:** `server/server.js` (review model, agent API), `public/app.js` (comment cards, SSE)
 
 ## Problem

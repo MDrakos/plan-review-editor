@@ -1,7 +1,7 @@
 # Enhancement: server-side liveness accuracy (the 001 optional server assist)
 
 **Type:** enhancement (robustness)
-**Status:** open, groomed 2026-07-07
+**Status:** done — merged 2026-07-08 in PR #11
 **Area:** `server/server.js` (session activity timestamp, status/events payload), `public/app.js` (liveness hint)
 **Builds on:** 001 (client-only working-overlay liveness)
 
