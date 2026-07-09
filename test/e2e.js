@@ -754,38 +754,46 @@ function bootIdentityHarness({ promptQueue, storage } = {}) {
   return vmHandle;
 }
 
+// Elements are looked up by className rather than by position in `created` — position
+// would break if renderIdentity() ever creates/reorders an extra element, even though
+// behavior hadn't changed. Most-recent-first, since a re-render (e.g. after 'edit')
+// appends a fresh label/button rather than replacing the old ones in `created`.
+function findLastByClass(created, className) {
+  for (let i = created.length - 1; i >= 0; i--) {
+    if (created[i].className === className) return created[i];
+  }
+  return undefined;
+}
+const identityLabelEl = (h) => findLastByClass(h.created, 'identity-name');
+const identityEditBtn = (h) => findLastByClass(h.created, 'btn identity-edit');
+
 async function driveReviewerIdentityPrompt() {
   // Scenario 1: a brand-new reviewer (no stored name) is prompted once on boot; a
   // real answer is stored and reflected immediately in the header — and the existing
-  // 'edit' flow (unchanged) still works afterwards, reusing the same window.prompt().
+  // 'edit' flow (unchanged) still works afterwards, reusing the same window.prompt()
+  // (queued as a second scripted answer, consumed on the later click).
   {
-    const h = bootIdentityHarness({ promptQueue: ['Ada'] });
+    const h = bootIdentityHarness({ promptQueue: ['Ada', 'Ada2'] });
     await h.flush();
 
     check('identity FM-1: a first-time reviewer is prompted for a name exactly once on boot', h.promptCalls === 1, String(h.promptCalls));
-    const label = h.created[0];
     check(
       'identity FM-1: a real answer to the first-load prompt renders in the header, not the raw id hash',
-      label.textContent === 'you are Ada',
-      label.textContent
+      identityLabelEl(h).textContent === 'you are Ada',
+      identityLabelEl(h).textContent
     );
     check('identity FM-1: the answered name is persisted for future loads/attribution', vm.runInContext('reviewer.name', h.ctx) === 'Ada');
 
     const fetchBefore = h.fetchCalls;
-    // Hand the SAME global prompt() a second scripted answer, then replay the click
-    // renderIdentity() bound on boot.
-    h.ctx.prompt = () => 'Ada2';
-    const editBtn = h.created[1];
-    editBtn.dispatch('click');
+    identityEditBtn(h).dispatch('click');
     await h.flush();
 
-    const label2 = h.created[h.created.length - 2]; // renderIdentity()'s re-render: [..., label2, edit2]
     check(
-      "identity: the existing 'edit' flow still updates the header after the first-load prompt",
-      label2.textContent === 'you are Ada2',
-      label2.textContent
+      "identity FM-1: the existing 'edit' flow still updates the header after the first-load prompt",
+      identityLabelEl(h).textContent === 'you are Ada2',
+      identityLabelEl(h).textContent
     );
-    check('identity: editing the name still re-syncs (syncReview fires)', h.fetchCalls > fetchBefore, `Δ=${h.fetchCalls - fetchBefore}`);
+    check('identity FM-1: editing the name still re-syncs (syncReview fires)', h.fetchCalls > fetchBefore, `Δ=${h.fetchCalls - fetchBefore}`);
   }
 
   // Scenario 2 (FM-2): dismissing the first-load prompt (Cancel → null) must not hard-block
@@ -798,14 +806,18 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-2: dismissing (Cancel) the first-load prompt still only prompts once', h1.promptCalls === 1, String(h1.promptCalls));
     check(
       'identity FM-2: a dismissed prompt shows a neutral placeholder, never the raw id hash',
-      h1.created[0].textContent === 'you are Reviewer',
-      h1.created[0].textContent
+      identityLabelEl(h1).textContent === 'you are Reviewer',
+      identityLabelEl(h1).textContent
     );
 
     const h2 = bootIdentityHarness({ promptQueue: [], storage });
     await h2.flush();
     check('identity FM-2: a later load with the same storage does not re-prompt after a dismissal', h2.promptCalls === 0, String(h2.promptCalls));
-    check('identity FM-2: the later load still shows the neutral placeholder (no name was ever stored)', h2.created[0].textContent === 'you are Reviewer', h2.created[0].textContent);
+    check(
+      'identity FM-2: the later load still shows the neutral placeholder (no name was ever stored)',
+      identityLabelEl(h2).textContent === 'you are Reviewer',
+      identityLabelEl(h2).textContent
+    );
   }
 
   // Scenario 3 (FM-3): submitting a blank/whitespace-only answer is treated the same as a
@@ -815,7 +827,11 @@ async function driveReviewerIdentityPrompt() {
     const h1 = bootIdentityHarness({ promptQueue: ['   '], storage });
     await h1.flush();
     check('identity FM-3: a whitespace-only answer does not become the stored name', vm.runInContext('reviewer.name', h1.ctx) === '');
-    check('identity FM-3: a whitespace-only answer renders the neutral placeholder, not blank/hash', h1.created[0].textContent === 'you are Reviewer', h1.created[0].textContent);
+    check(
+      'identity FM-3: a whitespace-only answer renders the neutral placeholder, not blank/hash',
+      identityLabelEl(h1).textContent === 'you are Reviewer',
+      identityLabelEl(h1).textContent
+    );
 
     const h2 = bootIdentityHarness({ promptQueue: [], storage });
     await h2.flush();
@@ -829,7 +845,45 @@ async function driveReviewerIdentityPrompt() {
     const h = bootIdentityHarness({ promptQueue: [], storage });
     await h.flush();
     check('identity FM-4: a reviewer with an existing name is not prompted on boot', h.promptCalls === 0, String(h.promptCalls));
-    check('identity FM-4: the existing name renders in the header unchanged', h.created[0].textContent === 'you are Bo', h.created[0].textContent);
+    check(
+      'identity FM-4: the existing name renders in the header unchanged',
+      identityLabelEl(h).textContent === 'you are Bo',
+      identityLabelEl(h).textContent
+    );
+  }
+
+  // Scenario 5: attribution for OTHER reviewers must stay stable. An unnamed PEER's
+  // presence tooltip still falls back to their id-hash slice via the untouched
+  // authorLabel()/renderPresence() path — never identityLabel()'s "Reviewer" placeholder,
+  // which is scoped to this tab's own "you are" chip only.
+  {
+    const h = bootIdentityHarness({ promptQueue: ['Ada'] });
+    await h.flush();
+    h.fire('presence', [{ id: '87654321-peer-uuid', connectedAt: 1, count: 1 }]); // no name
+    await h.flush();
+    const avatar = findLastByClass(h.created, 'presence-avatar');
+    check(
+      "identity: an unnamed PEER's presence tooltip still falls back to their id-hash slice (attribution elsewhere stays stable)",
+      avatar.title === '87654321',
+      avatar.title
+    );
+  }
+
+  // Scenario 6: the existing 'edit' flow's Cancel path (unchanged) leaves the name and
+  // header untouched and does not re-sync.
+  {
+    const h = bootIdentityHarness({ promptQueue: ['Ada', null] });
+    await h.flush();
+    const fetchBefore = h.fetchCalls;
+    identityEditBtn(h).dispatch('click');
+    await h.flush();
+    check('identity: dismissing the edit prompt (Cancel) leaves the stored name unchanged', vm.runInContext('reviewer.name', h.ctx) === 'Ada');
+    check('identity: dismissing the edit prompt does not re-sync (no fetch fired)', h.fetchCalls === fetchBefore, `Δ=${h.fetchCalls - fetchBefore}`);
+    check(
+      'identity: dismissing the edit prompt leaves the header text unchanged',
+      identityLabelEl(h).textContent === 'you are Ada',
+      identityLabelEl(h).textContent
+    );
   }
 }
 
