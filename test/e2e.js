@@ -191,26 +191,40 @@ function check(name, cond, detail) {
 // (one-shot per-scenario boots, a boxed clock advanced after boot) call this —
 // `getNow` and `onFetch` are hooks so each caller's own clock/counter variables
 // keep working exactly as before, since neither caller's driving code may change.
-function buildLivenessVm({ fakeState, getNow, onFetch }) {
+// promptQueue lets a caller script canned answers for successive window.prompt()
+// calls (issue 011 #1: the first-load name prompt, then a later 'edit' click reusing
+// the same global) — shift() one per call, () => null once exhausted (matches the
+// old fixed stub so callers that never pass it see unchanged behavior). storage lets
+// a caller share one localStorage-backed Map across two separate boots, to simulate
+// a page reload that must see what the first boot persisted.
+function buildLivenessVm({ fakeState, getNow, onFetch, promptQueue, storage }) {
   let timers = [];
   let tid = 1;
   const pump = () => { for (const t of [...timers]) t.fn(); }; // one tick of every live interval
 
-  const makeEl = () => ({
-    textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
-    className: '', dataset: {}, style: { setProperty() {}, removeProperty() {} },
-    classList: { add() {}, remove() {}, contains: () => false },
-    addEventListener() {}, removeEventListener() {}, appendChild() {}, removeChild() {},
-    append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
-    scrollIntoView() {}, focus() {}, setSelectionRange() {},
-    querySelector: () => makeEl(), querySelectorAll: () => [], contains: () => false,
-    getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), cloneRange() { return this; },
-  });
+  const makeEl = () => {
+    const listeners = {};
+    return {
+      textContent: '', innerHTML: '', hidden: false, disabled: false, value: '',
+      className: '', dataset: {}, style: { setProperty() {}, removeProperty() {} },
+      classList: { add() {}, remove() {}, contains: () => false },
+      addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+      removeEventListener() {}, appendChild() {}, removeChild() {},
+      append() {}, remove() {}, setAttribute() {}, getAttribute: () => null,
+      scrollIntoView() {}, focus() {}, setSelectionRange() {},
+      querySelector: () => makeEl(), querySelectorAll: () => [], contains: () => false,
+      getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0 }), cloneRange() { return this; },
+      // test-only: replay a captured listener (e.g. click the 'edit' button built by renderIdentity()).
+      dispatch(type) { for (const fn of listeners[type] || []) fn(); },
+    };
+  };
   const els = {};
   const getEl = (id) => (els[id] || (els[id] = makeEl()));
 
   let es = null;
   let fetchCalls = 0; // count GET /api/state re-syncs (fetchState); always tracked, cheap either way
+  let promptCalls = 0;
+  const queue = promptQueue || [];
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
   const ctx = vm.createContext({
@@ -226,11 +240,12 @@ function buildLivenessVm({ fakeState, getNow, onFetch }) {
     setInterval: (fn) => { const id = tid++; timers.push({ id, fn }); return id; },
     clearInterval: (id) => { const idx = timers.findIndex((t) => t.id === id); if (idx !== -1) timers.splice(idx, 1); },
     setTimeout: () => 0, clearTimeout: () => {},
-    Date: { now: getNow }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true, prompt: () => null,
+    Date: { now: getNow }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true,
+    prompt: () => { promptCalls++; return queue.length ? queue.shift() : null; },
     // Browser globals the reviewer-identity module (app.js) legitimately uses.
     crypto: { randomUUID: () => `shim-uuid-${tid++}` },
     localStorage: (() => {
-      const m = new Map();
+      const m = storage || new Map();
       return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
     })(),
     JSON, Math, Number, String, Array, Object, Boolean, console, Promise, encodeURIComponent, decodeURIComponent,
@@ -239,7 +254,12 @@ function buildLivenessVm({ fakeState, getNow, onFetch }) {
   const load = (file) => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8'), ctx, { filename: file });
   const flush = async () => { for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r)); };
 
-  return { ctx, getEl, fire, pump, timers, load, flush, get fetchCalls() { return fetchCalls; }, get es() { return es; } };
+  return {
+    ctx, getEl, fire, pump, timers, load, flush,
+    get fetchCalls() { return fetchCalls; },
+    get promptCalls() { return promptCalls; },
+    get es() { return es; },
+  };
 }
 
 // Exercise the working-overlay liveness WIRING the way a browser would: load the
@@ -701,6 +721,115 @@ async function driveLivenessRefreshAccuracy() {
       stale.hidden === false,
       JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
     );
+  }
+}
+
+// ---------- reviewer identity: first-load name prompt (issue 011 #1) ----------
+//
+// Before this feature a first-time reviewer's header read "you are 2cf83d89" — the
+// head of their crypto.randomUUID() id — since authorLabel() falls back to a hash
+// slice when a reviewer has no name. Drive the real app.js boot in the same DOM shim
+// driveLivenessWiring uses (minus liveness.js, which this feature doesn't touch) to
+// prove the header never shows that raw hash, without touching authorLabel() itself —
+// which other reviewers' attribution (comments, badges, presence tooltips) still relies
+// on for its existing hash-fallback disambiguation.
+function idleFakeState() {
+  return { doc: { title: 'T', html: '<p>x</p>', version: 1 }, status: 'reviewing', review: { comments: [], choices: {} }, chat: [], progress: [], presence: [] };
+}
+
+// Boots app.js (no liveness.js — this feature never touches window.Liveness) with a
+// createElement spy already installed, so callers can read back the label/edit
+// elements renderIdentity() builds during boot. Returns the vm handle plus `created`,
+// the ordered list of elements createElement() has produced so far.
+function bootIdentityHarness({ promptQueue, storage } = {}) {
+  const vmHandle = buildLivenessVm({ fakeState: idleFakeState(), getNow: () => 1, promptQueue, storage });
+  const created = [];
+  const realCreate = vmHandle.ctx.document.createElement;
+  vmHandle.ctx.document.createElement = (tag) => { const el = realCreate(tag); created.push(el); return el; };
+  vmHandle.load('app.js');
+  // Attach `created` on the SAME object rather than spreading vmHandle into a new one —
+  // a spread would snapshot its getter properties (fetchCalls/promptCalls) into static
+  // values at this instant, breaking live tracking of calls made later in the test.
+  vmHandle.created = created;
+  return vmHandle;
+}
+
+async function driveReviewerIdentityPrompt() {
+  // Scenario 1: a brand-new reviewer (no stored name) is prompted once on boot; a
+  // real answer is stored and reflected immediately in the header — and the existing
+  // 'edit' flow (unchanged) still works afterwards, reusing the same window.prompt().
+  {
+    const h = bootIdentityHarness({ promptQueue: ['Ada'] });
+    await h.flush();
+
+    check('identity FM-1: a first-time reviewer is prompted for a name exactly once on boot', h.promptCalls === 1, String(h.promptCalls));
+    const label = h.created[0];
+    check(
+      'identity FM-1: a real answer to the first-load prompt renders in the header, not the raw id hash',
+      label.textContent === 'you are Ada',
+      label.textContent
+    );
+    check('identity FM-1: the answered name is persisted for future loads/attribution', vm.runInContext('reviewer.name', h.ctx) === 'Ada');
+
+    const fetchBefore = h.fetchCalls;
+    // Hand the SAME global prompt() a second scripted answer, then replay the click
+    // renderIdentity() bound on boot.
+    h.ctx.prompt = () => 'Ada2';
+    const editBtn = h.created[1];
+    editBtn.dispatch('click');
+    await h.flush();
+
+    const label2 = h.created[h.created.length - 2]; // renderIdentity()'s re-render: [..., label2, edit2]
+    check(
+      "identity: the existing 'edit' flow still updates the header after the first-load prompt",
+      label2.textContent === 'you are Ada2',
+      label2.textContent
+    );
+    check('identity: editing the name still re-syncs (syncReview fires)', h.fetchCalls > fetchBefore, `Δ=${h.fetchCalls - fetchBefore}`);
+  }
+
+  // Scenario 2 (FM-2): dismissing the first-load prompt (Cancel → null) must not hard-block
+  // or fall back to the raw id hash — a neutral placeholder shows instead — and a simulated
+  // reload (same localStorage) does not nag the reviewer with the prompt again.
+  {
+    const storage = new Map();
+    const h1 = bootIdentityHarness({ promptQueue: [null], storage });
+    await h1.flush();
+    check('identity FM-2: dismissing (Cancel) the first-load prompt still only prompts once', h1.promptCalls === 1, String(h1.promptCalls));
+    check(
+      'identity FM-2: a dismissed prompt shows a neutral placeholder, never the raw id hash',
+      h1.created[0].textContent === 'you are Reviewer',
+      h1.created[0].textContent
+    );
+
+    const h2 = bootIdentityHarness({ promptQueue: [], storage });
+    await h2.flush();
+    check('identity FM-2: a later load with the same storage does not re-prompt after a dismissal', h2.promptCalls === 0, String(h2.promptCalls));
+    check('identity FM-2: the later load still shows the neutral placeholder (no name was ever stored)', h2.created[0].textContent === 'you are Reviewer', h2.created[0].textContent);
+  }
+
+  // Scenario 3 (FM-3): submitting a blank/whitespace-only answer is treated the same as a
+  // dismissal — no name stored, no re-prompt on the next load.
+  {
+    const storage = new Map();
+    const h1 = bootIdentityHarness({ promptQueue: ['   '], storage });
+    await h1.flush();
+    check('identity FM-3: a whitespace-only answer does not become the stored name', vm.runInContext('reviewer.name', h1.ctx) === '');
+    check('identity FM-3: a whitespace-only answer renders the neutral placeholder, not blank/hash', h1.created[0].textContent === 'you are Reviewer', h1.created[0].textContent);
+
+    const h2 = bootIdentityHarness({ promptQueue: [], storage });
+    await h2.flush();
+    check('identity FM-3: a later load does not re-prompt after a blank answer', h2.promptCalls === 0, String(h2.promptCalls));
+  }
+
+  // Scenario 4 (FM-4): a reviewer who already has a name (pre-existing localStorage, e.g.
+  // from before this feature shipped, or from a prior 'edit') is never prompted.
+  {
+    const storage = new Map([['pr.reviewerName', 'Bo']]);
+    const h = bootIdentityHarness({ promptQueue: [], storage });
+    await h.flush();
+    check('identity FM-4: a reviewer with an existing name is not prompted on boot', h.promptCalls === 0, String(h.promptCalls));
+    check('identity FM-4: the existing name renders in the header unchanged', h.created[0].textContent === 'you are Bo', h.created[0].textContent);
   }
 }
 
@@ -1450,6 +1579,9 @@ async function main() {
 
   console.log('working-overlay liveness: refresh-accurate elapsed timer + staleness hint (issue 009 T3)');
   await driveLivenessRefreshAccuracy();
+
+  console.log('reviewer identity: first-load name prompt (issue 011 #1)');
+  await driveReviewerIdentityPrompt();
 
   console.log('safeguard: a server running stale code is restarted on start');
   // occupy the port with a server that reports old code + no active sessions
