@@ -309,10 +309,13 @@ async function driveLivenessWiring() {
   now += 5000; pump();
   check('liveness: elapsed ticks up (0:05) and stays fresh below threshold', elapsed.textContent === '0:05' && stale.hidden === true, elapsed.textContent);
 
-  now += 40000; pump(); // 45s since the last sign of life
+  now += 40000; pump(); // 45s since the last sign of life — still fresh under the relaxed 90s threshold
+  check('liveness: 45s in stays fresh under the relaxed threshold', elapsed.textContent === '0:45' && stale.hidden === true, JSON.stringify({ e: elapsed.textContent, h: stale.hidden }));
+
+  now += 50000; pump(); // 95s since the last sign of life — now past the 90s threshold
   check(
     'liveness: past the threshold a muted advisory appears with the count',
-    elapsed.textContent === '0:45' && stale.hidden === false && stale.textContent === 'No updates for 45 s — the agent may be stuck.',
+    elapsed.textContent === '1:35' && stale.hidden === false && stale.textContent === 'Still working; no update from the agent in 95 s.',
     JSON.stringify({ e: elapsed.textContent, h: stale.hidden, t: stale.textContent })
   );
 
@@ -320,9 +323,9 @@ async function driveLivenessWiring() {
   check('liveness: a progress event clears the advisory and keeps the timer', stale.hidden === true && stale.textContent === '' && timers.length === 1, JSON.stringify({ h: stale.hidden, n: timers.length }));
 
   now += 3000; pump();
-  check('liveness: elapsed keeps climbing (0:48) but stays fresh after progress', elapsed.textContent === '0:48' && stale.hidden === true, elapsed.textContent);
+  check('liveness: elapsed keeps climbing (1:38) but stays fresh after progress', elapsed.textContent === '1:38' && stale.hidden === true, elapsed.textContent);
 
-  now += 41000; pump();
+  now += 90000; pump(); // ~93s of silence since the last progress event — past the relaxed threshold again
   check('liveness: silence past the threshold again re-shows the advisory', stale.hidden === false, JSON.stringify(stale.textContent));
   fakeState.status = 'reviewing';
   fire('doc', {}); // reworked doc arrives → present → reviewing
@@ -562,20 +565,20 @@ async function driveLivenessRefreshAccuracy() {
     // Extend scenario 1 to prove lastSignalTs is really Math.max(lastAgentActivity,
     // workingSince) rather than workingSince alone. lastAgentActivity (1_005_000) is
     // 5s AFTER workingSince (1_000_000), so the two candidate staleness deadlines
-    // land 5s apart: since-alone would cross the 40s threshold at now=1_040_000;
+    // land 5s apart: since-alone would cross the 90s threshold at now=1_090_000;
     // the correct max-based lastSignalTs (1_005_000) crosses it 5s later, at
-    // now=1_045_000. Landing the clock in between (1_042_000) is hidden under the
+    // now=1_095_000. Landing the clock in between (1_092_000) is hidden under the
     // correct implementation but would already show under a since-alone regression
     // that silently dropped the Math.max computation — the exact gap this closes.
     const stale = h.getEl('working-stale');
-    h.clock.now = workingSince + 42000; // 1_042_000: past since-based deadline, before last-based deadline
+    h.clock.now = workingSince + 92000; // 1_092_000: past since-based deadline, before last-based deadline
     h.pump();
     check(
       'liveness refresh: Math.max(last, since) — hint stays hidden between the since-only and last-based deadlines',
       stale.hidden === true,
       JSON.stringify({ hidden: stale.hidden, text: stale.textContent })
     );
-    h.clock.now = workingSince + 46000; // 1_046_000: past the correct (last-based) deadline too
+    h.clock.now = workingSince + 96000; // 1_096_000: past the correct (last-based) deadline too
     h.pump();
     check(
       'liveness refresh: Math.max(last, since) — hint finally appears once the last-based deadline passes',
@@ -676,7 +679,7 @@ async function driveLivenessRefreshAccuracy() {
       elapsed.textContent === '0:05',
       elapsed.textContent
     );
-    h.clock.now = workingSince + 40000; // now - workingSince === 40000: past the staleness threshold
+    h.clock.now = workingSince + 90000; // now - workingSince === 90000: past the staleness threshold
     h.pump();
     check(
       'liveness refresh FM-4 mixed: garbage lastAgentActivity does not poison Math.max into NaN — the staleness hint still fires',
@@ -1713,19 +1716,19 @@ async function main() {
       liveness.stalenessHint(39999, 40000) === null,
     JSON.stringify(liveness.stalenessHint(39999, 40000))
   );
-  // FM-7: at/after the threshold a muted, non-alarming advisory appears with the count
+  // FM-7: at/after the threshold a muted, reassuring advisory appears with the count
   check(
     'stalenessHint fires at the threshold with an advisory message',
-    liveness.stalenessHint(40000, 40000) === 'No updates for 40 s — the agent may be stuck.' &&
-      liveness.stalenessHint(62000, 40000) === 'No updates for 62 s — the agent may be stuck.',
+    liveness.stalenessHint(40000, 40000) === 'Still working; no update from the agent in 40 s.' &&
+      liveness.stalenessHint(62000, 40000) === 'Still working; no update from the agent in 62 s.',
     JSON.stringify(liveness.stalenessHint(40000, 40000))
   );
   // the threshold has a sane default so callers can omit it
   check(
-    'stalenessHint exposes a default threshold (~30-45s)',
+    'stalenessHint exposes a default threshold (relaxed to ~90s)',
     typeof liveness.STALE_THRESHOLD_MS === 'number' &&
-      liveness.STALE_THRESHOLD_MS >= 30000 &&
-      liveness.STALE_THRESHOLD_MS <= 45000 &&
+      liveness.STALE_THRESHOLD_MS >= 60000 &&
+      liveness.STALE_THRESHOLD_MS <= 120000 &&
       liveness.stalenessHint(liveness.STALE_THRESHOLD_MS) !== null &&
       liveness.stalenessHint(0) === null,
     `default=${liveness.STALE_THRESHOLD_MS}`

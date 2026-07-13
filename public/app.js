@@ -446,7 +446,7 @@ function renderProgress() {
 //
 // While the agent reworks, the spinner alone can't tell "still thinking" from
 // "silently died." So the overlay shows a live elapsed timer, and if no sign of
-// life arrives for a while it adds a muted, advisory "may be stuck" line. Purely
+// life arrives for a while it adds a muted, advisory "still working" line. Purely
 // a client-side cue driven off SSE events — it never touches session status.
 //
 // Signs of life we can observe client-side: entering 'working', and each

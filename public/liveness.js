@@ -9,9 +9,12 @@
 // without a DOM — the same split server/markdown.js uses.
 
 // How long the overlay waits with no sign of life before showing the advisory.
-// One tunable knob; the spec calls for ~30–45s. Purely a display threshold — it
-// never touches the status state machine.
-const STALE_THRESHOLD_MS = 40000;
+// One tunable knob; purely a display threshold, it never touches the status
+// state machine. Relaxed to 90s: a healthy rework often runs a while between
+// reported steps, and the old 40s window tripped the "stuck" line on perfectly
+// normal silent work. Longer window plus softer wording (see stalenessHint)
+// keeps the cue for genuinely stalled agents without crying wolf.
+const STALE_THRESHOLD_MS = 90000;
 
 // Format a millisecond duration as "m:ss" ("0:48", "1:05"). A negative or NaN
 // delta (a clock skew, a not-yet-started timer) clamps to "0:00" rather than
@@ -25,13 +28,13 @@ function formatElapsed(ms) {
 
 // Decide the advisory line, given how long since the last sign of life (entering
 // 'working', or a progress event) and the staleness threshold. Returns null
-// while fresh so the caller can simply hide the line. Advisory only — soft
-// signal, non-alarming wording; a healthy silent rework can trip it and that's
-// acceptable per the spec.
+// while fresh so the caller can simply hide the line. Advisory only: soft,
+// non-alarming wording. A healthy silent rework can still trip it, so the copy
+// reassures ("still working") rather than warning ("may be stuck").
 function stalenessHint(msSinceSignal, thresholdMs = STALE_THRESHOLD_MS) {
   if (!(msSinceSignal >= thresholdMs)) return null;
   const seconds = Math.floor(msSinceSignal / 1000);
-  return `No updates for ${seconds} s — the agent may be stuck.`;
+  return `Still working; no update from the agent in ${seconds} s.`;
 }
 
 const Liveness = { STALE_THRESHOLD_MS, formatElapsed, stalenessHint };
