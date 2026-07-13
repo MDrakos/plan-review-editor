@@ -57,6 +57,9 @@ Three pieces, zero runtime dependencies:
   and prints its `id`; every later command carries `--session <id>`. `present`
   pushes a revised document; `wait` blocks until the reviewer produces an event
   (a chat message, a submitted review, an approval, or the end of the session).
+  `start`/`present` also seed the reviewer's display name (from `--reviewer-name`,
+  `$PLANREVIEW_REVIEWER_NAME`, or `git config user.name`) so a fresh browser tab
+  isn't prompted for it.
   `start` also restarts the shared server if it is running stale code and idle
   (so tool edits take effect); `planreview restart --force` does it on demand.
 

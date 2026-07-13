@@ -64,6 +64,10 @@ const sessions = new Map(); // id -> session
 function blankSession(id) {
   return {
     id,
+    // Agent-seeded default reviewer name (from `planreview start --reviewer-name` /
+    // $PLANREVIEW_REVIEWER_NAME / `git config user.name`). Injected into /s/<id> so a
+    // fresh browser adopts it instead of prompting; '' means "no default, prompt as before".
+    defaultReviewerName: '',
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
     lastAgentActivity: null, // ms epoch of the last server-observed agent activity (progress/wait/present); null until the agent does something
     workingSince: null, // ms epoch when the CURRENT working round began; null when not working (set only by submit, cleared by loadDoc)
@@ -166,6 +170,7 @@ function sessionFile(id) {
 function serialize(s) {
   return {
     id: s.id,
+    defaultReviewerName: s.defaultReviewerName,
     status: s.status,
     lastAgentActivity: s.lastAgentActivity,
     workingSince: s.workingSince,
@@ -259,6 +264,7 @@ function restoreSessions() {
       const data = JSON.parse(fs.readFileSync(full, 'utf8'));
       if (!data || typeof data.id !== 'string') throw new Error('missing session id');
       const s = blankSession(data.id);
+      if (typeof data.defaultReviewerName === 'string') s.defaultReviewerName = data.defaultReviewerName;
       if (typeof data.status === 'string') s.status = data.status;
       // Object fields fall back to blankSession's defaults if a hand-edited file
       // has them as the wrong type — restore a usable session, never a booby-trap.
@@ -718,6 +724,22 @@ function sendHtml(res, html) {
   res.end(html);
 }
 
+// The per-session review page: the static index.html with the session's agent-seeded
+// default reviewer name injected as a window global, read at boot by public/app.js. The
+// name is agent/OS-derived and thus untrusted, so JSON-encode it and neutralize "<" (the
+// only character that could close the inline <script> early) — a "</script>" in the name
+// can't break out. Always emits a string, so the global is never `undefined`.
+function sendSessionPage(res, defaultReviewerName) {
+  fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
+    if (err) return sendJson(res, 500, { error: 'missing asset: index.html' });
+    const literal = JSON.stringify(String(defaultReviewerName || '')).replace(/</g, '\\u003c');
+    const boot = `<script>window.__planreviewDefaultName=${literal};</script>`;
+    const out = html.includes('</head>') ? html.replace('</head>', `${boot}\n</head>`) : boot + html;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(out);
+  });
+}
+
 // The index at / — a live list of every open plan, one per agent.
 function indexHtml() {
   return `<!doctype html>
@@ -795,9 +817,13 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname === '/api/sessions') {
       return sendJson(res, 200, [...sessions.values()].map(sessionSummary));
     }
-    // the review UI for one session; the client reads its id from the URL
+    // the review UI for one session; the client reads its id from the URL. We inject
+    // the session's agent-seeded default reviewer name so the browser can adopt it at
+    // boot without prompting (see public/app.js). Unknown id -> no default (empty).
     if (method === 'GET' && pathname.startsWith('/s/')) {
-      return sendFile(res, 'index.html', 'text/html; charset=utf-8');
+      const sid = decodeURIComponent(pathname.slice(3).split('/')[0] || '');
+      const sess = sessions.get(sid);
+      return sendSessionPage(res, sess ? sess.defaultReviewerName : '');
     }
 
     // ----- start = create a session and present into it (agent-driven) -----
@@ -805,7 +831,9 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       if (!body.path) return sendJson(res, 400, { error: 'missing "path"' });
       const s = createSession();
-      loadDoc(s, path.resolve(body.path));
+      // Agent-seeded default reviewer name (optional). Trimmed; missing/blank leaves it ''.
+      if (typeof body.reviewerName === 'string') s.defaultReviewerName = body.reviewerName.trim();
+      loadDoc(s, path.resolve(body.path)); // persists the session, default name included
       return sendJson(res, 200, {
         ok: true,
         id: s.id,
@@ -993,6 +1021,9 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && pathname === '/agent/present') {
       const body = await readBody(req);
       if (!body.path) return sendJson(res, 400, { error: 'missing "path"' });
+      // Let a re-present refresh the seeded name if one is supplied; never clear it with a blank.
+      if (typeof body.reviewerName === 'string' && body.reviewerName.trim())
+        s.defaultReviewerName = body.reviewerName.trim();
       loadDoc(s, path.resolve(body.path));
       broadcast(s, 'doc', { version: s.doc.version });
       return sendJson(res, 200, { ok: true, version: s.doc.version, title: s.doc.title });

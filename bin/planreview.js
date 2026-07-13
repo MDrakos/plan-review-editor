@@ -18,7 +18,7 @@
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
-const { spawn, execFile } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 
 const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -137,6 +137,7 @@ function parseArgs(argv) {
     if (a === '--session') opts.session = argv[++i];
     else if (a === '--timeout') opts.timeout = Number(argv[++i]);
     else if (a === '--warn-after') opts.warnAfter = Number(argv[++i]);
+    else if (a === '--reviewer-name') opts.reviewerName = argv[++i];
     else if (a === '--no-open') opts.noOpen = true;
     else if (a.startsWith('--')) opts[a.slice(2)] = true;
     else positionals.push(a);
@@ -155,13 +156,27 @@ function scoped(pathname, id) {
   return `${pathname}${sep}session=${encodeURIComponent(id)}`;
 }
 
+// The reviewer name to seed into the browser so it stops prompting on a fresh tab.
+// Priority: an explicit --reviewer-name flag, then $PLANREVIEW_REVIEWER_NAME, then the
+// repo/user's `git config user.name` — so it just works with zero configuration. Empty
+// string if none resolve (the browser then prompts on first load, exactly as before).
+function resolveReviewerName(opts) {
+  const explicit = (opts.reviewerName || process.env.PLANREVIEW_REVIEWER_NAME || '').trim();
+  if (explicit) return explicit;
+  try {
+    return execFileSync('git', ['config', 'user.name'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return ''; // no git, or user.name unset — leave it to the browser
+  }
+}
+
 const commands = {
   // start = begin a NEW isolated session and present the plan in a fresh tab.
   async start(argv) {
     const { opts, positionals } = parseArgs(argv);
     const file = resolveDoc(positionals[0]);
     await ensureServer();
-    const out = await request('POST', '/agent/start', { path: file });
+    const out = await request('POST', '/agent/start', { path: file, reviewerName: resolveReviewerName(opts) });
     const url = BASE + out.url;
     if (!opts.noOpen) openBrowser(url);
     console.log(
@@ -174,7 +189,7 @@ const commands = {
     const { opts, positionals } = parseArgs(argv);
     const id = requireSession(opts, 'present');
     const file = resolveDoc(positionals[0]);
-    const out = await request('POST', scoped('/agent/present', id), { path: file });
+    const out = await request('POST', scoped('/agent/present', id), { path: file, reviewerName: resolveReviewerName(opts) });
     console.log(JSON.stringify({ ok: true, id, ...out }));
   },
 

@@ -26,6 +26,21 @@ const REVIEWER_ID_KEY = 'pr.reviewerId';
 const REVIEWER_NAME_KEY = 'pr.reviewerName';
 const REVIEWER_NAME_ASKED_KEY = 'pr.reviewerNameAsked';
 
+// The agent can seed a default reviewer name when it starts the session — the CLI
+// resolves it from --reviewer-name, $PLANREVIEW_REVIEWER_NAME, or `git config user.name`,
+// and the server injects it into this page as window.__planreviewDefaultName. It's a
+// FALLBACK only: a name this browser saved earlier (localStorage) always wins, so a
+// reviewer who renamed themselves keeps that name. When present it spares a fresh browser
+// the first-load prompt entirely (reviewer.name is non-empty, so maybePromptForName() is a
+// no-op); empty/whitespace is treated as absent and the prompt still fires.
+function serverDefaultName() {
+  try {
+    return String((window && window.__planreviewDefaultName) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
 function loadReviewerId() {
   let id = '';
   try {
@@ -50,9 +65,9 @@ const reviewer = {
   id: loadReviewerId(),
   get name() {
     try {
-      return localStorage.getItem(REVIEWER_NAME_KEY) || '';
+      return localStorage.getItem(REVIEWER_NAME_KEY) || serverDefaultName();
     } catch {
-      return '';
+      return serverDefaultName();
     }
   },
   set name(v) {
