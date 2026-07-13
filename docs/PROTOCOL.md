@@ -119,9 +119,10 @@ shows a "reworking" overlay until you `present` again.
   previous version (the reviewer can dismiss the highlight); no action needed.
 - While reworking, `planreview progress "<step>" --session <id>` appends a step
   to a live checklist shown in the reviewer's "reworking" overlay (SSE
-  `progress` event). Steps reset each round and clear when you `present`.
-- The overlay also shows a live elapsed timer and, past a threshold with no
-  sign of life, a "may be stuck" hint — driven by two server-tracked
+  `progress` event). Steps reset each round and clear when you `present`. Emit
+  one per real step so the overlay stays alive instead of showing a bare spinner.
+- The overlay also shows a live elapsed timer and, past a threshold (~90s) with
+  no sign of life, a low-key "still working" advisory — driven by two server-tracked
   timestamps on `/api/state` and every `status` SSE event: `workingSince`
   (when the current round began; `null` outside `working`) and
   `lastAgentActivity` (bumped on `wait`, `progress`, and `present`). Both
