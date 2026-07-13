@@ -18,6 +18,12 @@ A missing or unknown session id is an error (HTTP 404); there is no implicit
 "current" session. The shared server exits on its own once no sessions remain,
 and a fresh `start` respawns it.
 
+`start` (and `present`) seed the reviewer's display name so the browser doesn't
+prompt for it on a fresh tab. The name is resolved from `--reviewer-name <name>`,
+then `$PLANREVIEW_REVIEWER_NAME`, then `git config user.name`, and injected into
+`/s/<id>` for the browser to adopt. A name the reviewer has already saved in that
+browser still wins, and if none resolve the browser prompts once as before.
+
 `/health` reports the server's code fingerprint. `start` compares it to the
 on-disk code and, if the running server is stale (started before a code edit)
 **and idle**, restarts it so changes take effect — but it will not restart a

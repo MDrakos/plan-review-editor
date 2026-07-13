@@ -741,8 +741,12 @@ function idleFakeState() {
 // createElement spy already installed, so callers can read back the label/edit
 // elements renderIdentity() builds during boot. Returns the vm handle plus `created`,
 // the ordered list of elements createElement() has produced so far.
-function bootIdentityHarness({ promptQueue, storage } = {}) {
+function bootIdentityHarness({ promptQueue, storage, serverDefaultName } = {}) {
   const vmHandle = buildLivenessVm({ fakeState: idleFakeState(), getNow: () => 1, promptQueue, storage });
+  // The server injects the agent-seeded default name as a window global on the page
+  // (see server.js sendSessionPage); set it here before app.js boots so scenarios can
+  // exercise the "adopt the default instead of prompting" path.
+  if (serverDefaultName !== undefined) vmHandle.ctx.window.__planreviewDefaultName = serverDefaultName;
   const created = [];
   const realCreate = vmHandle.ctx.document.createElement;
   vmHandle.ctx.document.createElement = (tag) => { const el = realCreate(tag); created.push(el); return el; };
@@ -885,6 +889,53 @@ async function driveReviewerIdentityPrompt() {
       identityLabelEl(h).textContent
     );
   }
+
+  // Scenario 7 (server default): the agent seeds a default name (CLI resolves it from
+  // --reviewer-name / $PLANREVIEW_REVIEWER_NAME / `git config user.name`, server injects
+  // it into the page). A fresh browser (no stored name) adopts it silently — no prompt —
+  // and it flows through to the header AND to author attribution.
+  {
+    const h = bootIdentityHarness({ promptQueue: ['SHOULD-NOT-BE-USED'], serverDefaultName: 'Grace Hopper' });
+    await h.flush();
+    check('identity FM-5: an agent-seeded default name means a fresh browser is never prompted', h.promptCalls === 0, String(h.promptCalls));
+    check(
+      'identity FM-5: the agent-seeded default renders in the header',
+      identityLabelEl(h).textContent === 'you are Grace Hopper',
+      identityLabelEl(h).textContent
+    );
+    check(
+      'identity FM-5: the agent-seeded default flows through to author attribution',
+      vm.runInContext('author().name', h.ctx) === 'Grace Hopper',
+      String(vm.runInContext('author().name', h.ctx))
+    );
+  }
+
+  // Scenario 8 (server default, precedence): a name this browser already saved wins over
+  // the agent-seeded default — a reviewer who renamed themselves here keeps that name.
+  {
+    const storage = new Map([['pr.reviewerName', 'Bo']]);
+    const h = bootIdentityHarness({ promptQueue: [], storage, serverDefaultName: 'Grace Hopper' });
+    await h.flush();
+    check('identity FM-5: a saved localStorage name still suppresses the prompt with a default present', h.promptCalls === 0, String(h.promptCalls));
+    check(
+      'identity FM-5: a saved localStorage name wins over the agent-seeded default',
+      identityLabelEl(h).textContent === 'you are Bo',
+      identityLabelEl(h).textContent
+    );
+  }
+
+  // Scenario 9 (no/empty default): an empty default is treated as absent — a fresh browser
+  // still gets the first-load prompt, exactly as before this feature.
+  {
+    const h = bootIdentityHarness({ promptQueue: ['Ada'], serverDefaultName: '  ' });
+    await h.flush();
+    check('identity FM-5: an empty/whitespace default does not suppress the first-load prompt', h.promptCalls === 1, String(h.promptCalls));
+    check(
+      'identity FM-5: with no usable default the prompt answer still renders',
+      identityLabelEl(h).textContent === 'you are Ada',
+      identityLabelEl(h).textContent
+    );
+  }
 }
 
 // ---------- persistence: sessions survive a server restart (issue 005) ----------
@@ -985,6 +1036,7 @@ async function persistenceChecks() {
     );
     const EXPECTED_KEYS = [
       'chat',
+      'defaultReviewerName',
       'doc',
       'id',
       'lastAgentActivity',
@@ -1458,6 +1510,57 @@ async function persistenceChecks() {
     await stop(res008Id);
     await sleep(300);
     fs.rmSync(stateDir6b3, { recursive: true, force: true });
+
+    // ----- P6b4: an agent-seeded reviewer name is injected into the page and survives a restart -----
+    // The CLI resolves a default reviewer name (flag / env / `git config user.name`) and passes it
+    // to /agent/start; the server injects it into /s/<id> as window.__planreviewDefaultName so the
+    // browser adopts it without prompting. Prove (a) it's injected, (b) it's HTML-safe against a
+    // "</script>" breakout, and (c) it round-trips a restart (persisted with the session).
+    console.log('persistence: an agent-seeded reviewer name is injected into the page and survives a restart');
+    await killP();
+    const stateDir6b4 = fs.mkdtempSync(path.join(os.tmpdir(), 'planreview-rname-'));
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b4 });
+    check('persist: server up (reviewer-name injection case)', await waitHealth(true));
+    const rname = await p('/agent/start', { path: doc, reviewerName: 'Grace Hopper' });
+    const rnameId = rname.data.id;
+    const page1 = await pageText(`/s/${rnameId}`);
+    check(
+      'reviewer name: /s/<id> injects the agent-seeded default as a window global',
+      page1.ok && page1.body.includes('window.__planreviewDefaultName="Grace Hopper"'),
+      page1.body.match(/__planreviewDefaultName[^<]*/)?.[0] || '(not found)'
+    );
+    // A session with no seeded name injects an empty string (never `undefined`/broken JS).
+    const plain = await p('/agent/start', { path: doc });
+    const plainPage = await pageText(`/s/${plain.data.id}`);
+    check(
+      'reviewer name: a session with no seeded name injects an empty string',
+      plainPage.body.includes('window.__planreviewDefaultName=""'),
+      plainPage.body.match(/__planreviewDefaultName[^<]*/)?.[0] || '(not found)'
+    );
+    // XSS guard: a name containing "</script>" must not break out of the inline <script>.
+    const evil = await p('/agent/start', { path: doc, reviewerName: 'x</script><script>alert(1)' });
+    const evilPage = await pageText(`/s/${evil.data.id}`);
+    check(
+      'reviewer name: a "</script>" in the name is neutralized, not emitted raw',
+      !evilPage.body.includes('</script><script>alert(1)') && evilPage.body.includes('\\u003c/script'),
+      '(checked for raw breakout)'
+    );
+    // Persist + restart: the seeded name is stored with the session and re-injected after a restart.
+    await waitFile(rnameId, (st) => st.defaultReviewerName === 'Grace Hopper');
+    await killP();
+    spawnP({ PLANREVIEW_STATE_DIR: stateDir6b4 });
+    check('persist: server restarts (reviewer-name injection case)', await waitHealth(true));
+    const page2 = await pageText(`/s/${rnameId}`);
+    check(
+      'reviewer name: the seeded default survives a restart and is re-injected',
+      page2.ok && page2.body.includes('window.__planreviewDefaultName="Grace Hopper"'),
+      page2.body.match(/__planreviewDefaultName[^<]*/)?.[0] || '(not found)'
+    );
+    await stop(rnameId);
+    await stop(plain.data.id);
+    await stop(evil.data.id);
+    await sleep(300);
+    fs.rmSync(stateDir6b4, { recursive: true, force: true });
 
     // ----- P6c: a submitted bundle is de-aliased from live session objects -----
     // mergeComments returns peer comments by reference; reviewBundle structuredClones the
