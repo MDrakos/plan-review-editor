@@ -49,9 +49,11 @@ function request(method, pathname, body) {
           } catch {
             parsed = { raw: data };
           }
-          if (res.statusCode >= 400)
-            reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
-          else resolve(parsed);
+          if (res.statusCode >= 400) {
+            const e = new Error(parsed.error || `HTTP ${res.statusCode}`);
+            e.statusCode = res.statusCode; // lets present/progress tell a 409 (interrupted) from a fatal error
+            reject(e);
+          } else resolve(parsed);
         });
       }
     );
@@ -63,6 +65,17 @@ function request(method, pathname, body) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// FM-2: present/progress are gated to an active working round — a reviewer
+// interrupt discards the stale rework and makes them 409. That's a documented
+// recovery, not a fatal error: print it and let the caller exit 0 (so a
+// `present && wait` chain proceeds into the next `wait`). Returns true if it
+// handled a 409; false means the error is fatal and the caller must rethrow.
+function handledInterrupt409(err) {
+  if (err.statusCode !== 409) return false;
+  console.log(JSON.stringify({ interrupted: true, message: 'round interrupted; wait again' }));
+  return true;
+}
 
 async function serverHealth() {
   try {
@@ -189,7 +202,13 @@ const commands = {
     const { opts, positionals } = parseArgs(argv);
     const id = requireSession(opts, 'present');
     const file = resolveDoc(positionals[0]);
-    const out = await request('POST', scoped('/agent/present', id), { path: file, reviewerName: resolveReviewerName(opts) });
+    let out;
+    try {
+      out = await request('POST', scoped('/agent/present', id), { path: file, reviewerName: resolveReviewerName(opts) });
+    } catch (err) {
+      if (handledInterrupt409(err)) return;
+      throw err;
+    }
     console.log(JSON.stringify({ ok: true, id, ...out }));
   },
 
@@ -277,7 +296,14 @@ const commands = {
     const id = requireSession(opts, 'progress');
     const text = positionals.join(' ').trim();
     if (!text) throw new Error('usage: planreview progress <message> --session <id>');
-    console.log(JSON.stringify(await request('POST', scoped('/agent/progress', id), { text })));
+    let out;
+    try {
+      out = await request('POST', scoped('/agent/progress', id), { text });
+    } catch (err) {
+      if (handledInterrupt409(err)) return;
+      throw err;
+    }
+    console.log(JSON.stringify(out));
   },
 
   async status(argv) {

@@ -46,9 +46,16 @@ loop:
              `planreview present plan.md --session $id`, then wait again
     approve) apply any feedback in the bundle, `planreview stop --session $id`,
              then proceed with the work — do NOT present again
+    interrupt) the reviewer aborted this round — stop reworking, do NOT
+             present, just wait again
     end)     `planreview stop --session $id`, return to normal operation
   esac
 ```
+
+A busy agent (mid-rework, not yet back at `wait`) may instead discover the
+interrupt as a `409` from its own `present` or `progress` call — treat that
+identically: drop the in-flight rework and go straight to `wait` again. See
+**`interrupt`** below.
 
 ## Events (returned by `planreview wait`)
 
@@ -117,10 +124,16 @@ shows a "reworking" overlay until you `present` again.
   browser reloads it in place and a fresh review round begins. Every re-present
   after the first automatically highlights the blocks that changed since the
   previous version (the reviewer can dismiss the highlight); no action needed.
+  `present` only ever succeeds during the `working` round it belongs to — if
+  the reviewer interrupted in the meantime, it returns `409` instead of
+  silently overwriting the document the reviewer is now editing. See
+  **`interrupt`**.
 - While reworking, `planreview progress "<step>" --session <id>` appends a step
   to a live checklist shown in the reviewer's "reworking" overlay (SSE
   `progress` event). Steps reset each round and clear when you `present`. Emit
   one per real step so the overlay stays alive instead of showing a bare spinner.
+  Like `present`, `progress` only succeeds during an active `working` round and
+  also `409`s after an interrupt.
 - The overlay also shows a live elapsed timer and, past a threshold (~90s) with
   no sign of life, a low-key "still working" advisory — driven by two server-tracked
   timestamps on `/api/state` and every `status` SSE event: `workingSince`
@@ -166,6 +179,28 @@ to `done`, independent of what the agent does next.
   "submittedAt": "2026-07-03T18:12:00.000Z"
 }
 ```
+
+### `interrupt`
+
+The reviewer aborted the current `working` round before you presented the
+rework back. The session is already back at `reviewing` **on the same
+document you were handed** — every comment, choice, and resolution is intact,
+untouched by whatever rework you were mid-way through. Stop reworking, do
+**not** `present` (there's nothing new to present, and a stale `present` from
+this round would 409 anyway — see below), and just `wait` again for the
+reviewer's next action (typically a fresh `submit` with the forgotten feedback
+folded in).
+
+```json
+{ "type": "interrupt" }
+```
+
+If you were busy reworking (not yet back at `wait`) when the reviewer
+interrupted, you won't see this event directly — instead, your own `present`
+or `progress` call for that round returns `409` (`"no active rework round
+(interrupted)"`). Treat that identically: discard the in-flight rework and go
+straight to `wait` again. (`planreview present`/`planreview progress` already
+handle this for you — see **HTTP reference** below.)
 
 ### `end`
 
@@ -343,11 +378,12 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/api/submit?session=` | browser | submit a review round (→ `working`; queued as `submit`) |
 | POST | `/api/approve?session=` | browser | approve & finish (→ `done`; queued as `approve`) |
 | POST | `/api/end?session=` | browser | end the session (queued as `end`) |
-| POST | `/agent/present?session=` | CLI | render a markdown file as the session's document |
+| POST | `/api/interrupt?session=` | browser | abort the current `working` round (→ `reviewing`, same doc; queued as `interrupt`); `409` unless `working` |
+| POST | `/agent/present?session=` | CLI | render a markdown file as the session's document; **`working`-only** — `409` otherwise (a stale/interrupted round) |
 | GET | `/agent/wait?session=` | CLI | long-poll for the next reviewer event (`&timeout=<ms>` optional) |
 | POST | `/agent/say?session=` | CLI | agent chat message to the reviewer |
 | POST | `/agent/reply?session=` | CLI | agent reply threaded under a specific comment (`comment-reply` SSE) |
-| POST | `/agent/progress?session=` | CLI | append a rework step to the working overlay |
+| POST | `/agent/progress?session=` | CLI | append a rework step to the working overlay; **`working`-only** — `409` otherwise |
 | POST | `/agent/stop?session=` | CLI | end and drop just this session |
 
 The server binds to `127.0.0.1` only and holds all state in memory — a

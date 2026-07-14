@@ -321,6 +321,10 @@ html, body {
 .overlay-card p { margin: 6px 0 0; font-weight: 600; }
 .overlay-hint { color: var(--ink-soft); font-size: 13px; font-weight: 400 !important; }
 
+/* issue 012: the reworking overlay's "Interrupt & keep editing" control is a
+   plain .btn (see index.html) — it only needs spacing off the hint above it. */
+#interrupt-btn { margin: 14px 0 0; }
+
 /* live elapsed timer next to "Reworking the plan…" — muted, tabular digits so
    the width doesn't jitter as it ticks */
 .working-elapsed {

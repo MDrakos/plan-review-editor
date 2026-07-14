@@ -419,6 +419,16 @@ function titleFrom(markdown) {
   return m ? m[1].trim() : null;
 }
 
+// Shared round-reset: the trio of fields that mark "the current working round
+// is over" — used by BOTH a normal re-present (loadDoc, below) and a reviewer-
+// initiated interrupt (/api/interrupt). Extracted so the two call sites can
+// never drift apart (DSM finding, issue 012).
+function endWorkingRound(s) {
+  s.status = 'reviewing';
+  s.workingSince = null; // whatever working round was running, if any, just ended
+  s.progress = []; // the previous round's steps are done
+}
+
 function loadDoc(s, docPath) {
   const markdown = fs.readFileSync(docPath, 'utf8');
   // Highlight what changed since the previous cycle (nothing on the first load).
@@ -449,10 +459,8 @@ function loadDoc(s, docPath) {
   // explicit shared decision (008) that persists until cleared, so re-presenting a
   // reworked doc must not silently drop it (parallel to how choices survive).
   s.review = { comments: carried, choices: s.review.choices || {}, resolutions: s.review.resolutions || {} };
-  s.progress = []; // the reworked doc is here — the previous round's steps are done
-  s.status = 'reviewing';
+  endWorkingRound(s); // the reworked doc is here — the previous round is over (status/workingSince/progress)
   s.lastAgentActivity = Date.now(); // shared by /agent/start and /agent/present — either counts as agent activity
-  s.workingSince = null; // whatever working round was running, if any, just ended — unconditional
   touch(s);
   persist(s); // covers /agent/start and /agent/present
 }
@@ -1016,11 +1024,40 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
+    // Reviewer-initiated abort of an in-progress rework (issue 012): while the
+    // agent is `working`, the reviewer can bail out and go back to `reviewing`
+    // on the SAME document (s.doc is never touched by a `working` round — only
+    // present's loadDoc replaces it) with every comment/choice/resolution
+    // intact. The agent's stale rework is discarded the moment it tries to hand
+    // it back: /agent/present and /agent/progress are gated to an active
+    // `working` round (see below) and 409 once this has run.
+    if (method === 'POST' && pathname === '/api/interrupt') {
+      await readBody(req); // drain; body may carry a reviewerId but interrupt needs no author scoping
+      // LOAD-BEARING: guard AFTER the await, then mutate synchronously with ZERO
+      // await in between — identical to the submit/approve race closure above
+      // (FM-3 family). This is what makes two interrupts racing each other, or
+      // an interrupt racing a submit/present/progress, resolve to exactly one
+      // side effect instead of both landing (FM-5/FM-9/FM-10).
+      if (s.status !== 'working') return sendJson(res, 409, { error: `cannot interrupt while ${s.status}` });
+      endWorkingRound(s);
+      touch(s);
+      broadcast(s, 'status', statusPayload(s));
+      enqueueAgentEvent(s, { type: 'interrupt' });
+      persist(s);
+      return sendJson(res, 200, { ok: true });
+    }
+
     // ----- agent API (driven by bin/planreview.js) -----
 
     if (method === 'POST' && pathname === '/agent/present') {
       const body = await readBody(req);
       if (!body.path) return sendJson(res, 400, { error: 'missing "path"' });
+      // present is only ever a rework re-present (the initial doc comes from
+      // /agent/start) — gating it on an active working round is what discards a
+      // stale rework after a reviewer interrupt (issue 012) instead of silently
+      // overwriting the document the reviewer is now editing.
+      if (s.status !== 'working')
+        return sendJson(res, 409, { error: 'no active rework round (interrupted); wait for the next round' });
       // Let a re-present refresh the seeded name if one is supplied; never clear it with a blank.
       if (typeof body.reviewerName === 'string' && body.reviewerName.trim())
         s.defaultReviewerName = body.reviewerName.trim();
@@ -1093,6 +1130,9 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const text = String(body.text || '').trim();
       if (!text) return sendJson(res, 400, { error: 'empty progress' });
+      // Same working-only gate as /agent/present: a step from a round the
+      // reviewer already interrupted must not land in a cleared overlay.
+      if (s.status !== 'working') return sendJson(res, 409, { error: 'no active rework round (interrupted)' });
       const msg = { text, ts: Date.now() };
       s.progress.push(msg);
       touch(s);

@@ -214,6 +214,34 @@ document.getElementById('end-btn').addEventListener('click', async () => {
   setStatus('ended');
 });
 
+// issue 012: abort an in-progress rework and go back to editing on the same
+// document. FM-6: disable the button for the duration of the request so a
+// double-click can't fire it twice; a 409 just means the agent already
+// presented (or another tab/interrupt beat us to it) — a benign no-op, since
+// the incoming 'status'/'doc' event settles the UI either way. Any other
+// failure is surfaced the same way submit/approve surface theirs.
+const interruptBtn = document.getElementById('interrupt-btn');
+function flashInterruptError() {
+  const original = interruptBtn.textContent;
+  interruptBtn.textContent = "Couldn't reach the agent — try again";
+  setTimeout(() => {
+    interruptBtn.textContent = original;
+  }, 2500);
+}
+interruptBtn.addEventListener('click', async () => {
+  if (!confirm('Interrupt the rework and go back to editing? The agent will discard this round.')) return;
+  interruptBtn.disabled = true;
+  const res = await fetch(api('/api/interrupt'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reviewerId: reviewer.id }),
+  }).catch(() => null);
+  interruptBtn.disabled = false;
+  if (!res || (!res.ok && res.status !== 409)) flashInterruptError();
+  // success (200) or a benign 409: the broadcast 'status' event clears the
+  // overlay (and resyncs the panel) — nothing else to do here.
+});
+
 function renderDoc(doc) {
   // Rendering the live document means we are NOT in the diff view — reset it, so
   // a reworked doc arriving mid-diff (or any state resync) lands cleanly on the
@@ -587,7 +615,14 @@ function connectEvents() {
       state.progress = []; // a fresh rework round — clear last round's steps
       renderProgress();
     }
+    const wasWorking = state.status === 'working'; // capture BEFORE setStatus mutates it
     setStatus(d.status, d);
+    // issue 012: an interrupt lands as a 'status' event alone (the doc never
+    // changed, so no 'doc' event follows) — resync the panel once (peer edits,
+    // agent replies) on the working -> reviewing transition. Guarded on the
+    // PRIOR status so a present's own resync (via its 'doc' event) is never
+    // duplicated here.
+    if (d.status === 'reviewing' && wasWorking) fetchState();
   });
 }
 
