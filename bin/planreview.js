@@ -152,6 +152,7 @@ function parseArgs(argv) {
     else if (a === '--warn-after') opts.warnAfter = Number(argv[++i]);
     else if (a === '--reviewer-name') opts.reviewerName = argv[++i];
     else if (a === '--no-open') opts.noOpen = true;
+    else if (a === '--no-pull') opts.noPull = true;
     else if (a.startsWith('--')) opts[a.slice(2)] = true;
     else positionals.push(a);
   }
@@ -357,6 +358,52 @@ const commands = {
     await spawnServer(codeVersion());
     console.log(JSON.stringify({ ok: true, url: BASE }));
   },
+
+  // Bring the checkout the CLI runs from up to the latest main, then make a
+  // running server reflect it. `planreview` runs out of this repo (typically a
+  // symlink on $PATH), so "the current version" is whatever is checked out
+  // here — after a merge to main, this pulls it and refreshes the server. A
+  // server that is idle on older code is restarted onto the new code; one with
+  // live sessions is left running (restarting would drop those reviews) and
+  // picks up the change on its next idle restart. --no-pull skips the git step
+  // and only refreshes the server against the already-checked-out code.
+  async update(argv) {
+    const { opts } = parseArgs(argv);
+    const repo = path.join(__dirname, '..');
+    let pulled = 'skipped (--no-pull)';
+    if (!opts.noPull) {
+      try {
+        execFileSync('git', ['checkout', 'main'], { cwd: repo, stdio: ['ignore', 'ignore', 'pipe'] });
+        pulled = execFileSync('git', ['pull', '--ff-only', 'origin', 'main'], {
+          cwd: repo,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }).trim();
+      } catch (e) {
+        const detail = (e.stderr && e.stderr.toString().trim()) || e.message;
+        throw new Error(`git update failed (resolve it by hand in ${repo}): ${detail}`);
+      }
+    }
+    // codeVersion() reads server/*.js off disk at call time, so it reflects the
+    // pull we just did — no stale require cache to worry about.
+    const want = codeVersion();
+    const health = await serverHealth();
+    let server;
+    if (!health) {
+      server = 'not running; next `planreview start` launches the current code';
+    } else if (health.version === want) {
+      server = 'already running the current code';
+    } else if (health.sessions > 0) {
+      server =
+        `running older code with ${health.sessions} active session(s); left as-is — ` +
+        'run `planreview restart --force` to load the new code now (drops those sessions)';
+    } else {
+      await shutdownAndWait();
+      await spawnServer(want);
+      server = 'restarted onto the current code (was idle on older code)';
+    }
+    console.log(JSON.stringify({ ok: true, pulled, version: want, server }));
+  },
 };
 
 function usage() {
@@ -379,6 +426,9 @@ function usage() {
   stop --session <id>                end and drop the session
   restart [--force]                  reload the server's code (auto on start when the
                                      server is stale + idle; --force drops live sessions)
+  update [--no-pull]                 pull latest main into this checkout, then refresh an
+                                     idle server onto it (a busy server is left running);
+                                     run after a merge to main. --no-pull skips the git step
 
 The shared server (default port 4780) exits on its own once no sessions remain.`);
   process.exit(2);
