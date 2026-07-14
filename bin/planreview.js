@@ -66,6 +66,17 @@ function request(method, pathname, body) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// FM-2: present/progress are gated to an active working round — a reviewer
+// interrupt discards the stale rework and makes them 409. That's a documented
+// recovery, not a fatal error: print it and let the caller exit 0 (so a
+// `present && wait` chain proceeds into the next `wait`). Returns true if it
+// handled a 409; false means the error is fatal and the caller must rethrow.
+function handledInterrupt409(err) {
+  if (err.statusCode !== 409) return false;
+  console.log(JSON.stringify({ interrupted: true, message: 'round interrupted; wait again' }));
+  return true;
+}
+
 async function serverHealth() {
   try {
     return await request('GET', '/health');
@@ -195,14 +206,7 @@ const commands = {
     try {
       out = await request('POST', scoped('/agent/present', id), { path: file, reviewerName: resolveReviewerName(opts) });
     } catch (err) {
-      // FM-2: a reviewer interrupt discards the stale rework and gates present
-      // on an active working round (409). That's a documented recovery, not a
-      // fatal error — print it and exit 0 so a `present && wait` chain proceeds
-      // straight into the next `wait` instead of aborting the agent's script.
-      if (err.statusCode === 409) {
-        console.log(JSON.stringify({ interrupted: true, message: 'round interrupted; wait again' }));
-        return;
-      }
+      if (handledInterrupt409(err)) return;
       throw err;
     }
     console.log(JSON.stringify({ ok: true, id, ...out }));
@@ -296,11 +300,7 @@ const commands = {
     try {
       out = await request('POST', scoped('/agent/progress', id), { text });
     } catch (err) {
-      // FM-2: same 409 recovery as present() — the round was interrupted.
-      if (err.statusCode === 409) {
-        console.log(JSON.stringify({ interrupted: true, message: 'round interrupted; wait again' }));
-        return;
-      }
+      if (handledInterrupt409(err)) return;
       throw err;
     }
     console.log(JSON.stringify(out));
