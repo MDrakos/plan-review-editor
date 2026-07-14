@@ -62,6 +62,10 @@ Three pieces, zero runtime dependencies:
   isn't prompted for it.
   `start` also restarts the shared server if it is running stale code and idle
   (so tool edits take effect); `planreview restart --force` does it on demand.
+  After a merge to `main`, `planreview update` pulls the latest into this
+  checkout (the one the `planreview` command runs from) and refreshes an idle
+  server onto it — a server with live sessions is left running and picks the
+  change up on its next idle restart.
 
 ## Demo
 

@@ -1803,6 +1803,67 @@ async function main() {
   );
   await cli('stop', '--session', restarted.id);
 
+  console.log('update: pull latest main, then refresh the server the CLI runs from');
+  // --no-pull isolates the server-refresh half from the git step (a real pull
+  // would mutate this very checkout). Each case occupies PORT with a fake
+  // /health so we can assert every decision branch without fabricating real
+  // stale code — same trick as the stale-code safeguard above.
+  const fakeHealthServer = (health) => {
+    const src = `
+      const http = require('http');
+      http.createServer((req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url === '/health') return res.end(${JSON.stringify(JSON.stringify(health))});
+        if (req.url === '/admin/shutdown' && req.method === 'POST') { res.end('{"ok":true}'); return setTimeout(() => process.exit(0), 50); }
+        res.statusCode = 404; res.end('{"error":"not found"}');
+      }).listen(${PORT}, '127.0.0.1');
+    `;
+    spawn(process.execPath, ['-e', src], { stdio: 'ignore', detached: true }).unref();
+  };
+  const clearPort = async () => {
+    await browser('/admin/shutdown', {}).catch(() => {});
+    for (let i = 0; i < 30 && (await serverAlive()); i++) await sleep(100);
+  };
+
+  // (a) no server running -> nothing to restart, next start is fresh
+  await clearPort();
+  const upNone = await cli('update', '--no-pull');
+  check(
+    'update: with no server running, reports the next start launches current code',
+    /not running/.test(upNone.server) && upNone.pulled === 'skipped (--no-pull)',
+    JSON.stringify(upNone)
+  );
+
+  // (b) stale + idle -> restarted onto current code
+  fakeHealthServer({ ok: true, sessions: 0, version: 'stale-000000' });
+  await sleep(300);
+  const upIdle = await cli('update', '--no-pull');
+  check('update: a stale idle server is restarted onto the current code', /restarted/.test(upIdle.server), JSON.stringify(upIdle));
+  const afterIdle = await browser('/health');
+  check(
+    'update: the replacement server runs the current code',
+    afterIdle.data.version === upIdle.version && afterIdle.data.version !== 'stale-000000',
+    JSON.stringify(afterIdle.data)
+  );
+
+  // (c) already current -> left running as-is (reuses (b)'s replacement)
+  const upCurrent = await cli('update', '--no-pull');
+  check('update: an already-current server is left running as-is', /already running the current code/.test(upCurrent.server), JSON.stringify(upCurrent));
+
+  // (d) stale + busy -> left running, NOT dropped
+  await clearPort();
+  fakeHealthServer({ ok: true, sessions: 2, version: 'stale-000000' });
+  await sleep(300);
+  const upBusy = await cli('update', '--no-pull');
+  check(
+    'update: a stale server with live sessions is left running (reviews not dropped)',
+    /left as-is/.test(upBusy.server) && /2 active session/.test(upBusy.server),
+    JSON.stringify(upBusy)
+  );
+  const stillStale = await browser('/health');
+  check('update: the busy stale server was not restarted', stillStale.data.version === 'stale-000000', JSON.stringify(stillStale.data));
+  await clearPort(); // leave the port free for later tests
+
   console.log('choice blocks: free-text "Other" by default, opt out with other:false');
   const withOther = render('```choice\nid: q\nprompt: Pick\noptions:\n  - A\n  - B\n```\n');
   check(
