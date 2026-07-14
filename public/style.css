@@ -321,6 +321,23 @@ html, body {
 .overlay-card p { margin: 6px 0 0; font-weight: 600; }
 .overlay-hint { color: var(--ink-soft); font-size: 13px; font-weight: 400 !important; }
 
+/* issue 012: the reworking overlay's "Interrupt & keep editing" control — sized
+   and colored like the other .btn controls (topbar/submit-area) so it reads as
+   part of the same button family, not a one-off. */
+.overlay-action {
+  margin: 14px 0 0;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--ink);
+}
+.overlay-action:hover { background: var(--fill-hover); }
+.overlay-action:disabled { opacity: 0.5; cursor: default; }
+
 /* live elapsed timer next to "Reworking the plan…" — muted, tabular digits so
    the width doesn't jitter as it ticks */
 .working-elapsed {
