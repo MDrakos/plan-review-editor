@@ -49,9 +49,11 @@ function request(method, pathname, body) {
           } catch {
             parsed = { raw: data };
           }
-          if (res.statusCode >= 400)
-            reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
-          else resolve(parsed);
+          if (res.statusCode >= 400) {
+            const e = new Error(parsed.error || `HTTP ${res.statusCode}`);
+            e.statusCode = res.statusCode; // lets present/progress tell a 409 (interrupted) from a fatal error
+            reject(e);
+          } else resolve(parsed);
         });
       }
     );
@@ -189,7 +191,20 @@ const commands = {
     const { opts, positionals } = parseArgs(argv);
     const id = requireSession(opts, 'present');
     const file = resolveDoc(positionals[0]);
-    const out = await request('POST', scoped('/agent/present', id), { path: file, reviewerName: resolveReviewerName(opts) });
+    let out;
+    try {
+      out = await request('POST', scoped('/agent/present', id), { path: file, reviewerName: resolveReviewerName(opts) });
+    } catch (err) {
+      // FM-2: a reviewer interrupt discards the stale rework and gates present
+      // on an active working round (409). That's a documented recovery, not a
+      // fatal error — print it and exit 0 so a `present && wait` chain proceeds
+      // straight into the next `wait` instead of aborting the agent's script.
+      if (err.statusCode === 409) {
+        console.log(JSON.stringify({ interrupted: true, message: 'round interrupted; wait again' }));
+        return;
+      }
+      throw err;
+    }
     console.log(JSON.stringify({ ok: true, id, ...out }));
   },
 
@@ -277,7 +292,18 @@ const commands = {
     const id = requireSession(opts, 'progress');
     const text = positionals.join(' ').trim();
     if (!text) throw new Error('usage: planreview progress <message> --session <id>');
-    console.log(JSON.stringify(await request('POST', scoped('/agent/progress', id), { text })));
+    let out;
+    try {
+      out = await request('POST', scoped('/agent/progress', id), { text });
+    } catch (err) {
+      // FM-2: same 409 recovery as present() — the round was interrupted.
+      if (err.statusCode === 409) {
+        console.log(JSON.stringify({ interrupted: true, message: 'round interrupted; wait again' }));
+        return;
+      }
+      throw err;
+    }
+    console.log(JSON.stringify(out));
   },
 
   async status(argv) {

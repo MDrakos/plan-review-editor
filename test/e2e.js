@@ -1160,6 +1160,33 @@ async function persistenceChecks() {
     await stop(id);
     await sleep(300);
 
+    // ----- P1b: submit -> interrupt -> restart -> status restores as 'reviewing' (issue 012) -----
+    console.log('persistence: submit -> interrupt -> restart -> status restores as reviewing');
+    const ir = await p('/agent/start', { path: doc });
+    const irId = ir.data.id;
+    await p(`/api/submit?session=${irId}`, { comments: [], choices: {}, note: 'round one' });
+    await p(`/api/interrupt?session=${irId}`, {});
+    const irBefore = await waitFile(irId, (st) => st.status === 'reviewing');
+    check(
+      'persist: an interrupted session is written to disk as reviewing, workingSince null, progress empty',
+      irBefore && irBefore.status === 'reviewing' && irBefore.workingSince === null && (irBefore.progress || []).length === 0,
+      JSON.stringify(irBefore && { status: irBefore.status, workingSince: irBefore.workingSince, progress: irBefore.progress })
+    );
+    await killP();
+    spawnP();
+    check('persist: server restarts after an interrupted session', await waitHealth(true));
+    const irRestored = await p(`/api/state?session=${irId}`);
+    check(
+      'persist: an interrupted session restores as reviewing, not stuck working',
+      irRestored.status === 200 &&
+        irRestored.data.status === 'reviewing' &&
+        irRestored.data.workingSince === null &&
+        irRestored.data.progress.length === 0,
+      JSON.stringify(irRestored.data)
+    );
+    await stop(irId);
+    await sleep(300);
+
     // ----- P2: a queued-but-undelivered agent event survives the restart -----
     console.log('persistence: a queued agent event survives a restart');
     const q = await p('/agent/start', { path: doc });
@@ -2179,6 +2206,8 @@ async function main() {
     choices: { pick: 'A1' },
   });
   fs.appendFileSync(docA, '\n(another revision)\n');
+  // issue 012: present is gated to an active working round — go through submit first.
+  await browser(`/api/submit?session=${q.id}`, { comments: [], choices: {}, note: '' });
   await cli('present', docA, '--session', q.id);
   const cyc = await browser(`/api/state?session=${q.id}`);
   check(
@@ -2630,6 +2659,279 @@ async function main() {
   );
   await cli('stop', '--session', rc.id);
 
+  console.log('interrupt: reviewer aborts a working round -> reviewing on the same doc, agent notified (issue 012)');
+  const it1 = await cli('start', docA, '--no-open');
+  const it1Events = await captureEvents(it1.id);
+  await sleep(100);
+  const it1SubmitWait = cli('wait', '--session', it1.id, '--timeout', '10');
+  await sleep(200);
+  await browser(`/api/submit?session=${it1.id}`, { comments: [], choices: {}, note: '' });
+  const it1SubmitEv = await it1SubmitWait;
+  check('setup: the submit event lands before the interrupt', it1SubmitEv.type === 'submit', JSON.stringify(it1SubmitEv));
+  await cli('progress', 'doing a step', '--session', it1.id);
+  const it1BeforeVersion = (await browser(`/api/state?session=${it1.id}`)).data.doc.version;
+  // The agent goes back to `wait` for the next event before the interrupt lands —
+  // the documented case where `interrupt` is delivered to an already-waiting agent.
+  const it1InterruptWait = cli('wait', '--session', it1.id, '--timeout', '10');
+  await sleep(200);
+  const it1Interrupt = await browser(`/api/interrupt?session=${it1.id}`, {});
+  check('interrupt while working returns 200', it1Interrupt.status === 200 && it1Interrupt.data.ok === true, JSON.stringify(it1Interrupt));
+  const it1State = await browser(`/api/state?session=${it1.id}`);
+  check(
+    'interrupt reverts to reviewing on the SAME doc, clearing workingSince/progress',
+    it1State.data.status === 'reviewing' &&
+      it1State.data.workingSince === null &&
+      it1State.data.progress.length === 0 &&
+      it1State.data.doc.version === it1BeforeVersion,
+    JSON.stringify({
+      status: it1State.data.status,
+      workingSince: it1State.data.workingSince,
+      progress: it1State.data.progress,
+      version: it1State.data.doc.version,
+    })
+  );
+  await sleep(150);
+  const it1StatusFrames = it1Events.events.filter((e) => e.event === 'status').map((e) => JSON.parse(e.data));
+  check(
+    'interrupt broadcasts a "status" SSE frame carrying reviewing',
+    it1StatusFrames.some((f) => f.status === 'reviewing'),
+    JSON.stringify(it1StatusFrames)
+  );
+  const it1AgentEv = await it1InterruptWait;
+  check('interrupt delivers an "interrupt" event to the waiting agent', it1AgentEv.type === 'interrupt', JSON.stringify(it1AgentEv));
+  it1Events.close();
+  await cli('stop', '--session', it1.id);
+
+  console.log('interrupt: 409 outside an active working round (reviewing/done/ended), state unchanged (FM-8)');
+  const it2 = await cli('start', docA, '--no-open'); // fresh session -> status reviewing
+  const it2Reviewing = await browser(`/api/interrupt?session=${it2.id}`, {});
+  check(
+    'interrupt while reviewing -> 409',
+    it2Reviewing.status === 409 && /cannot interrupt while reviewing/.test(it2Reviewing.data.error),
+    JSON.stringify(it2Reviewing)
+  );
+  const it2State = await browser(`/api/state?session=${it2.id}`);
+  check('interrupt 409 leaves state unchanged (still reviewing)', it2State.data.status === 'reviewing', it2State.data.status);
+  await cli('stop', '--session', it2.id);
+
+  const it2b = await cli('start', docA, '--no-open');
+  await browser(`/api/approve?session=${it2b.id}`, { comments: [], choices: {}, note: '' });
+  const it2bInterrupt = await browser(`/api/interrupt?session=${it2b.id}`, {});
+  check(
+    'interrupt while done -> 409',
+    it2bInterrupt.status === 409 && /cannot interrupt while done/.test(it2bInterrupt.data.error),
+    JSON.stringify(it2bInterrupt)
+  );
+  await cli('stop', '--session', it2b.id);
+
+  const it2c = await cli('start', docA, '--no-open');
+  await browser(`/api/end?session=${it2c.id}`, {});
+  const it2cInterrupt = await browser(`/api/interrupt?session=${it2c.id}`, {});
+  check(
+    'interrupt while ended -> 409',
+    it2cInterrupt.status === 409 && /cannot interrupt while ended/.test(it2cInterrupt.data.error),
+    JSON.stringify(it2cInterrupt)
+  );
+  await cli('stop', '--session', it2c.id);
+
+  console.log('interrupt: unknown/removed session -> 404 (FM-8)');
+  const it3 = await cli('start', docA, '--no-open');
+  await cli('stop', '--session', it3.id);
+  await sleep(300);
+  const it3Interrupt = await browser(`/api/interrupt?session=${it3.id}`, {});
+  check('interrupt on a removed session -> 404', it3Interrupt.status === 404, JSON.stringify(it3Interrupt));
+
+  console.log('interrupt gates /agent/present: a stale rework after an interrupt is rejected (409), doc/status untouched');
+  const it4 = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${it4.id}`, { comments: [], choices: {}, note: '' });
+  await browser(`/api/interrupt?session=${it4.id}`, {});
+  const it4Before = await browser(`/api/state?session=${it4.id}`);
+  const it4PresentRes = await browser(`/agent/present?session=${it4.id}`, { path: docA });
+  check(
+    'present after an interrupt -> 409 ("no active rework round")',
+    it4PresentRes.status === 409 && /no active rework round/.test(it4PresentRes.data.error),
+    JSON.stringify(it4PresentRes)
+  );
+  const it4After = await browser(`/api/state?session=${it4.id}`);
+  check(
+    'present-after-interrupt 409 leaves doc version and status unchanged',
+    it4After.data.doc.version === it4Before.data.doc.version && it4After.data.status === it4Before.data.status,
+    JSON.stringify({ before: { v: it4Before.data.doc.version, s: it4Before.data.status }, after: { v: it4After.data.doc.version, s: it4After.data.status } })
+  );
+  await cli('stop', '--session', it4.id);
+
+  console.log('regression: a normal submit -> present still succeeds while working');
+  const it4r = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${it4r.id}`, { comments: [], choices: {}, note: '' });
+  fs.appendFileSync(docA, '\n(it4r reworked)\n');
+  const it4rPresent = await cli('present', docA, '--session', it4r.id);
+  check('present succeeds normally during an active working round', it4rPresent.ok === true && typeof it4rPresent.version === 'number', JSON.stringify(it4rPresent));
+  const it4rState = await browser(`/api/state?session=${it4r.id}`);
+  check('present after a normal submit returns to reviewing', it4rState.data.status === 'reviewing', it4rState.data.status);
+  await cli('stop', '--session', it4r.id);
+
+  console.log('interrupt gates /agent/progress: a stale rework step after an interrupt is rejected (409)');
+  const it5 = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${it5.id}`, { comments: [], choices: {}, note: '' });
+  await browser(`/api/interrupt?session=${it5.id}`, {});
+  const it5Progress = await browser(`/agent/progress?session=${it5.id}`, { text: 'stale step' });
+  check(
+    'progress after an interrupt -> 409',
+    it5Progress.status === 409 && /no active rework round/.test(it5Progress.data.error),
+    JSON.stringify(it5Progress)
+  );
+  const it5State = await browser(`/api/state?session=${it5.id}`);
+  check('progress-after-interrupt 409 leaves progress empty', it5State.data.progress.length === 0, JSON.stringify(it5State.data.progress));
+  await cli('stop', '--session', it5.id);
+
+  console.log('regression: a normal working round -> progress still appends');
+  const it5r = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${it5r.id}`, { comments: [], choices: {}, note: '' });
+  await cli('progress', 'a real step', '--session', it5r.id);
+  const it5rState = await browser(`/api/state?session=${it5r.id}`);
+  check(
+    'progress appends normally during an active working round',
+    it5rState.data.progress.length === 1 && it5rState.data.progress[0].text === 'a real step',
+    JSON.stringify(it5rState.data.progress)
+  );
+  await cli('stop', '--session', it5r.id);
+
+  console.log('CLI: a 409 on present after an interrupt is a documented recovery, not a fatal error (FM-2)');
+  const cliInt = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${cliInt.id}`, { comments: [], choices: {}, note: '' });
+  await browser(`/api/interrupt?session=${cliInt.id}`, {});
+  const cliPresentOut = await cli('present', docA, '--session', cliInt.id);
+  check(
+    'CLI present after an interrupt prints {interrupted:true} and exits 0 instead of throwing',
+    cliPresentOut.interrupted === true && typeof cliPresentOut.message === 'string',
+    JSON.stringify(cliPresentOut)
+  );
+  await cli('stop', '--session', cliInt.id);
+
+  console.log('CLI: a 409 on progress after an interrupt is also a documented recovery, not fatal');
+  const cliInt2 = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${cliInt2.id}`, { comments: [], choices: {}, note: '' });
+  await browser(`/api/interrupt?session=${cliInt2.id}`, {});
+  const cliProgressOut = await cli('progress', 'stale step', '--session', cliInt2.id);
+  check('CLI progress after an interrupt prints {interrupted:true} and exits 0', cliProgressOut.interrupted === true, JSON.stringify(cliProgressOut));
+  await cli('stop', '--session', cliInt2.id);
+
+  console.log('CONCURRENT (FM-9/FM-10): interrupt races a submit attempt while working');
+  const cc1 = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${cc1.id}`, { comments: [], choices: {}, note: 'first round' });
+  const [cc1Interrupt, cc1Submit] = await Promise.all([
+    browser(`/api/interrupt?session=${cc1.id}`, {}),
+    browser(`/api/submit?session=${cc1.id}`, { comments: [], choices: {}, note: 'racing submit' }),
+  ]);
+  check(
+    'CONCURRENT interrupt‖submit: interrupt always lands (its precondition cannot be defeated by a racing submit)',
+    cc1Interrupt.status === 200 && cc1Interrupt.data.ok === true,
+    JSON.stringify(cc1Interrupt)
+  );
+  check(
+    'CONCURRENT interrupt‖submit: the racing submit either loses (409, still-working) or legitimately starts a fresh round after the interrupt (200) — never anything else',
+    cc1Submit.status === 200 || cc1Submit.status === 409,
+    JSON.stringify(cc1Submit)
+  );
+  const cc1State = await browser(`/api/state?session=${cc1.id}`);
+  if (cc1Submit.status === 200) {
+    check(
+      'CONCURRENT interrupt‖submit: when the racing submit wins, it starts a fresh working round cleanly',
+      cc1State.data.status === 'working' && typeof cc1State.data.workingSince === 'number' && cc1State.data.progress.length === 0,
+      JSON.stringify(cc1State.data)
+    );
+  } else {
+    check(
+      'CONCURRENT interrupt‖submit: when the racing submit loses, the interrupted reviewing state stands untouched',
+      cc1State.data.status === 'reviewing' && cc1State.data.workingSince === null && cc1State.data.progress.length === 0,
+      JSON.stringify(cc1State.data)
+    );
+  }
+  await cli('stop', '--session', cc1.id);
+
+  console.log('CONCURRENT (FM-9/FM-10): interrupt races /agent/present — exactly one wins, both require an active working round');
+  const cc2 = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${cc2.id}`, { comments: [], choices: {}, note: '' });
+  const cc2VersionBefore = (await browser(`/api/state?session=${cc2.id}`)).data.doc.version;
+  fs.appendFileSync(docA, '\n(cc2 reworked)\n');
+  const [cc2Interrupt, cc2Present] = await Promise.all([
+    browser(`/api/interrupt?session=${cc2.id}`, {}),
+    browser(`/agent/present?session=${cc2.id}`, { path: docA }),
+  ]);
+  check(
+    'CONCURRENT interrupt‖present: exactly one of them succeeds, the other 409s',
+    cc2Interrupt.status !== cc2Present.status &&
+      (cc2Interrupt.status === 200 || cc2Present.status === 200) &&
+      (cc2Interrupt.status === 409 || cc2Present.status === 409),
+    JSON.stringify({ interrupt: cc2Interrupt.status, present: cc2Present.status })
+  );
+  const cc2State = await browser(`/api/state?session=${cc2.id}`);
+  check('CONCURRENT interrupt‖present: either way, status settles on reviewing', cc2State.data.status === 'reviewing', cc2State.data.status);
+  if (cc2Present.status === 200) {
+    check(
+      'CONCURRENT interrupt‖present: present won — doc version bumped',
+      cc2State.data.doc.version === cc2VersionBefore + 1,
+      String(cc2State.data.doc.version)
+    );
+  } else {
+    check(
+      'CONCURRENT interrupt‖present: interrupt won — doc version untouched (stale rework discarded)',
+      cc2State.data.doc.version === cc2VersionBefore,
+      String(cc2State.data.doc.version)
+    );
+  }
+  await cli('stop', '--session', cc2.id);
+
+  console.log('CONCURRENT (FM-9/FM-10): interrupt races /agent/progress — interrupt always lands, a racing step never survives it');
+  const cc3 = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${cc3.id}`, { comments: [], choices: {}, note: '' });
+  const [cc3Interrupt, cc3Progress] = await Promise.all([
+    browser(`/api/interrupt?session=${cc3.id}`, {}),
+    browser(`/agent/progress?session=${cc3.id}`, { text: 'racing step' }),
+  ]);
+  check('CONCURRENT interrupt‖progress: interrupt always succeeds', cc3Interrupt.status === 200, JSON.stringify(cc3Interrupt));
+  check(
+    'CONCURRENT interrupt‖progress: the racing progress either lands transiently (200) or is rejected (409) — never anything else',
+    cc3Progress.status === 200 || cc3Progress.status === 409,
+    JSON.stringify(cc3Progress)
+  );
+  const cc3State = await browser(`/api/state?session=${cc3.id}`);
+  check(
+    'CONCURRENT interrupt‖progress: whatever the race, the interrupted round\'s progress never survives',
+    cc3State.data.status === 'reviewing' && cc3State.data.progress.length === 0,
+    JSON.stringify(cc3State.data)
+  );
+  await cli('stop', '--session', cc3.id);
+
+  console.log('CONCURRENT (FM-9/FM-10): two simultaneous interrupts — exactly one wins, the other 409s');
+  const cc4 = await cli('start', docA, '--no-open');
+  await browser(`/api/submit?session=${cc4.id}`, { comments: [], choices: {}, note: '' });
+  const cc4SubmitEv = await cli('wait', '--session', cc4.id, '--timeout', '3'); // drain the submit event first
+  check('setup: drained the submit event before the double-interrupt race', cc4SubmitEv.type === 'submit', JSON.stringify(cc4SubmitEv));
+  const [cc4a, cc4b] = await Promise.all([
+    browser(`/api/interrupt?session=${cc4.id}`, {}),
+    browser(`/api/interrupt?session=${cc4.id}`, {}),
+  ]);
+  check(
+    'CONCURRENT double-interrupt: exactly one succeeds, the other 409s',
+    cc4a.status !== cc4b.status && (cc4a.status === 200 || cc4b.status === 200) && (cc4a.status === 409 || cc4b.status === 409),
+    JSON.stringify({ a: cc4a.status, b: cc4b.status })
+  );
+  const cc4Ev1 = await cli('wait', '--session', cc4.id, '--timeout', '2');
+  const cc4Ev2 = await cli('wait', '--session', cc4.id, '--timeout', '1');
+  check(
+    'CONCURRENT double-interrupt: exactly one "interrupt" event was enqueued',
+    cc4Ev1.type === 'interrupt' && cc4Ev2.type === 'timeout',
+    JSON.stringify({ e1: cc4Ev1.type, e2: cc4Ev2.type })
+  );
+  const cc4State = await browser(`/api/state?session=${cc4.id}`);
+  check(
+    'CONCURRENT double-interrupt: final state is reviewing, clean',
+    cc4State.data.status === 'reviewing' && cc4State.data.workingSince === null && cc4State.data.progress.length === 0,
+    JSON.stringify(cc4State.data)
+  );
+  await cli('stop', '--session', cc4.id);
+
   console.log('multi-reviewer: a re-present carries every reviewer\'s comments + choices forward');
   const carryDoc = path.join(dir, 'planreview-e2e-carry.md');
   fs.writeFileSync(carryDoc, '# Carry\n\nShared body line.\n');
@@ -2645,6 +2947,8 @@ async function main() {
     choices: { pick: 'A2' },
   });
   fs.writeFileSync(carryDoc, '# Carry\n\nShared body line.\n\nA reworked addition.\n');
+  // issue 012: present is gated to an active working round — go through submit first.
+  await browser(`/api/submit?session=${cy.id}`, { comments: [], choices: {}, note: '' });
   await cli('present', carryDoc, '--session', cy.id);
   const carried = await browser(`/api/state?session=${cy.id}`);
   check(
@@ -2669,6 +2973,8 @@ async function main() {
     reviewerId: 'A', reviewerName: 'Ada', comments: [], resolutions: { pick: { option: 'A2', reason: 'carry me' } },
   });
   fs.writeFileSync(rcDoc, '# Carry Res\n\nShared body line.\n\nA reworked addition.' + rcChoice);
+  // issue 012: present is gated to an active working round — go through submit first.
+  await browser(`/api/submit?session=${rcr.id}`, { comments: [], choices: {}, note: '' });
   await cli('present', rcDoc, '--session', rcr.id);
   const rcCarried = await browser(`/api/state?session=${rcr.id}`);
   check(
@@ -2687,8 +2993,11 @@ async function main() {
   const vs = await cli('start', dv, '--no-open'); // v1
   const vid = vs.id;
   fs.writeFileSync(dv, '# Ring\n\nKeep one.\n\nKeep two.\n'); // v2: remove "Drop me."
+  // issue 012: present is gated to an active working round — go through submit first.
+  await browser(`/api/submit?session=${vid}`, { comments: [], choices: {}, note: '' });
   await cli('present', dv, '--session', vid);
   fs.writeFileSync(dv, '# Ring\n\nKeep one.\n\nKeep two.\n\nBrand new.\n'); // v3: add a block
+  await browser(`/api/submit?session=${vid}`, { comments: [], choices: {}, note: '' });
   await cli('present', dv, '--session', vid);
 
   const vstate = await browser(`/api/state?session=${vid}`);
@@ -2770,6 +3079,8 @@ async function main() {
   const rid = rs.id;
   for (let k = 1; k <= 11; k++) {
     fs.writeFileSync(rv, `# Ring2\n\nline ${k}.\n`);
+    // issue 012: present is gated to an active working round — go through submit first.
+    await browser(`/api/submit?session=${rid}`, { comments: [], choices: {}, note: '' });
     await cli('present', rv, '--session', rid); // -> v12
   }
   const rstate = await browser(`/api/state?session=${rid}`);
@@ -2787,6 +3098,8 @@ async function main() {
 
   // version history is per-session: one session's versions/diffs never surface in another
   const isoA = await cli('start', dv, '--no-open'); // A: v1
+  // issue 012: present is gated to an active working round — go through submit first.
+  await browser(`/api/submit?session=${isoA.id}`, { comments: [], choices: {}, note: '' });
   await cli('present', dv, '--session', isoA.id); // A: v2
   const isoB = await cli('start', rv, '--no-open'); // B: v1 only
   const isoAState = await browser(`/api/state?session=${isoA.id}`);
@@ -2915,6 +3228,8 @@ async function main() {
   // (criterion 4 — the un-anchored case is explicit) present a doc where the quote is gone
   const docT2 = path.join(dir, 'planreview-e2e-threads-v2.md');
   fs.writeFileSync(docT2, '# Threaded Plan v2\n\nWe switched to an in-process limiter.\n');
+  // issue 012: present is gated to an active working round — go through submit first.
+  await browser(`/api/submit?session=${th.id}`, { comments: [], choices: {}, note: '' });
   await cli('present', docT2, '--session', th.id);
   const archived = await browser(`/api/state?session=${th.id}`);
   const ka = archived.data.review.comments.find((c) => c.id === 'k');
@@ -3035,6 +3350,10 @@ async function main() {
   check(
     '/s/<id> serves the review app with the submit split-button',
     appPage.ok && /id="doc"/.test(appPage.body) && /split-btn/.test(appPage.body)
+  );
+  check(
+    'issue 012: /s/<id> serves the reworking overlay\'s interrupt control',
+    appPage.ok && /id="interrupt-btn"/.test(appPage.body)
   );
 
   console.log('presence: live roster of who is viewing — join/leave, tab counting, isolation (issue 007)');
