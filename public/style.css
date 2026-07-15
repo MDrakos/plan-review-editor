@@ -916,7 +916,17 @@ mark.hl.active { background: var(--mark-active); }
 
 .doc ul, .doc ol { padding-left: 1.5em; margin: 0.6em 0; }
 .doc li { margin: 0.25em 0; }
-.doc li input[type="checkbox"] { margin-right: 6px; }
+/* Task-list items: the checkbox is the marker, so drop the disc and lay the row
+   out as [checkbox][text]. Without this the checkbox pushes the first line right
+   while wrapped lines fall back to the marker column, so continuation lines don't
+   line up with the first line. */
+.doc li:has(> input[type="checkbox"]) {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  list-style: none;
+}
+.doc li input[type="checkbox"] { flex: none; }
 
 .doc blockquote {
   margin: 0.8em 0;
