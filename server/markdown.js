@@ -158,8 +158,12 @@ function renderList(items) {
         openTag = tag;
       }
       const task = it.text.match(/^\[( |x)\]\s+(.*)$/i);
+      // Wrap the task text in a single <span>: the <li> is a flex row
+      // ([checkbox][text]), and without the span each text run and inline
+      // <code> becomes its own flex item and gets crushed into a narrow
+      // word-stacked column.
       const body = task
-        ? `<input type="checkbox" disabled${task[1].toLowerCase() === 'x' ? ' checked' : ''}> ${inline(task[2])}`
+        ? `<input type="checkbox" disabled${task[1].toLowerCase() === 'x' ? ' checked' : ''}> <span>${inline(task[2])}</span>`
         : inline(it.text);
       html += `<li>${body}${children.length ? build(children) : ''}</li>`;
       idx = j;
