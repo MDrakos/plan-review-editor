@@ -140,14 +140,23 @@ function startsBlock(line) {
 function renderList(items) {
   function build(slice) {
     const base = slice[0].indent;
-    const tag = slice[0].ordered ? 'ol' : 'ul';
-    let html = `<${tag}>`;
+    let html = '';
+    let openTag = null; // the currently open <ul>/<ol>, or null between runs
     let idx = 0;
     while (idx < slice.length) {
       const it = slice[idx];
       let j = idx + 1;
       while (j < slice.length && slice[j].indent > base) j++;
       const children = slice.slice(idx + 1, j);
+      // A change of marker type (bullet <-> number) starts a new list, per
+      // CommonMark. Close the open run and open the other kind so an ordered
+      // item among bullets keeps its number instead of collapsing to a disc.
+      const tag = it.ordered ? 'ol' : 'ul';
+      if (tag !== openTag) {
+        if (openTag) html += `</${openTag}>`;
+        html += `<${tag}>`;
+        openTag = tag;
+      }
       const task = it.text.match(/^\[( |x)\]\s+(.*)$/i);
       const body = task
         ? `<input type="checkbox" disabled${task[1].toLowerCase() === 'x' ? ' checked' : ''}> ${inline(task[2])}`
@@ -155,7 +164,7 @@ function renderList(items) {
       html += `<li>${body}${children.length ? build(children) : ''}</li>`;
       idx = j;
     }
-    return html + `</${tag}>`;
+    return html + (openTag ? `</${openTag}>` : '');
   }
   return build(items);
 }
