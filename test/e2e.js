@@ -1881,6 +1881,38 @@ async function main() {
     !/data-other/.test(noOther) && /choice-option/.test(noOther)
   );
 
+  // issue 013: a contiguous list block that mixes ordered and unordered markers must
+  // split into separate <ul>/<ol> runs. Before the fix the whole block took the first
+  // item's type, so an ordered item after bullets lost its number and showed a disc.
+  const pureUl = render('- a\n- b\n');
+  check('list: a pure bullet list is a single <ul>', pureUl === '<ul><li>a</li><li>b</li></ul>', pureUl);
+  const pureOl = render('1. a\n2. b\n');
+  check('list: a pure numbered list is a single <ol>', pureOl === '<ol><li>a</li><li>b</li></ol>', pureOl);
+  const olAfterUl = render('- a\n- b\n1. c\n');
+  check(
+    'list: an ordered item after bullets renders as its own <ol> (issue 013)',
+    olAfterUl === '<ul><li>a</li><li>b</li></ul><ol><li>c</li></ol>',
+    olAfterUl
+  );
+  const ulAfterOl = render('1. a\n- b\n');
+  check(
+    'list: a bullet after a numbered item renders as its own <ul> (issue 013)',
+    ulAfterOl === '<ol><li>a</li></ol><ul><li>b</li></ul>',
+    ulAfterOl
+  );
+  const nestedFlip = render('- a\n  1. n1\n  - n2\n');
+  check(
+    'list: a type flip at the nested level splits there too (issue 013)',
+    nestedFlip === '<ul><li>a<ol><li>n1</li></ol><ul><li>n2</li></ul></li></ul>',
+    nestedFlip
+  );
+  const taskList = render('- [ ] todo\n- [x] done\n');
+  check(
+    'list: task-list items stay a single <ul> with checkboxes (issue 013 regression)',
+    taskList === '<ul><li><input type="checkbox" disabled> todo</li><li><input type="checkbox" disabled checked> done</li></ul>',
+    taskList
+  );
+
   // issue 008: the server captures each choice block's declared options so a resolve
   // can be validated against them.
   const specs = parseChoiceSpecs(
