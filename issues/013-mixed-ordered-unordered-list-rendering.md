@@ -1,7 +1,7 @@
 # Bug: a mixed ordered/unordered list renders every item as the first item's type
 
 **Type:** bug (markdown rendering)
-**Status:** open
+**Status:** done — merged 2026-07-15 in PR #25
 **Area:** `server/markdown.js` (`renderList`)
 
 ## Problem
