@@ -1909,7 +1909,7 @@ async function main() {
   const taskList = render('- [ ] todo\n- [x] done\n');
   check(
     'list: task-list items stay a single <ul> with checkboxes (issue 013 regression)',
-    taskList === '<ul><li><input type="checkbox" disabled> todo</li><li><input type="checkbox" disabled checked> done</li></ul>',
+    taskList === '<ul><li><input type="checkbox" disabled> <span>todo</span></li><li><input type="checkbox" disabled checked> <span>done</span></li></ul>',
     taskList
   );
 
