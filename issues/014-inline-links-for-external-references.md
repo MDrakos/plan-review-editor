@@ -1,7 +1,7 @@
 # Feature: link external references inline in plan documents
 
 **Type:** feature (authoring convention + test coverage)
-**Status:** open
+**Status:** done (PR #28)
 **Area:** `integration/claude/plan-review/SKILL.md` (authoring step), `server/markdown.js` (renderer, already supports)
 
 ## Problem
