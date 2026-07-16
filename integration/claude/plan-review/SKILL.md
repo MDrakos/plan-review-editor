@@ -49,6 +49,15 @@ user is never boxed into your options — their custom text arrives in
 `choices[id]` just like a preset would. Add `other: false` to a block to force a
 pick from the listed options only.
 
+**Link external references inline.** When the plan names an external resource — a
+Jira issue key (`ENG-1234`), a Confluence page, a design doc, a PR, or any
+off-plan URL — resolve it to its real URL (via your Jira/Confluence connectors or
+the source you already have) and write it as an inline markdown link with the key
+or title as the link text: `[ENG-1234](https://.../browse/ENG-1234)`,
+`[Rollout Plan](https://.../wiki/...)`. The editor renders these inline and opens
+them in a new tab. Don't leave a bare key or title as plain text, and don't append
+a naked URL — put the link on the reference itself so the reviewer can click through.
+
 ## 2. Present it — and capture the session id
 
 ```sh

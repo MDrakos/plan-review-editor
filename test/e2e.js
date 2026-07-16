@@ -1881,6 +1881,23 @@ async function main() {
     !/data-other/.test(noOther) && /choice-option/.test(noOther)
   );
 
+  // issue 014: external references (Jira keys, Confluence/doc titles) are authored
+  // as inline markdown links; the renderer must render each as a new-tab <a> with
+  // the key/title as the link text, so the reviewer can click through.
+  const extRefs = render(
+    'See [ENG-1234](https://x.atlassian.net/browse/ENG-1234) and the [Rollout Plan](https://x.atlassian.net/wiki/rollout) doc.'
+  );
+  check(
+    'link: a Jira key authored as a link renders as an inline <a> on the key (issue 014)',
+    /<a href="https:\/\/x\.atlassian\.net\/browse\/ENG-1234" target="_blank" rel="noopener">ENG-1234<\/a>/.test(extRefs),
+    extRefs
+  );
+  check(
+    'link: a Confluence doc link renders as an inline <a> on the title, opening in a new tab (issue 014)',
+    /<a href="https:\/\/x\.atlassian\.net\/wiki\/rollout" target="_blank" rel="noopener">Rollout Plan<\/a>/.test(extRefs),
+    extRefs
+  );
+
   // issue 013: a contiguous list block that mixes ordered and unordered markers must
   // split into separate <ul>/<ol> runs. Before the fix the whole block took the first
   // item's type, so an ordered item after bullets lost its number and showed a disc.
