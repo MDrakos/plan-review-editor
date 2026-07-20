@@ -1,7 +1,7 @@
 # Feature: interrupt an in-progress rework
 
 **Type:** feature
-**Status:** open
+**Status:** done — merged 2026-07-14 in PR #21
 **Area:** `server/server.js` (status state machine, new `/api/interrupt`, `/agent/present` + `/agent/progress` guards), `public/app.js` + `public/index.html`/`style.css` (reworking overlay control), `docs/PROTOCOL.md`
 
 ## Problem
