@@ -71,7 +71,7 @@ function blankSession(id) {
     status: 'idle', // idle | reviewing | working (agent reworking) | ended
     lastAgentActivity: null, // ms epoch of the last server-observed agent activity (progress/wait/present); null until the agent does something
     workingSince: null, // ms epoch when the CURRENT working round began; null when not working (set only by submit, cleared by loadDoc)
-    doc: { path: null, title: '', html: '', version: 0, blocks: null, history: [], choiceSpecs: {} },
+    doc: { path: null, title: '', html: '', version: 0, presentedAt: null, blocks: null, history: [], choiceSpecs: {} },
     // blocks: prev render, for the per-round highlight. history: a bounded ring
     // of { version, title, markdown } (last VERSION_HISTORY), for version diffs.
     // choiceSpecs: { choiceId: { options, multi, other } } captured at each present,
@@ -439,6 +439,7 @@ function loadDoc(s, docPath) {
   s.doc.html = html;
   s.doc.blocks = blocks;
   s.doc.version += 1;
+  s.doc.presentedAt = Date.now(); // shown in the document meta line under the h1
   // Retain the markdown SOURCE for this version (re-rendered on demand for the
   // version diff), capped at the last VERSION_HISTORY — older versions age out.
   s.doc.history.push({ version: s.doc.version, title: s.doc.title, markdown });
@@ -759,14 +760,14 @@ function indexHtml() {
 <style>
   body { padding: 32px 24px; }
   .wrap { max-width: 720px; margin: 0 auto; }
-  h1 { font-size: 1.5em; margin: 0 0 4px; letter-spacing: -0.01em; }
-  .sub { color: var(--ink-soft); margin: 0 0 24px; }
-  .sess { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line);
-          border-radius: 10px; background: var(--surface); margin-bottom: 10px; text-decoration: none; color: var(--ink); }
-  .sess:hover { border-color: var(--accent); }
-  .sess .title { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sess .meta { color: var(--ink-soft); font-size: 13px; white-space: nowrap; }
-  .empty { color: var(--ink-soft); font-style: italic; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.015em; }
+  .sub { color: var(--pr-ink-muted); margin: 0 0 24px; font-size: 13px; }
+  .sess { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid var(--pr-border);
+          border-radius: 4px; background: var(--pr-surface); margin-bottom: 8px; text-decoration: none; color: var(--pr-ink); }
+  .sess:hover { background: var(--pr-hover); }
+  .sess .title { flex: 1; font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess .meta { color: var(--pr-ink-faint); font-family: var(--pr-mono); font-size: 11px; white-space: nowrap; }
+  .empty { color: var(--pr-ink-faint); font-style: italic; }
 </style></head><body><div class="wrap">
 <h1>Plan Review</h1>
 <p class="sub">Open review sessions — each is isolated, one per agent.</p>
@@ -819,6 +820,11 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname === '/style.css') {
       return sendFile(res, 'style.css', 'text/css; charset=utf-8');
     }
+    // Self-hosted brand font. Whitelisted by name (no path traversal) — the UI
+    // is offline-capable, so fonts never come from a CDN.
+    if (method === 'GET' && /^\/fonts\/Poppins-(Regular|Medium|SemiBold|Bold)\.ttf$/.test(pathname)) {
+      return sendFile(res, pathname.slice(1), 'font/ttf');
+    }
     if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return sendHtml(res, indexHtml());
     }
@@ -866,6 +872,7 @@ const server = http.createServer(async (req, res) => {
           html: s.doc.html,
           version: s.doc.version,
           versions: s.doc.history.map((h) => h.version),
+          presentedAt: s.doc.presentedAt || null,
         },
         review: s.review,
         chat: s.chat,

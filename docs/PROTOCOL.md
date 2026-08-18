@@ -131,7 +131,8 @@ shows a "reworking" overlay until you `present` again.
 - While reworking, `planreview progress "<step>" --session <id>` appends a step
   to a live checklist shown in the reviewer's "reworking" overlay (SSE
   `progress` event). Steps reset each round and clear when you `present`. Emit
-  one per real step so the overlay stays alive instead of showing a bare spinner.
+  one per real step: the overlay's progress bar and "step N" counter are derived
+  from these events, so a silent round leaves the reviewer with a bare placeholder.
   Like `present`, `progress` only succeeds during an active `working` round and
   also `409`s after an interrupt.
 - The overlay also shows a live elapsed timer and, past a threshold (~90s) with

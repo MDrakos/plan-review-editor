@@ -129,6 +129,7 @@ function myPick(id) {
 
 const docEl = document.getElementById('doc');
 const docTitleEl = document.getElementById('doc-title');
+const sessionMetaEl = document.getElementById('session-meta');
 const statusPill = document.getElementById('status-pill');
 const fabEl = document.getElementById('comment-fab');
 const composerEl = document.getElementById('composer');
@@ -142,8 +143,13 @@ const chatListEl = document.getElementById('chat-list');
 const chatFormEl = document.getElementById('chat-form');
 const chatInputEl = document.getElementById('chat-input');
 const progressListEl = document.getElementById('progress-list');
+const progressFillEl = document.getElementById('progress-fill');
+const workingStepEl = document.getElementById('working-step');
 const workingElapsedEl = document.getElementById('working-elapsed');
 const workingStaleEl = document.getElementById('working-stale');
+const archivedNoteEl = document.getElementById('archived-note');
+const submitTallyEl = document.getElementById('submit-tally');
+const submitModeLabelEl = document.getElementById('submit-mode-label');
 const changesBar = document.getElementById('changes-bar');
 const changesLabel = document.getElementById('changes-label');
 const changesDismiss = document.getElementById('changes-dismiss');
@@ -161,6 +167,7 @@ const state = {
   status: 'idle',
   version: 0,
   versions: [], // retained version numbers available to diff between
+  presentedAt: null, // when the agent presented this version (server clock)
   diffing: false, // true while the doc pane shows a version diff (read-only)
   comments: [], // {id, quote, text, ts, replies?: [{role:'agent'|'reviewer', text, ts}], archived?}
   choices: {}, // choiceId -> { reviewerId -> value(string) | values(string[]) when multi }
@@ -175,12 +182,13 @@ let editingId = null; // id of the comment currently open for inline editing
 
 // ---------- status & document ----------
 
+// Short, chip-sized labels — the topbar chip is a state marker, not a sentence.
 const STATUS_LABEL = {
-  idle: 'waiting for a plan',
+  idle: 'waiting',
   reviewing: 'reviewing',
-  working: 'agent is reworking the plan',
-  done: 'review approved',
-  ended: 'session ended',
+  working: 'reworking',
+  done: 'approved',
+  ended: 'ended',
 };
 
 function setStatus(status, activity) {
@@ -253,8 +261,59 @@ function renderDoc(doc) {
     doc.html || '<p class="empty">Waiting for the agent to present a plan…</p>';
   state.version = doc.version;
   state.versions = doc.versions || [];
+  state.presentedAt = doc.presentedAt || null;
+  sessionMetaEl.textContent = doc.version ? `v${doc.version} · session ${SESSION}` : `session ${SESSION}`;
+  renderDocMeta();
   updateChangesBar();
   populateVersionSelects();
+}
+
+// The meta line under the document h1: which version this is, when the agent
+// presented it, and what the reviewer has open on it. Re-rendered whenever the
+// comment/decision counts move, so it never goes stale mid-review.
+function renderDocMeta() {
+  if (!docEl.firstElementChild || state.diffing) return;
+  let meta = docEl.querySelector(':scope > .doc-meta');
+  const h1 = docEl.querySelector('h1');
+  if (!h1) {
+    if (meta) meta.remove();
+    return;
+  }
+  if (!meta) {
+    meta = document.createElement('div');
+    meta.className = 'doc-meta';
+    // The h1 may sit inside a [data-changed] wrapper — hang the meta line off
+    // that wrapper's top-level slot so it never lands inside the change fill.
+    let anchor = h1;
+    while (anchor.parentElement && anchor.parentElement !== docEl) anchor = anchor.parentElement;
+    anchor.after(meta);
+  }
+  const comments = state.comments.filter((c) => !c.archived).length;
+  const open = openDecisionCount();
+  const parts = [`v${state.version}`];
+  if (state.presentedAt) parts.push(`presented ${formatPresented(state.presentedAt)}`);
+  parts.push(`${comments} comment${comments === 1 ? '' : 's'}`);
+  parts.push(`${open} decision${open === 1 ? '' : 's'} open`);
+  meta.textContent = parts.join(' · ');
+}
+
+// UTC, minute precision — a stamp two reviewers in different zones can compare.
+function formatPresented(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} UTC`;
+}
+
+// A decision is "open" while this reviewer hasn't picked and it carries no shared
+// resolution — the same rule the choice block's head chip uses.
+function openDecisionCount() {
+  let n = 0;
+  for (const block of docEl.querySelectorAll('.choice-block')) {
+    const id = block.dataset.choiceId;
+    if (!state.resolutions[id] && !hasAnswer(myPick(id))) n++;
+  }
+  return n;
 }
 
 // Blocks changed since the last cycle carry a data-changed attribute (added by
@@ -264,8 +323,9 @@ function updateChangesBar() {
   docEl.classList.remove('changes-dismissed');
   const n = docEl.querySelectorAll('[data-changed]').length;
   changesBar.hidden = n === 0;
+  // ★ is the brand motif for "new in this version" — used here and nowhere else.
   if (n > 0)
-    changesLabel.textContent = `${n} change${n === 1 ? '' : 's'} since your last review — highlighted below.`;
+    changesLabel.textContent = `★ v${state.version} · ${n} block${n === 1 ? '' : 's'} changed since your last review`;
 }
 
 changesDismiss.addEventListener('click', () => {
@@ -391,16 +451,22 @@ async function fetchState() {
 
 // ---------- chat ----------
 
+// A flat bordered row, not a bubble: every message is left-aligned and carries
+// its author as a label plus a left rule in that author's colour, so attribution
+// never depends on which side of the panel a message landed on.
 function appendChatMessage(msg) {
   const el = document.createElement('div');
   el.className = `chat-msg ${msg.role}`;
-  if (msg.role !== 'agent' && msg.author) {
-    const who = document.createElement('span');
-    who.className = 'chat-author';
-    who.textContent = authorLabel(msg.author);
-    if (msg.author.id) who.style.setProperty('--author-color', authorColor(msg.author.id));
-    el.appendChild(who);
+  const who = document.createElement('span');
+  who.className = 'chat-author';
+  if (msg.role === 'agent') {
+    who.textContent = 'Agent';
+  } else {
+    who.textContent = authorLabel(msg.author || { id: reviewer.id, name: reviewer.name });
+    const id = (msg.author && msg.author.id) || reviewer.id;
+    el.style.setProperty('--author-color', authorColor(id));
   }
+  el.appendChild(who);
   const body = document.createElement('span');
   body.className = 'chat-text';
   body.textContent = msg.text;
@@ -421,7 +487,8 @@ function showTyping() {
   typingEl = document.createElement('div');
   typingEl.className = 'chat-msg agent typing';
   typingEl.setAttribute('aria-label', 'Agent is replying');
-  typingEl.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+  // A square in the agent's colour and a line of text — no bouncing dots.
+  typingEl.innerHTML = '<span class="dot"></span>agent is typing…';
   chatListEl.appendChild(typingEl);
   chatListEl.scrollTop = chatListEl.scrollHeight;
   typingTimer = setTimeout(hideTyping, 120000);
@@ -442,6 +509,10 @@ function hideTyping() {
 // up as a live checklist in the overlay: earlier steps are ✓ done, the latest
 // is the one in progress. Cleared when the reworked document arrives.
 
+// The agent reports steps as it goes and never announces a total up front, so
+// "step N of total" is derived: every step seen so far, plus the one running.
+// A determinate bar beats a spinner here — the protocol can already resolve how
+// far along the round is, so asserting indeterminacy would throw that away.
 function renderProgress() {
   const items = state.progress || [];
   progressListEl.innerHTML = '';
@@ -452,6 +523,8 @@ function renderProgress() {
     li.className = 'progress-item placeholder';
     li.textContent = 'Progress will show up here as the agent works…';
     progressListEl.appendChild(li);
+    workingStepEl.textContent = '';
+    progressFillEl.style.width = '0%';
     return;
   }
   items.forEach((p, i) => {
@@ -460,13 +533,19 @@ function renderProgress() {
     li.className = `progress-item ${current ? 'current' : 'done'}`;
     const mark = document.createElement('span');
     mark.className = 'progress-mark';
-    if (!current) mark.textContent = '✓';
+    mark.textContent = current ? '›' : '✓';
     const txt = document.createElement('span');
     txt.className = 'progress-text';
     txt.textContent = p.text;
     li.append(mark, txt);
     progressListEl.appendChild(li);
   });
+  const n = items.length;
+  workingStepEl.textContent = `step ${n}`;
+  // No total is announced, so the bar is fed n/(n+1): it advances on every step
+  // and never claims 100% while the agent is still working. Honest about being
+  // open-ended without falling back to a spinner.
+  progressFillEl.style.width = `${Math.round((n / (n + 1)) * 100)}%`;
   progressListEl.scrollTop = progressListEl.scrollHeight;
 }
 
@@ -648,6 +727,46 @@ function bindChoices() {
     const otherText = block.querySelector('.choice-other-text');
     const presets = new Set(boxes.filter((i) => !i.dataset.other).map((i) => i.value));
 
+    // Re-shape the server's flat markup into the decision block: a plum header
+    // bar naming the decision and its state, then a body holding the prompt and
+    // one bordered option group. Layout only — no option or value is touched.
+    const optionRows = [...block.querySelectorAll('.choice-option')];
+    const prompt = block.querySelector('.choice-prompt');
+    const group = document.createElement('div');
+    group.className = 'choice-options';
+    for (const row of optionRows) {
+      boldLeadIn(row.querySelector('span'));
+      group.appendChild(row);
+    }
+    const body = document.createElement('div');
+    body.className = 'choice-body';
+    if (prompt) body.appendChild(prompt);
+    body.appendChild(group);
+
+    const head = document.createElement('div');
+    head.className = 'choice-head';
+    const headLabel = document.createElement('span');
+    headLabel.className = 'choice-head-label';
+    headLabel.textContent = 'Decision';
+    const headId = document.createElement('span');
+    headId.className = 'choice-head-id';
+    headId.textContent = id;
+    const stateChip = document.createElement('span');
+    stateChip.className = 'choice-state';
+    head.append(headLabel, headId, stateChip);
+    block.replaceChildren(head, body);
+
+    // Who picked what, shown as initial badges on the option row itself — one
+    // holder per row, keyed by the value that row contributes.
+    const rowPicks = new Map();
+    for (const row of optionRows) {
+      const input = row.querySelector('input');
+      const holder = document.createElement('span');
+      holder.className = 'choice-row-picks';
+      row.appendChild(holder);
+      if (input) rowPicks.set(input.dataset.other ? ' other' : input.value, holder);
+    }
+
     // A question answered in an earlier cycle collapses to a one-line summary
     // with a Change button, so it isn't re-asked. Built here, shown via the
     // `answered` class (which also hides the option rows — see CSS).
@@ -661,16 +780,11 @@ function bindChoices() {
     changeBtn.textContent = 'Change';
     changeBtn.addEventListener('click', () => block.classList.remove('answered'));
     summary.append(summaryVal, changeBtn);
-    block.appendChild(summary);
+    body.appendChild(summary);
     const refreshSummary = () => {
       summaryVal.textContent = answerText(myPick(id));
     };
 
-    // Who picked what across ALL reviewers (not just this tab): a badge per option
-    // with the reviewers who chose it, plus a muted hint when picks diverge. No lock.
-    const picksEl = document.createElement('div');
-    picksEl.className = 'choice-picks';
-    block.appendChild(picksEl);
     // Count who picked each option label across ALL reviewers → Map<label, reviewerId[]>,
     // skipping empty/non-string labels (FM-10). Shared by renderPicks (badges + the
     // "reviewers disagree" hint) and the 008 resolve control (divergence = >1 label), so
@@ -699,35 +813,46 @@ function bindChoices() {
       return { counts, reviewers };
     };
 
+    // The state of the decision, in the header bar. Divergence is named here
+    // rather than as a separate hint under the options.
+    const renderState = () => {
+      const resolution = state.resolutions[id];
+      const divergent = pickCounts().counts.size > 1;
+      if (resolution) {
+        stateChip.className = 'choice-state answered';
+        stateChip.textContent = 'Resolved';
+      } else if (divergent) {
+        stateChip.className = 'choice-state open';
+        stateChip.textContent = 'Reviewers disagree';
+      } else if (hasAnswer(myPick(id))) {
+        stateChip.className = 'choice-state answered';
+        stateChip.textContent = 'Answered';
+      } else {
+        stateChip.className = 'choice-state open';
+        stateChip.textContent = 'Open';
+      }
+      renderDocMeta(); // the meta line counts open decisions
+    };
+
+    // Per-row initial badges replace the old tally line below the block, so a
+    // lone reviewer never reads their own answer echoed back (issue 011 §3) —
+    // badges only appear once some OTHER reviewer has weighed in.
     const renderPicks = () => {
       const { counts, reviewers } = pickCounts();
-      picksEl.innerHTML = '';
-      if (!counts.size) {
-        picksEl.hidden = true;
-        return;
+      for (const holder of rowPicks.values()) holder.innerHTML = '';
+      const onlyMe = reviewers.size === 0 || (reviewers.size === 1 && reviewers.has(reviewer.id));
+      if (!onlyMe) {
+        for (const [label, rids] of counts) {
+          const holder = rowPicks.get(presets.has(label) ? label : ' other');
+          if (!holder) continue;
+          for (const rid of rids) holder.appendChild(pickBadge(rid));
+        }
       }
-      // A lone reviewer's own pick(s) just restate what they already typed/checked —
-      // most noticeable on a free-text "Other" answer, echoed back verbatim. Suppress
-      // the summary until some OTHER reviewer has weighed in (agreement or divergence),
-      // at which point the tally becomes informative again.
-      if (reviewers.size === 1 && reviewers.has(reviewer.id)) {
-        picksEl.hidden = true;
-        return;
+      for (const row of optionRows) {
+        const input = row.querySelector('input');
+        row.classList.toggle('picked', !!(input && input.checked));
       }
-      picksEl.hidden = false;
-      for (const [label, rids] of counts) {
-        const tag = document.createElement('span');
-        tag.className = 'choice-pick';
-        tag.textContent = `${rids.length} · ${label}`;
-        tag.title = rids.map((r) => (r === reviewer.id ? 'you' : r.slice(0, 8))).join(', ');
-        picksEl.appendChild(tag);
-      }
-      if (counts.size > 1) {
-        const hint = document.createElement('span');
-        hint.className = 'choice-disagree';
-        hint.textContent = 'reviewers disagree';
-        picksEl.appendChild(hint);
-      }
+      renderState();
     };
 
     // 008: on a DIVERGENT choice, offer a "Resolve to:" control so reviewers can
@@ -737,7 +862,7 @@ function bindChoices() {
     // updates sync to peers over 004's review SSE (fetchState rebuilds this block).
     const resolveEl = document.createElement('div');
     resolveEl.className = 'choice-resolve';
-    block.appendChild(resolveEl);
+    body.appendChild(resolveEl);
     let resolveEditing = false; // true while the picker is open on an already-resolved block
 
     // Optimistically apply the intent locally, then POST it. intent: {option, reason?}
@@ -747,6 +872,8 @@ function bindChoices() {
       else state.resolutions[id] = { option: intent.option, reason: intent.reason || '', by: reviewer.id, byName: reviewer.name || '' };
       resolveEditing = false;
       renderResolution();
+      renderState(); // the head chip and the submit caption both count resolutions
+      updateSubmitButton();
       syncReview({ [id]: intent });
     };
 
@@ -801,6 +928,15 @@ function bindChoices() {
         clearBtn.addEventListener('click', () => postResolution(null));
         controls.append(changeBtn, clearBtn);
         resolveEl.appendChild(controls);
+        // Resolving picks one answer to act on; it does not throw the others
+        // away. Say so, in the reviewers' own numbers.
+        const raw = [...pickCounts().counts].map(([label, rids]) => `${label} ×${rids.length}`);
+        if (raw.length) {
+          const rawEl = document.createElement('div');
+          rawEl.className = 'choice-raw-picks';
+          rawEl.textContent = `raw picks still travel to the agent: ${raw.join(', ')}`;
+          resolveEl.appendChild(rawEl);
+        }
         return;
       }
 
@@ -1005,15 +1141,22 @@ function renderPresence() {
   const el = document.getElementById('presence');
   if (!el) return;
   el.innerHTML = '';
-  for (const p of state.presence || []) {
+  const roster = state.presence || [];
+  for (const p of roster) {
     const av = document.createElement('span');
     av.className = 'presence-avatar';
     if (p && p.id === reviewer.id) av.classList.add('you');
     av.textContent = initials(p && p.name, p && p.id);
     if (p && p.id) av.style.setProperty('--author-color', authorColor(p.id));
-    const tabs = p && p.count > 1 ? ` · ${p.count} tabs` : '';
+    const tabs = p && p.count > 1 ? ` ×${p.count}` : '';
     av.title = `${authorLabel(p)}${p && p.id === reviewer.id ? ' (you)' : ''}${tabs}`;
     el.appendChild(av);
+  }
+  if (roster.length) {
+    const count = document.createElement('span');
+    count.className = 'presence-count';
+    count.textContent = `${roster.length} viewing`;
+    el.appendChild(count);
   }
 }
 
@@ -1023,6 +1166,40 @@ function renderPresence() {
 // pre-004) is treated as own, matching single-reviewer behavior.
 function ownComment(c) {
   return !c.author || c.author.id === reviewer.id;
+}
+
+// A reviewer's display name, looked up wherever this tab has seen one: the live
+// presence roster first, then any comment they authored. Empty when unknown —
+// initials() falls back to the id head.
+function reviewerName(rid) {
+  if (rid === reviewer.id) return reviewer.name;
+  const present = (state.presence || []).find((p) => p && p.id === rid);
+  if (present && present.name) return present.name;
+  const authored = state.comments.find((c) => c.author && c.author.id === rid && c.author.name);
+  return authored ? authored.author.name : '';
+}
+
+// An initials badge marking one reviewer's pick on an option row.
+function pickBadge(rid) {
+  const b = document.createElement('span');
+  b.className = 'pick-badge';
+  b.textContent = initials(reviewerName(rid), rid);
+  b.style.setProperty('--author-color', authorColor(rid));
+  b.title = rid === reviewer.id ? 'you' : authorLabel({ id: rid, name: reviewerName(rid) });
+  return b;
+}
+
+// Bold an option's lead-in — the part before the em dash the author wrote — so a
+// row reads "**1 hour** — friendlier for slow inboxes". Only applied when the
+// label is a single text node, so authored inline markup is never re-parsed.
+function boldLeadIn(span) {
+  if (!span || span.childNodes.length !== 1 || span.firstChild.nodeType !== Node.TEXT_NODE) return;
+  const idx = span.textContent.indexOf(' — ');
+  if (idx <= 0) return;
+  const strong = document.createElement('strong');
+  strong.textContent = span.textContent.slice(0, idx);
+  const rest = document.createTextNode(span.textContent.slice(idx));
+  span.replaceChildren(strong, rest);
 }
 
 // A small colored badge naming an author (used on comment cards, replies, chat).
@@ -1038,7 +1215,9 @@ function renderComments() {
   const active = state.comments.filter((c) => !c.archived);
   const archived = state.comments.filter((c) => c.archived);
   commentCountEl.textContent = String(active.length);
+  archivedNoteEl.textContent = archived.length ? `${archived.length} archived` : '';
   updateSubmitButton();
+  renderDocMeta();
   commentListEl.innerHTML = '';
   if (!state.comments.length) {
     commentListEl.innerHTML =
@@ -1110,11 +1289,20 @@ function renderThread(c) {
   for (const r of c.replies || []) {
     const reply = document.createElement('div');
     reply.className = `reply ${r.role === 'agent' ? 'agent' : 'reviewer'}`;
-    if (r.role !== 'agent' && r.author) reply.appendChild(authorBadge(r.author));
+    // A labelled entry, not a bubble: the author reads off the label above the
+    // text, so an agent and a reviewer reply share one column and one rule.
+    const who = document.createElement('span');
+    who.className = 'reply-author';
+    if (r.role === 'agent') {
+      who.textContent = 'Agent';
+    } else {
+      who.textContent = authorLabel(r.author);
+      if (r.author && r.author.id) who.style.setProperty('--author-color', authorColor(r.author.id));
+    }
     const body = document.createElement('span');
     body.className = 'reply-text';
     body.textContent = r.text;
-    reply.appendChild(body);
+    reply.append(who, body);
     thread.appendChild(reply);
   }
   if (!c.archived && state.status === 'reviewing') thread.appendChild(replyForm(c));
@@ -1147,20 +1335,41 @@ function replyForm(c) {
   return form;
 }
 
-function iconBtn(glyph, title, onClick) {
+// A text button — the words carry the action, so no icon set is needed.
+function textBtn(label, title, onClick, destructive) {
   const b = document.createElement('button');
-  b.className = 'icon-btn';
+  b.className = destructive ? 'icon-btn destructive' : 'icon-btn';
   b.title = title;
-  b.textContent = glyph;
+  b.textContent = label;
   b.addEventListener('click', onClick);
   return b;
 }
 
+// HH:MM, local — enough to order a day's comments without spending a whole row.
+function shortTime(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// Three stacked rows — header / body / thread. Nothing is absolutely positioned
+// and nothing overlaps, so a wide author name can never run over the comment
+// text however long either gets (issue 011 §2).
 function viewCard(c) {
   const card = document.createElement('div');
   card.className = c.archived ? 'comment-card archived' : 'comment-card';
   card.dataset.cid = c.id;
 
+  // row 1: who, when, and what you can do about it
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  if (c.author) head.appendChild(authorBadge(c.author));
+  if (c.ts) {
+    const time = document.createElement('span');
+    time.className = 'card-time';
+    time.textContent = shortTime(c.ts);
+    head.appendChild(time);
+  }
   const actions = document.createElement('div');
   actions.className = 'card-actions';
   // Edit/Delete are offered only for this reviewer's OWN comments — the server rejects
@@ -1171,7 +1380,7 @@ function viewCard(c) {
   // in place — only offer to dismiss it.
   if (!c.archived && own) {
     actions.append(
-      iconBtn('✎', 'Edit comment', (e) => {
+      textBtn('Edit', 'Edit comment', (e) => {
         e.stopPropagation();
         beginEdit(c.id);
       })
@@ -1179,31 +1388,31 @@ function viewCard(c) {
   }
   if (own) {
     actions.append(
-      iconBtn('✕', c.archived ? 'Dismiss comment' : 'Delete comment', (e) => {
-        e.stopPropagation();
-        deleteComment(c.id);
-      })
+      textBtn(
+        c.archived ? 'Dismiss' : 'Delete',
+        c.archived ? 'Dismiss comment' : 'Delete comment',
+        (e) => {
+          e.stopPropagation();
+          deleteComment(c.id);
+        },
+        true
+      )
     );
   }
+  head.appendChild(actions);
 
+  // row 2: the quoted anchor, then the comment itself
+  const body = document.createElement('div');
+  body.className = 'card-body';
   const quote = document.createElement('blockquote');
   quote.textContent = truncate(c.quote, 120);
-  const body = document.createElement('p');
-  body.textContent = c.text;
+  const text = document.createElement('p');
+  text.textContent = c.text;
+  body.append(quote, text);
 
-  card.append(actions);
-  // Attribute the card to its author (color-coded) so reviewers can tell who said what.
-  // This is its own in-flow row above the quote, not part of the absolutely-positioned
-  // .card-actions icon row, so a wide name pill never overlaps the comment text.
-  if (c.author) {
-    const authorRow = document.createElement('div');
-    authorRow.className = 'card-author-row';
-    authorRow.appendChild(authorBadge(c.author));
-    card.append(authorRow);
-  }
-  card.append(quote, body, renderThread(c));
+  card.append(head, body, renderThread(c));
   card.addEventListener('click', () => {
-    if (!c.archived) flashHighlight(c.id);
+    if (!c.archived) focusComment(c.id);
   });
   return card;
 }
@@ -1278,15 +1487,26 @@ function deleteComment(id) {
   syncReview();
 }
 
-function flashHighlight(id) {
+// Draw attention by scrolling the anchor into view and outlining the matching
+// card — never by recolouring the mark. The highlight colour is semantic
+// ("there is a comment here"), so flashing it would say something untrue.
+function focusComment(id) {
   const mark = docEl.querySelector(`mark[data-cid="${id}"]`);
-  if (!mark) return;
-  mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  for (const m of docEl.querySelectorAll(`mark[data-cid="${id}"]`)) {
-    m.classList.add('active');
-    setTimeout(() => m.classList.remove('active'), 1200);
+  if (mark) mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  for (const card of commentListEl.querySelectorAll('.comment-card.focused'))
+    card.classList.remove('focused');
+  const card = commentListEl.querySelector(`.comment-card[data-cid="${id}"]`);
+  if (card) {
+    card.classList.add('focused');
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 }
+
+// The reverse trip: clicking a highlight in the document focuses its card.
+docEl.addEventListener('click', (e) => {
+  const mark = e.target.closest && e.target.closest('mark.hl');
+  if (mark && mark.dataset.cid) focusComment(mark.dataset.cid);
+});
 
 // Sync this tab's review to the server. `resolutions` (008) is an optional per-choice
 // resolve/clear intent ({ choiceId: {option, reason?} | null }) carried only when the
@@ -1323,10 +1543,19 @@ function updateSubmitButton() {
   if (submitMode === 'approve') {
     submitBtn.textContent = 'Approve & finish';
     submitBtn.classList.add('approve');
+    submitModeLabelEl.textContent = 'apply my feedback, then proceed';
   } else {
-    submitBtn.textContent = n ? `Submit review (${n})` : 'Submit review';
+    submitBtn.textContent = 'Submit review';
     submitBtn.classList.remove('approve');
+    submitModeLabelEl.textContent = 'rework and show me again';
   }
+  // The count moved off the button label into the caption row, next to the
+  // decision tally — the button says what it does, the caption says what rides
+  // along with it.
+  const resolved = Object.keys(state.resolutions || {}).length;
+  const parts = [`${n} comment${n === 1 ? '' : 's'}`];
+  if (resolved) parts.push(`${resolved} decision${resolved === 1 ? '' : 's'} resolved`);
+  submitTallyEl.textContent = parts.join(' · ');
   const locked = state.status !== 'reviewing';
   submitBtn.disabled = locked;
   submitMenuToggle.disabled = locked;
@@ -1500,10 +1729,11 @@ function renderIdentity() {
   const el = document.getElementById('identity');
   if (!el) return;
   el.innerHTML = '';
+  const lead = document.createElement('span');
+  lead.textContent = 'You are';
   const label = document.createElement('span');
   label.className = 'identity-name';
-  label.textContent = `you are ${identityLabel()}`;
-  label.style.setProperty('--author-color', authorColor(reviewer.id));
+  label.textContent = identityLabel();
   const edit = document.createElement('button');
   edit.className = 'btn identity-edit';
   edit.textContent = 'edit';
@@ -1514,7 +1744,7 @@ function renderIdentity() {
     renderIdentity();
     syncReview(); // re-stamp future work; existing comments keep their prior author
   });
-  el.append(label, edit);
+  el.append(lead, label, edit);
 }
 
 // ---------- boot ----------
