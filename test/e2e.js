@@ -786,7 +786,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-1: a first-time reviewer is prompted for a name exactly once on boot', h.promptCalls === 1, String(h.promptCalls));
     check(
       'identity FM-1: a real answer to the first-load prompt renders in the header, not the raw id hash',
-      identityLabelEl(h).textContent === 'you are Ada',
+      identityLabelEl(h).textContent === 'Ada',
       identityLabelEl(h).textContent
     );
     check('identity FM-1: the answered name is persisted for future loads/attribution', vm.runInContext('reviewer.name', h.ctx) === 'Ada');
@@ -797,7 +797,7 @@ async function driveReviewerIdentityPrompt() {
 
     check(
       "identity FM-1: the existing 'edit' flow still updates the header after the first-load prompt",
-      identityLabelEl(h).textContent === 'you are Ada2',
+      identityLabelEl(h).textContent === 'Ada2',
       identityLabelEl(h).textContent
     );
     check('identity FM-1: editing the name still re-syncs (syncReview fires)', h.fetchCalls > fetchBefore, `Δ=${h.fetchCalls - fetchBefore}`);
@@ -813,7 +813,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-2: dismissing (Cancel) the first-load prompt still only prompts once', h1.promptCalls === 1, String(h1.promptCalls));
     check(
       'identity FM-2: a dismissed prompt shows a neutral placeholder, never the raw id hash',
-      identityLabelEl(h1).textContent === 'you are Reviewer',
+      identityLabelEl(h1).textContent === 'Reviewer',
       identityLabelEl(h1).textContent
     );
 
@@ -822,7 +822,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-2: a later load with the same storage does not re-prompt after a dismissal', h2.promptCalls === 0, String(h2.promptCalls));
     check(
       'identity FM-2: the later load still shows the neutral placeholder (no name was ever stored)',
-      identityLabelEl(h2).textContent === 'you are Reviewer',
+      identityLabelEl(h2).textContent === 'Reviewer',
       identityLabelEl(h2).textContent
     );
   }
@@ -836,7 +836,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-3: a whitespace-only answer does not become the stored name', vm.runInContext('reviewer.name', h1.ctx) === '');
     check(
       'identity FM-3: a whitespace-only answer renders the neutral placeholder, not blank/hash',
-      identityLabelEl(h1).textContent === 'you are Reviewer',
+      identityLabelEl(h1).textContent === 'Reviewer',
       identityLabelEl(h1).textContent
     );
 
@@ -854,7 +854,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-4: a reviewer with an existing name is not prompted on boot', h.promptCalls === 0, String(h.promptCalls));
     check(
       'identity FM-4: the existing name renders in the header unchanged',
-      identityLabelEl(h).textContent === 'you are Bo',
+      identityLabelEl(h).textContent === 'Bo',
       identityLabelEl(h).textContent
     );
   }
@@ -888,7 +888,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity: dismissing the edit prompt does not re-sync (no fetch fired)', h.fetchCalls === fetchBefore, `Δ=${h.fetchCalls - fetchBefore}`);
     check(
       'identity: dismissing the edit prompt leaves the header text unchanged',
-      identityLabelEl(h).textContent === 'you are Ada',
+      identityLabelEl(h).textContent === 'Ada',
       identityLabelEl(h).textContent
     );
   }
@@ -903,7 +903,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-5: an agent-seeded default name means a fresh browser is never prompted', h.promptCalls === 0, String(h.promptCalls));
     check(
       'identity FM-5: the agent-seeded default renders in the header',
-      identityLabelEl(h).textContent === 'you are Grace Hopper',
+      identityLabelEl(h).textContent === 'Grace Hopper',
       identityLabelEl(h).textContent
     );
     check(
@@ -922,7 +922,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-5: a saved localStorage name still suppresses the prompt with a default present', h.promptCalls === 0, String(h.promptCalls));
     check(
       'identity FM-5: a saved localStorage name wins over the agent-seeded default',
-      identityLabelEl(h).textContent === 'you are Bo',
+      identityLabelEl(h).textContent === 'Bo',
       identityLabelEl(h).textContent
     );
   }
@@ -935,7 +935,7 @@ async function driveReviewerIdentityPrompt() {
     check('identity FM-5: an empty/whitespace default does not suppress the first-load prompt', h.promptCalls === 1, String(h.promptCalls));
     check(
       'identity FM-5: with no usable default the prompt answer still renders',
-      identityLabelEl(h).textContent === 'you are Ada',
+      identityLabelEl(h).textContent === 'Ada',
       identityLabelEl(h).textContent
     );
   }
@@ -3741,11 +3741,24 @@ async function main() {
       return triggers.length === 2 && triggers.includes('#submit-btn:hover') && triggers.includes('.split-caret:hover');
     };
 
-    const dividerRule = findRule((r) => r.selector === '.split-caret');
+    // The divider must be declared at a weight that actually survives the
+    // border reset applied to both halves — a `border-left` sitting on a bare
+    // `.split-caret` rule is present in the file but dead at runtime.
+    const dividerRule = findRule(
+      (r) => hasClass(r.selector, '.split-caret') && /border-left:\s*1px solid/.test(r.body)
+    );
+    const resetRule = findRule(
+      (r) => hasClass(r.selector, '.split-caret') && /border:\s*none/.test(r.body)
+    );
+    const weight = (sel) =>
+      sel
+        .split(',')
+        .filter((p) => p.includes('.split-caret'))
+        .map((p) => (p.match(/[.#]/g) || []).length)[0] || 0;
     check(
-      'stylesheet keeps a border-left hairline divider on the split-caret',
-      !!dividerRule && /border-left:\s*1px solid/.test(dividerRule.body),
-      'no border-left hairline found on .split-caret'
+      'stylesheet keeps a border-left hairline divider on the split-caret, at a weight that survives the border reset',
+      !!dividerRule && (!resetRule || weight(dividerRule.selector) >= weight(resetRule.selector)),
+      'the split-caret divider is missing or is outranked by a border reset'
     );
 
     check(
@@ -3754,40 +3767,59 @@ async function main() {
       'found a bare .split-btn:hover selector — also matches hovering .split-menu, a .split-btn descendant'
     );
 
-    const defaultHoverRule = findRule(
-      (r) =>
-        hasSyncedHoverCondition(r.selector) &&
-        r.selector.includes('#submit-btn:not(.approve)') &&
-        hasClass(r.selector, '.split-caret')
+    // The redesign takes this further: the CONTAINER owns the fill, the border
+    // and the radius, and both buttons inside are transparent. There is then
+    // only one paintable surface, so the two halves cannot drift apart at all.
+    const containerFill = findRule((r) => r.selector === '.split-btn');
+    check(
+      'stylesheet gives the split-btn container the fill and border, so the caret is not its own block',
+      !!containerFill &&
+        /background:\s*var\(--pr-navy\)/.test(containerFill.body) &&
+        /border:\s*1px solid var\(--pr-navy\)/.test(containerFill.body),
+      'no .split-btn rule owning the control fill + border'
+    );
+    const halvesTransparent = findRule(
+      (r) => r.selector.includes('#submit-btn') && hasClass(r.selector, '.split-caret') && /background:\s*none/.test(r.body)
     );
     check(
-      'stylesheet recolors submit-btn and the caret together on hover (default mode), scoped away from the menu',
-      !!defaultHoverRule && /background:\s*var\(--accent-hover\)/.test(defaultHoverRule.body),
-      'no :has()-scoped rule recoloring both #submit-btn and .split-caret on hover'
+      'stylesheet keeps both halves transparent so only the container paints',
+      !!halvesTransparent,
+      'no rule zeroing the background on #submit-btn and .split-caret'
+    );
+
+    // #submit-menu is a CHILD of .split-btn and opens upward, so clipping the
+    // container to its own bounds hides the "Approve & finish" menu completely —
+    // the caret opens a menu nobody can see. Giving the container the fill makes
+    // `overflow: hidden` look harmless here; it is not.
+    check(
+      'the split-btn container does not clip its own dropdown menu',
+      !!containerFill && !/overflow:\s*hidden/.test(containerFill.body),
+      'overflow: hidden on .split-btn clips #submit-menu, which is a descendant'
+    );
+
+    const defaultHoverRule = findRule((r) => hasSyncedHoverCondition(r.selector) && !r.selector.includes('.approve'));
+    check(
+      'stylesheet recolors the whole control on hover (default mode), scoped away from the menu',
+      !!defaultHoverRule && /background:\s*var\(--pr-navy-hover\)/.test(defaultHoverRule.body),
+      'no :has()-scoped rule recoloring the .split-btn container on hover'
     );
 
     const approveHoverRule = findRule(
-      (r) =>
-        hasSyncedHoverCondition(r.selector) &&
-        r.selector.includes('#submit-btn.approve') &&
-        hasClass(r.selector, '.split-caret')
+      (r) => hasSyncedHoverCondition(r.selector) && r.selector.includes('#submit-btn.approve')
     );
     check(
-      'stylesheet recolors submit-btn and the caret together on hover (approve mode), scoped away from the menu',
-      !!approveHoverRule && /background:\s*var\(--success-hover\)/.test(approveHoverRule.body),
-      'no :has()-scoped rule recoloring both halves in approve mode on hover'
+      'stylesheet recolors the whole control on hover (approve mode), scoped away from the menu',
+      !!approveHoverRule && /filter:\s*brightness/.test(approveHoverRule.body),
+      'no :has()-scoped rule recoloring the container in approve mode on hover'
     );
 
     const approveRestRule = findRule(
-      (r) =>
-        !r.selector.includes(':hover') &&
-        r.selector.includes('#submit-btn.approve') &&
-        hasClass(r.selector, '.split-caret')
+      (r) => !r.selector.includes(':hover') && r.selector === '.split-btn:has(#submit-btn.approve)'
     );
     check(
       'stylesheet recolors the whole split-btn control in approve mode at rest, not just #submit-btn',
-      !!approveRestRule && /background:\s*var\(--success\)/.test(approveRestRule.body),
-      'no rule recoloring both #submit-btn.approve and its .split-caret at rest'
+      !!approveRestRule && /background:\s*var\(--pr-add\)/.test(approveRestRule.body),
+      'no rule recoloring the whole .split-btn container in approve mode at rest'
     );
   }
   const app = await text('/app.js');
@@ -3812,9 +3844,14 @@ async function main() {
     'client renders comment author badges with an id-derived color',
     /author-badge/.test(app.body) && /function authorColor\(/.test(app.body)
   );
+  // The badges now sit ON the option row they belong to, and divergence is named
+  // in the block's header chip instead of as a separate hint underneath — same
+  // two facts (who picked what, and that they disagree), no tally line.
   check(
-    'client shows per-option who-picked badges and a muted disagree hint on choices',
-    /choice-picks/.test(app.body) && /choice-disagree/.test(app.body)
+    'client shows per-option who-picked badges and names divergence in the decision header',
+    /choice-row-picks/.test(app.body) &&
+      /function pickBadge\(/.test(app.body) &&
+      /'Reviewers disagree'/.test(app.body)
   );
   // issue 011 item 3: don't echo a lone reviewer's own pick back to them — source-regex
   // smoke check (no DOM rig, matching the suite's convention for choice-block behavior).
@@ -3864,8 +3901,8 @@ async function main() {
   check('stylesheet styles the presence avatars', /presence-avatar/.test(css.body));
   check('review page carries the "you are <name>" identity affordance', /id="identity"/.test(appPage.body));
   check(
-    'stylesheet styles the attribution UI (author badge + choice conflict)',
-    /author-badge/.test(css.body) && /choice-disagree/.test(css.body)
+    'stylesheet styles the attribution UI (author badge + per-option pick badge)',
+    /author-badge/.test(css.body) && /pick-badge/.test(css.body)
   );
   check(
     'client live-syncs on a peer "review" delta and ignores its own echo by author id',
@@ -3924,21 +3961,25 @@ async function main() {
     'client wires the reviewer follow-up (replyForm → reviewer role → syncReview)',
     /replyForm/.test(app.body) && /role: 'reviewer'/.test(app.body) && /syncReview\(\)/.test(app.body)
   );
-  // issue 011 item 2: the author badge gets its own in-flow row above the comment body
-  // instead of living inside the absolutely-positioned .card-actions icon row, so it can
-  // never overlap the comment text regardless of comment length.
+  // issue 011 item 2: the author badge shares an in-flow header row with the
+  // timestamp and the edit/delete actions, above the comment body. Nothing on
+  // the card is absolutely positioned any more, so the badge cannot overlap the
+  // comment text at any name or comment length — the guard is now "no absolute
+  // positioning on the card" rather than a hand-tuned right gutter.
   check(
-    'client renders the author badge in its own row, not inside .card-actions',
-    /className = 'card-author-row'/.test(app.body) &&
+    'client renders the author badge in the card header row, alongside the actions',
+    /className = 'card-head'/.test(app.body) &&
+      /head\.appendChild\(authorBadge\(c\.author\)\)/.test(app.body) &&
       !/actions\.appendChild\(authorBadge/.test(app.body)
   );
   check(
-    'stylesheet keeps the author-row in normal document flow (reserves space instead of overlaying text)',
-    /\.card-author-row\s*\{[^}]*\}/.test(css.body) && !/\.card-author-row\s*\{[^}]*position:\s*absolute/.test(css.body)
+    'stylesheet keeps the card header in normal document flow (reserves space instead of overlaying text)',
+    /\.card-head\s*\{[^}]*\}/.test(css.body) && !/\.card-head\s*\{[^}]*position:\s*absolute/.test(css.body)
   );
   check(
-    'the author-row reserves the same right-gutter as the ✎/✕ icons, so a long name never grows under them',
-    /\.card-author-row\s*\{[^}]*margin:\s*0\s*48px/.test(css.body)
+    'nothing on the comment card is absolutely positioned, so a long name can never grow under the actions',
+    !/\.card-actions\s*\{[^}]*position:\s*absolute/.test(css.body) &&
+      !/\.comment-card\s*\{[^}]*position:\s*absolute/.test(css.body)
   );
 
   await cli('stop', '--session', guard.id);

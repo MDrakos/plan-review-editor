@@ -9,11 +9,15 @@
 <body>
   <header class="topbar">
     <div class="brand">Plan Review</div>
+    <span class="topbar-divider"></span>
     <div class="doc-title" id="doc-title"></div>
+    <div class="session-meta" id="session-meta"></div>
+    <span class="spacer"></span>
     <span class="pill" id="status-pill" data-status="idle">idle</span>
     <div id="presence" class="presence" aria-label="Reviewers viewing now"></div>
+    <span class="topbar-divider"></span>
     <span id="identity" class="identity" title="Your reviewer name — visible to others on this plan"></span>
-    <button id="end-btn" class="btn danger">End session</button>
+    <button id="end-btn" class="btn ghost-on-navy">End session</button>
   </header>
   <main class="layout">
     <section class="doc-pane">
@@ -37,26 +41,37 @@
       </div>
       <article id="doc" class="doc"></article>
       <div id="working-overlay" class="overlay" hidden>
-        <div class="overlay-card">
-          <div class="spinner"></div>
-          <p>Reworking the plan… <span id="working-elapsed" class="working-elapsed"></span></p>
-          <ul id="progress-list" class="progress-list"></ul>
-          <p id="working-stale" class="working-stale" hidden></p>
-          <p class="overlay-hint">The new version will load here automatically. Chat stays open.</p>
-          <button id="interrupt-btn" class="btn" type="button">Interrupt &amp; keep editing</button>
-          <p class="overlay-hint">Or, if the agent has already moved on, click <strong>End session</strong> above.</p>
+        <div class="overlay-card working-card">
+          <header class="overlay-head">
+            <span class="overlay-head-label">Reworking the plan</span>
+            <span id="working-step" class="overlay-head-step"></span>
+          </header>
+          <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+          <div class="overlay-body">
+            <ul id="progress-list" class="progress-list"></ul>
+            <p class="overlay-rule"></p>
+            <p class="overlay-hint">The new version loads here automatically. Chat stays open.</p>
+            <button id="interrupt-btn" class="btn" type="button">Interrupt &amp; keep editing</button>
+            <p id="working-stale" class="working-stale" hidden></p>
+            <p class="overlay-hint">Or, if the agent has already moved on, click <strong>End session</strong> above.</p>
+            <p class="overlay-elapsed">elapsed <span id="working-elapsed" class="working-elapsed"></span></p>
+          </div>
         </div>
       </div>
       <div id="done-overlay" class="overlay" hidden>
         <div class="overlay-card">
-          <p>Review approved ✓</p>
-          <p class="overlay-hint">The agent is applying your feedback and proceeding. You can close this tab.</p>
+          <div class="overlay-body">
+            <p>Review approved</p>
+            <p class="overlay-hint">The agent is applying your feedback and proceeding. You can close this tab.</p>
+          </div>
         </div>
       </div>
       <div id="ended-overlay" class="overlay" hidden>
         <div class="overlay-card">
-          <p>Session ended</p>
-          <p class="overlay-hint">Control has returned to the agent in your terminal. You can close this tab.</p>
+          <div class="overlay-body">
+            <p>Session ended</p>
+            <p class="overlay-hint">Control has returned to the agent in your terminal. You can close this tab.</p>
+          </div>
         </div>
       </div>
     </section>
@@ -64,6 +79,7 @@
       <section class="panel comments-panel">
         <header class="panel-head">
           Comments <span id="comment-count" class="count">0</span>
+          <span id="archived-note" class="panel-head-aside"></span>
         </header>
         <div id="comment-list" class="comment-list"></div>
       </section>
@@ -83,9 +99,16 @@
             </button>
           </div>
         </div>
+        <div class="submit-caption">
+          <span id="submit-tally"></span>
+          <span id="submit-mode-label">rework and show me again</span>
+        </div>
       </section>
       <section class="panel chat-panel">
-        <header class="panel-head">Chat</header>
+        <header class="panel-head">
+          Chat with agent
+          <span id="chat-state" class="panel-head-aside">connected</span>
+        </header>
         <div id="chat-list" class="chat-list"></div>
         <form id="chat-form">
           <input id="chat-input" placeholder="Message the agent…" autocomplete="off">
@@ -96,10 +119,11 @@
   </main>
 
   <div id="comment-fab" hidden>
-    <button id="fab-btn">💬 Comment</button>
+    <button id="fab-btn">Comment</button>
   </div>
 
   <div id="composer" hidden>
+    <div class="composer-label">New comment</div>
     <blockquote id="composer-quote"></blockquote>
     <textarea id="composer-text" rows="3" placeholder="Leave a comment…"></textarea>
     <div class="composer-actions">
