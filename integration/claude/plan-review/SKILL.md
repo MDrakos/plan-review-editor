@@ -1,5 +1,6 @@
 ---
 name: plan-review
+invocation: promoted
 description: >
   Use automatically whenever you are about to present the user with a plan,
   a set of options/choices to pick from, or any long text output (roughly 30+
@@ -8,6 +9,14 @@ description: >
   review event loop until the user ends the session. Triggers include:
   finishing a plan, proposing approaches, "here are your options", design
   docs, migration plans, or any wall of text the user must read and react to.
+triggers:
+  - plan-review
+  - review this plan
+  - present the plan
+  - show me the plan in the browser
+  - here are your options
+  - let me review that
+version: 1
 ---
 
 # Plan Review — browser review loop

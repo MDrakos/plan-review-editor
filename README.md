@@ -195,12 +195,18 @@ ln -s "$(pwd)/bin/codereview.js" ~/.local/bin/codereview
 `integration/claude/` holds two ready-made Claude Code skills. Symlink them
 into your personal skills directory and every session can trigger them on its
 own — `plan-review` whenever it is about to present a plan, options, or a wall
-of text, and `code-review` whenever it is about to push code it just wrote:
+of text, and `codereview` whenever it is about to push code it just wrote:
 
 ```sh
 ln -s "$(pwd)/integration/claude/plan-review" ~/.claude/skills/plan-review
-ln -s "$(pwd)/integration/claude/code-review" ~/.claude/skills/code-review
+ln -s "$(pwd)/integration/claude/codereview"  ~/.claude/skills/codereview
 ```
+
+The symlink is the routing gate: with it in place the skill can be fired by the
+model from a user turn *and* typed by name (`/plan-review`, `/codereview`).
+The code one is deliberately **not** called `code-review` — Claude Code ships a
+built-in command by that name which scans a diff for bugs with no human in the
+loop, and two skills answering to one name is a coin flip.
 
 To make them non-negotiable rather than model-judged, also add these to
 `~/.claude/CLAUDE.md`:
@@ -212,7 +218,7 @@ terminal — use the plan-review skill and follow its event loop until I end
 the session.
 
 In an interactive session, do not push code you wrote or open a PR for it
-until I have reviewed the diff — use the code-review skill and follow its
+until I have reviewed the diff — use the codereview skill and follow its
 event loop until I approve or end the session. Unattended runs (riker crews,
 cron) skip this and are reviewed on GitHub.
 ```

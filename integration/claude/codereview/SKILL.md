@@ -1,5 +1,6 @@
 ---
-name: code-review
+name: codereview
+invocation: promoted
 description: >
   Use before pushing code you wrote or edited — a branch, a commit, or
   uncommitted work — whenever a human is watching. Put the diff in front of
@@ -8,10 +9,21 @@ description: >
   loop until they approve or end the session. Triggers include: finishing an
   implementation, "before you push", "review this diff", about to run
   `git push` / `gh pr create` on work you just wrote, or any moment the user
-  should see the code before GitHub does.
+  should see the code before GitHub does. Not Claude Code's built-in
+  `code-review` command, which scans a diff for bugs without a human in the
+  loop — this one puts it in front of a person and blocks on their verdict.
+triggers:
+  - codereview
+  - review my diff
+  - review this before pushing
+  - review the branch before I push
+  - put the diff in the browser
+  - let me review the code first
+  - can I see the diff
+version: 1
 ---
 
-# Code Review — browser review loop before the push
+# codereview — browser review loop before the push
 
 Do not push code you wrote (or open a PR for it) in an interactive session
 without offering the diff for review first. Put it in the code-review editor
