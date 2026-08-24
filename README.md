@@ -160,8 +160,10 @@ PR will show. Narrow it with `--base <ref>`, `--range a..b`, or `--staged`.
 In the browser: click a line number to comment on it, drag down the gutter for a
 range, and switch a comment to **Suggest** to hand back the exact replacement
 text. Expand hidden context between hunks, mark files **Viewed** to fold them,
-and flip the whole diff between **Inline** and **Side-by-side**. Then
-**Request changes** or **Approve**.
+and flip the whole diff between **Inline** and **Side-by-side**. Code is syntax
+highlighted (36 languages, from the file extension), with the changed run of a
+modified line still marked on top of the colours. Then **Request changes** or
+**Approve**.
 
 The agent side is the same loop as a plan review, with one difference —
 `present` takes no file, because the repo *is* the document:

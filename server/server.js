@@ -893,6 +893,13 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && /^\/fonts\/Poppins-(Regular|Medium|SemiBold|Bold)\.ttf$/.test(pathname)) {
       return sendFile(res, pathname.slice(1), 'font/ttf');
     }
+    // Vendored syntax highlighter (highlight.js + its two GitHub themes).
+    // Whitelisted by name like the fonts above, and for the same reason: the UI
+    // is offline-capable, so nothing here loads from a CDN.
+    if (method === 'GET' && /^\/vendor\/(highlight\.min\.js|hljs-github(-dark)?\.css)$/.test(pathname)) {
+      const type = pathname.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8';
+      return sendFile(res, pathname.slice(1), type);
+    }
     if (method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
       return sendHtml(res, indexHtml());
     }

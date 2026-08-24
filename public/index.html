@@ -4,6 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Plan Review</title>
+  <!-- Vendored highlight.js theme for fenced code blocks. The dark variant in
+       both colour schemes, because the plan's code blocks are dark either way.
+       Loaded before style.css so our own rules win the specificity ties. -->
+  <link rel="stylesheet" href="/vendor/hljs-github-dark.css">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -132,6 +136,7 @@
     </div>
   </div>
 
+  <script src="/vendor/highlight.min.js"></script>
   <script src="/liveness.js"></script>
   <script src="/app.js"></script>
 </body>

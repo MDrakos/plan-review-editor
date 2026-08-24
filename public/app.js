@@ -250,6 +250,18 @@ interruptBtn.addEventListener('click', async () => {
   // overlay (and resyncs the panel) — nothing else to do here.
 });
 
+// Fenced code blocks arrive from server/markdown.js already carrying
+// `class="language-<lang>"`; highlight.js (vendored in public/vendor) reads that
+// and colours them in place. Languages it doesn't know — `choice`, which is our
+// own fence type, above all — are left exactly as they were.
+function highlightDoc() {
+  if (!window.hljs) return;
+  for (const code of docEl.querySelectorAll('pre > code[class*="language-"]')) {
+    const lang = (code.className.match(/language-([\w-]+)/) || [])[1];
+    if (lang && hljs.getLanguage(lang)) hljs.highlightElement(code);
+  }
+}
+
 function renderDoc(doc) {
   // Rendering the live document means we are NOT in the diff view — reset it, so
   // a reworked doc arriving mid-diff (or any state resync) lands cleanly on the
@@ -259,6 +271,7 @@ function renderDoc(doc) {
   document.title = doc.title ? `${doc.title} — Plan Review` : 'Plan Review';
   docEl.innerHTML =
     doc.html || '<p class="empty">Waiting for the agent to present a plan…</p>';
+  highlightDoc();
   state.version = doc.version;
   state.versions = doc.versions || [];
   state.presentedAt = doc.presentedAt || null;
@@ -401,6 +414,7 @@ async function showDiff() {
   docEl.innerHTML = /data-diff/.test(data.html || '')
     ? data.html
     : '<p class="empty">No changes between these versions.</p>';
+  highlightDoc();
   diffLegend.hidden = false;
   diffShowBtn.hidden = true;
   diffCloseBtn.hidden = false;
