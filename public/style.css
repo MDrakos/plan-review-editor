@@ -917,24 +917,33 @@ html, body {
 
 #chat-form {
   display: flex;
+  align-items: flex-end; /* Send stays on the last line as the box grows */
   gap: 8px;
   padding: 10px 12px;
   border-top: 1px solid var(--pr-border);
 }
 
-#chat-form input {
+/* A textarea so a long message wraps into view instead of scrolling past you in
+   a one-line box. field-sizing does the growing natively — no JS, no shadow
+   element to measure. Where it isn't supported the box stays one row and
+   scrolls, which is what it did before. */
+#chat-form textarea {
   flex: 1;
   min-width: 0;
+  field-sizing: content;
+  max-height: 30vh;
+  resize: none;
   border: 1px solid var(--pr-border);
   border-radius: var(--pr-r-sm);
   padding: 6px 8px;
   font-family: var(--pr-sans);
   font-size: 13px;
+  line-height: 1.45;
   background: var(--pr-surface);
   color: var(--pr-ink);
 }
 
-#chat-form input:focus { outline: 2px solid var(--pr-blue); outline-offset: -1px; }
+#chat-form textarea:focus { outline: 2px solid var(--pr-blue); outline-offset: -1px; }
 
 /* ---------- highlights ---------- */
 /* The mark never recolors on focus — attention is drawn by scrolling to it and

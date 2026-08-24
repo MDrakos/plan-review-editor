@@ -120,10 +120,16 @@
   border: 1px solid var(--pr-border);
   border-radius: var(--pr-r-md);
   background: var(--pr-surface);
-  overflow: hidden;
-  scroll-margin-top: 92px; /* clear the sticky files bar when jumped to */
+  /* `clip`, not `hidden`: both round off the table inside the card, but
+     `hidden` makes the card a scroll container, which pins .file-head to the
+     card instead of to the pane and kills the sticky header. */
+  overflow: clip;
+  scroll-margin-top: calc(var(--files-bar-h, 92px) + 8px);
 }
 
+/* The file name follows you down its own diff, so you always know which file
+   you are reading. It parks just under the files bar, whose height review.js
+   measures into --files-bar-h (the jump chips wrap, so it is not a constant). */
 .file-head {
   display: flex;
   align-items: center;
@@ -132,7 +138,7 @@
   border-bottom: 1px solid var(--pr-rule);
   background: var(--pr-bg);
   position: sticky;
-  top: 0;
+  top: var(--files-bar-h, 92px);
   z-index: 1;
 }
 

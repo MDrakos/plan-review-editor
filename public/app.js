@@ -627,6 +627,15 @@ function updateStaleHint() {
   workingStaleEl.hidden = !hint;
 }
 
+// The chat box is a textarea so it can grow with a long message (see
+// #chat-form textarea in style.css). That costs it Enter-to-send, so put it
+// back: Enter sends, shift+Enter starts a new line.
+chatInputEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+  e.preventDefault();
+  chatFormEl.requestSubmit();
+});
+
 chatFormEl.addEventListener('submit', async (e) => {
   e.preventDefault();
   const text = chatInputEl.value.trim();
