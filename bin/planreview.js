@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 'use strict';
 
-// The agent-facing CLI. Each plan under review is an isolated SESSION, so
-// multiple agents can drive their own reviews at once without clobbering each
-// other. `start` mints a session and prints its id; every later command for
-// that review must carry it via `--session <id>`:
+// The agent-facing CLI for reviewing a PLAN (a markdown document). Each plan
+// under review is an isolated SESSION, so multiple agents can drive their own
+// reviews at once without clobbering each other. `start` mints a session and
+// prints its id; every later command for that review must carry it via
+// `--session <id>`:
 //
 //   planreview start plan.md            # -> {"id":"a1b2c3","url":"…/s/a1b2c3", …}
 //   planreview wait --session a1b2c3    # block until the reviewer does something
@@ -12,177 +13,24 @@
 //   ... {"type":"submit"}  -> rework plan.md ; planreview present plan.md --session a1b2c3 ; wait
 //   ... {"type":"end"}     -> planreview stop --session a1b2c3
 //
-// One shared server (default port 4780) holds every session. Every command
-// prints JSON to stdout so agents can parse results directly.
+// One shared server (default port 4780) holds every session — plans here, code
+// diffs under `codereview`. Every command prints JSON to stdout so agents can
+// parse results directly. The plumbing both front ends share lives in
+// bin/cli-core.js.
 
-const http = require('http');
-const path = require('path');
-const fs = require('fs');
-const { spawn, execFile, execFileSync } = require('child_process');
-
-const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
-const BASE = `http://127.0.0.1:${PORT}`;
-const SERVER = path.join(__dirname, '..', 'server', 'server.js');
-const { codeVersion } = require(path.join(__dirname, '..', 'server', 'version'));
-
-function request(method, pathname, body) {
-  return new Promise((resolve, reject) => {
-    const payload = body === undefined ? null : JSON.stringify(body);
-    const req = http.request(
-      `${BASE}${pathname}`,
-      {
-        method,
-        headers: payload
-          ? {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(payload),
-            }
-          : {},
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (c) => (data += c));
-        res.on('end', () => {
-          let parsed;
-          try {
-            parsed = data ? JSON.parse(data) : {};
-          } catch {
-            parsed = { raw: data };
-          }
-          if (res.statusCode >= 400) {
-            const e = new Error(parsed.error || `HTTP ${res.statusCode}`);
-            e.statusCode = res.statusCode; // lets present/progress tell a 409 (interrupted) from a fatal error
-            reject(e);
-          } else resolve(parsed);
-        });
-      }
-    );
-    req.setTimeout(0);
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// FM-2: present/progress are gated to an active working round — a reviewer
-// interrupt discards the stale rework and makes them 409. That's a documented
-// recovery, not a fatal error: print it and let the caller exit 0 (so a
-// `present && wait` chain proceeds into the next `wait`). Returns true if it
-// handled a 409; false means the error is fatal and the caller must rethrow.
-function handledInterrupt409(err) {
-  if (err.statusCode !== 409) return false;
-  console.log(JSON.stringify({ interrupted: true, message: 'round interrupted; wait again' }));
-  return true;
-}
-
-async function serverHealth() {
-  try {
-    return await request('GET', '/health');
-  } catch {
-    return null;
-  }
-}
-
-async function serverAlive() {
-  return (await serverHealth()) !== null;
-}
-
-function openBrowser(url) {
-  const opener =
-    process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-  execFile(opener, [url], () => {});
-}
-
-async function spawnServer(want) {
-  spawn(process.execPath, [SERVER], { detached: true, stdio: 'ignore' }).unref();
-  for (let i = 0; i < 50; i++) {
-    await sleep(100);
-    const h = await serverHealth();
-    if (h && h.version === want) return true;
-  }
-  throw new Error(`server did not come up on ${BASE}`);
-}
-
-async function shutdownAndWait() {
-  await request('POST', '/admin/shutdown').catch(() => {});
-  for (let i = 0; i < 30; i++) {
-    await sleep(100);
-    if (!(await serverAlive())) return;
-  }
-}
-
-// Ensure a server running CURRENT code is up. A server that started before a
-// code edit is stale; replace it — but only when it has no active sessions, so
-// a code change can never yank another agent's live review out from under it.
-async function ensureServer() {
-  const want = codeVersion();
-  const health = await serverHealth();
-  if (health) {
-    if (health.version === want) return false; // up to date — reuse
-    if (health.sessions > 0) {
-      console.error(
-        `planreview: server on ${BASE} runs older code and has ${health.sessions} active ` +
-          `session(s); reusing it as-is. Stop those sessions (or run \`planreview restart --force\`) to load the new code.`
-      );
-      return false;
-    }
-    await shutdownAndWait(); // stale and empty — safe to replace
-  }
-  return spawnServer(want);
-}
-
-function resolveDoc(file) {
-  if (!file) throw new Error('missing <file.md>');
-  const abs = path.resolve(file);
-  if (!fs.existsSync(abs)) throw new Error(`no such file: ${abs}`);
-  return abs;
-}
-
-// Minimal flag parser: pulls --session/--timeout (value flags) and --no-open
-// (boolean) out, leaving the rest as positionals.
-function parseArgs(argv) {
-  const opts = {};
-  const positionals = [];
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--session') opts.session = argv[++i];
-    else if (a === '--timeout') opts.timeout = Number(argv[++i]);
-    else if (a === '--warn-after') opts.warnAfter = Number(argv[++i]);
-    else if (a === '--reviewer-name') opts.reviewerName = argv[++i];
-    else if (a === '--no-open') opts.noOpen = true;
-    else if (a === '--no-pull') opts.noPull = true;
-    else if (a.startsWith('--')) opts[a.slice(2)] = true;
-    else positionals.push(a);
-  }
-  return { opts, positionals };
-}
-
-function requireSession(opts, cmd) {
-  const id = opts.session || process.env.PLANREVIEW_SESSION;
-  if (!id) throw new Error(`${cmd} requires --session <id> (printed by \`planreview start\`)`);
-  return id;
-}
-
-function scoped(pathname, id) {
-  const sep = pathname.includes('?') ? '&' : '?';
-  return `${pathname}${sep}session=${encodeURIComponent(id)}`;
-}
-
-// The reviewer name to seed into the browser so it stops prompting on a fresh tab.
-// Priority: an explicit --reviewer-name flag, then $PLANREVIEW_REVIEWER_NAME, then the
-// repo/user's `git config user.name` — so it just works with zero configuration. Empty
-// string if none resolve (the browser then prompts on first load, exactly as before).
-function resolveReviewerName(opts) {
-  const explicit = (opts.reviewerName || process.env.PLANREVIEW_REVIEWER_NAME || '').trim();
-  if (explicit) return explicit;
-  try {
-    return execFileSync('git', ['config', 'user.name'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {
-    return ''; // no git, or user.name unset — leave it to the browser
-  }
-}
+const core = require('./cli-core'); // shared plumbing
+const {
+  BASE,
+  request,
+  ensureServer,
+  handledInterrupt409,
+  openBrowser,
+  parseArgs,
+  requireSession,
+  resolveDoc,
+  resolveReviewerName,
+  scoped,
+} = core;
 
 const commands = {
   // start = begin a NEW isolated session and present the plan in a fresh tab.
@@ -190,12 +38,13 @@ const commands = {
     const { opts, positionals } = parseArgs(argv);
     const file = resolveDoc(positionals[0]);
     await ensureServer();
-    const out = await request('POST', '/agent/start', { path: file, reviewerName: resolveReviewerName(opts) });
+    const out = await request('POST', '/agent/start', {
+      path: file,
+      reviewerName: resolveReviewerName(opts),
+    });
     const url = BASE + out.url;
     if (!opts.noOpen) openBrowser(url);
-    console.log(
-      JSON.stringify({ ok: true, id: out.id, url, version: out.version, title: out.title })
-    );
+    console.log(JSON.stringify({ ok: true, id: out.id, url, version: out.version, title: out.title }));
   },
 
   // present = next round in the SAME session (keeps chat history).
@@ -205,106 +54,15 @@ const commands = {
     const file = resolveDoc(positionals[0]);
     let out;
     try {
-      out = await request('POST', scoped('/agent/present', id), { path: file, reviewerName: resolveReviewerName(opts) });
+      out = await request('POST', scoped('/agent/present', id), {
+        path: file,
+        reviewerName: resolveReviewerName(opts),
+      });
     } catch (err) {
       if (handledInterrupt409(err)) return;
       throw err;
     }
     console.log(JSON.stringify({ ok: true, id, ...out }));
-  },
-
-  // Blocks until the reviewer produces the next real event for this session.
-  // The reviewer has NO time limit — a long doc can take as long as it takes.
-  // Internally this polls the server in short windows and loops straight past
-  // the server's "nothing yet" replies, so from the caller's side it just
-  // blocks until something happens. Dropped connections are retried; a dead
-  // server or a vanished session is not.
-  //
-  // --timeout <seconds>  return {"type":"timeout"} after this long instead of
-  //                      blocking, so an agent whose shell caps command time
-  //                      can return cleanly and re-run `wait` in a loop.
-  // --warn-after <sec>   print a one-line "still waiting" note to stderr once
-  //                      the wait passes this (default 300s / 5m). Informational
-  //                      only — never a cutoff, and never shown to the reviewer.
-  async wait(argv) {
-    const { opts } = parseArgs(argv);
-    const id = requireSession(opts, 'wait');
-    const hardCap = opts.timeout; // seconds, optional graceful-return budget
-    if (hardCap !== undefined && (!Number.isFinite(hardCap) || hardCap <= 0))
-      throw new Error('usage: planreview wait --session <id> [--timeout <seconds>]');
-    const warnAfter = opts.warnAfter !== undefined ? opts.warnAfter : 300;
-    const windowMs = Number(process.env.PLANREVIEW_POLL_MS) || 50000;
-    const start = Date.now();
-    let warned = false;
-    for (;;) {
-      const elapsed = Date.now() - start;
-      let poll = windowMs;
-      if (hardCap !== undefined) {
-        const remaining = hardCap * 1000 - elapsed;
-        if (remaining <= 0) return console.log(JSON.stringify({ type: 'timeout' }));
-        poll = Math.min(windowMs, remaining);
-      }
-      let event;
-      try {
-        event = await request('GET', `${scoped('/agent/wait', id)}&timeout=${Math.round(poll)}`);
-      } catch (err) {
-        if (/no such session/i.test(err.message))
-          throw new Error(`no such session: ${id} (it may have ended)`);
-        if (err.code === 'ECONNREFUSED') throw new Error('server is not running');
-        await sleep(500);
-        if (!(await serverAlive())) throw new Error('server is not running');
-        continue;
-      }
-      if (event.type === 'timeout') {
-        // nothing from the reviewer yet — keep polling (no limit)
-        if (!warned && warnAfter > 0 && Date.now() - start >= warnAfter * 1000) {
-          warned = true;
-          const mins = Math.round((Date.now() - start) / 60000);
-          process.stderr.write(
-            `planreview: still waiting for the reviewer (~${mins}m) — no time limit; expected for long docs.\n`
-          );
-        }
-        continue;
-      }
-      console.log(JSON.stringify(event));
-      return;
-    }
-  },
-
-  async say(argv) {
-    const { opts, positionals } = parseArgs(argv);
-    const id = requireSession(opts, 'say');
-    const text = positionals.join(' ').trim();
-    if (!text) throw new Error('usage: planreview say <message> --session <id>');
-    console.log(JSON.stringify(await request('POST', scoped('/agent/say', id), { text })));
-  },
-
-  // Reply to a SPECIFIC inline comment (threaded under it), vs `say` which posts
-  // to the global chat. The comment id comes from the submit bundle's comments.
-  async reply(argv) {
-    const { opts, positionals } = parseArgs(argv);
-    const id = requireSession(opts, 'reply');
-    const commentId = positionals[0];
-    const text = positionals.slice(1).join(' ').trim();
-    if (!commentId || !text)
-      throw new Error('usage: planreview reply <commentId> <message> --session <id>');
-    console.log(JSON.stringify(await request('POST', scoped('/agent/reply', id), { commentId, text })));
-  },
-
-  // Report a rework step; shown live in the reviewer's "reworking" overlay.
-  async progress(argv) {
-    const { opts, positionals } = parseArgs(argv);
-    const id = requireSession(opts, 'progress');
-    const text = positionals.join(' ').trim();
-    if (!text) throw new Error('usage: planreview progress <message> --session <id>');
-    let out;
-    try {
-      out = await request('POST', scoped('/agent/progress', id), { text });
-    } catch (err) {
-      if (handledInterrupt409(err)) return;
-      throw err;
-    }
-    console.log(JSON.stringify(out));
   },
 
   async status(argv) {
@@ -324,86 +82,7 @@ const commands = {
     );
   },
 
-  // list every open session on the shared server (mirrors the / index page).
-  async list() {
-    if (!(await serverAlive())) return console.log(JSON.stringify([]));
-    console.log(JSON.stringify(await request('GET', '/api/sessions')));
-  },
-
-  async open(argv) {
-    const { opts } = parseArgs(argv);
-    const id = requireSession(opts, 'open');
-    const url = `${BASE}/s/${id}`;
-    openBrowser(url);
-    console.log(JSON.stringify({ ok: true, url }));
-  },
-
-  async stop(argv) {
-    const { opts } = parseArgs(argv);
-    const id = requireSession(opts, 'stop');
-    console.log(JSON.stringify(await request('POST', scoped('/agent/stop', id))));
-  },
-
-  // Force the shared server to reload its code. Normally unnecessary — `start`
-  // auto-restarts a stale, empty server — but useful after editing server code
-  // while sessions are open. Refuses to drop live sessions without --force.
-  async restart(argv) {
-    const { opts } = parseArgs(argv);
-    const health = await serverHealth();
-    if (health && health.sessions > 0 && !opts.force)
-      throw new Error(
-        `refusing to restart: ${health.sessions} active session(s) would be dropped — re-run with --force`
-      );
-    if (health) await shutdownAndWait();
-    await spawnServer(codeVersion());
-    console.log(JSON.stringify({ ok: true, url: BASE }));
-  },
-
-  // Bring the checkout the CLI runs from up to the latest main, then make a
-  // running server reflect it. `planreview` runs out of this repo (typically a
-  // symlink on $PATH), so "the current version" is whatever is checked out
-  // here — after a merge to main, this pulls it and refreshes the server. A
-  // server that is idle on older code is restarted onto the new code; one with
-  // live sessions is left running (restarting would drop those reviews) and
-  // picks up the change on its next idle restart. --no-pull skips the git step
-  // and only refreshes the server against the already-checked-out code.
-  async update(argv) {
-    const { opts } = parseArgs(argv);
-    const repo = path.join(__dirname, '..');
-    let pulled = 'skipped (--no-pull)';
-    if (!opts.noPull) {
-      try {
-        execFileSync('git', ['checkout', 'main'], { cwd: repo, stdio: ['ignore', 'ignore', 'pipe'] });
-        pulled = execFileSync('git', ['pull', '--ff-only', 'origin', 'main'], {
-          cwd: repo,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        }).trim();
-      } catch (e) {
-        const detail = (e.stderr && e.stderr.toString().trim()) || e.message;
-        throw new Error(`git update failed (resolve it by hand in ${repo}): ${detail}`);
-      }
-    }
-    // codeVersion() reads server/*.js off disk at call time, so it reflects the
-    // pull we just did — no stale require cache to worry about.
-    const want = codeVersion();
-    const health = await serverHealth();
-    let server;
-    if (!health) {
-      server = 'not running; next `planreview start` launches the current code';
-    } else if (health.version === want) {
-      server = 'already running the current code';
-    } else if (health.sessions > 0) {
-      server =
-        `running older code with ${health.sessions} active session(s); left as-is — ` +
-        'run `planreview restart --force` to load the new code now (drops those sessions)';
-    } else {
-      await shutdownAndWait();
-      await spawnServer(want);
-      server = 'restarted onto the current code (was idle on older code)';
-    }
-    console.log(JSON.stringify({ ok: true, pulled, version: want, server }));
-  },
+  ...core.sharedCommands({ sessionPath: '/s/' }),
 };
 
 function usage() {
@@ -421,7 +100,7 @@ function usage() {
         --session <id>               the id comes from the submitted bundle's comments
   progress <message> --session <id>  report a rework step (shown live while reworking)
   status --session <id>              print session status
-  list                               list all open sessions
+  list                               list all open sessions (plans and code reviews)
   open --session <id>                (re)open a session's review tab in the browser
   stop --session <id>                end and drop the session
   restart [--force]                  reload the server's code (auto on start when the
@@ -430,14 +109,10 @@ function usage() {
                                      idle server onto it (a busy server is left running);
                                      run after a merge to main. --no-pull skips the git step
 
-The shared server (default port 4780) exits on its own once no sessions remain.`);
+To review CODE (a git diff) instead of a plan, use \`codereview\` — same server, same
+event loop, its own UI. The shared server (default port 4780) exits on its own once
+no sessions remain.`);
   process.exit(2);
 }
 
-const [cmd, ...rest] = process.argv.slice(2);
-const run = commands[cmd];
-if (!run) usage();
-run(rest).catch((err) => {
-  console.error(`planreview ${cmd}: ${err.message}`);
-  process.exit(2);
-});
+core.run(commands, usage);

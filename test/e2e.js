@@ -1042,6 +1042,7 @@ async function persistenceChecks() {
       'defaultReviewerName',
       'doc',
       'id',
+      'kind',
       'lastAgentActivity',
       'progress',
       'queue',

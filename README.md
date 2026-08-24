@@ -1,12 +1,36 @@
 # Plan Review Editor
 
-A local, browser-based review surface for AI agent plans.
+A local, browser-based review surface for AI agent work — **plans** and the
+**code** that follows them.
 
 Terminal agents (like Claude Code) present plans as walls of text in the
 terminal. Reviewing them there is lossy: you can't point at a sentence, you
 can't leave a note in place, and structured decisions get flattened into
 "type 1, 2, or 3". This project replaces that step with a real document
 review loop in the browser.
+
+The same problem shows up one step later, on the code the agent then writes.
+Reviewing it in the terminal means scrolling `git diff`; reviewing it on GitHub
+means it is already pushed. So the tool has a second front end,
+**`codereview`**, that puts the branch diff in the browser — inline or
+side-by-side, line comments, suggested changes — **before** the push:
+
+```
+┌──────────────┐  codereview   ┌─────────────────────────────┐
+│ terminal      │ ───────────▶ │ browser                     │
+│ agent         │              │  · the branch diff          │
+│ (Claude Code) │              │  · click a line → comment   │
+│               │              │  · suggest exact replacement│
+│               │   verdict    │  · inline / side-by-side    │
+│               │ ◀─────────── │  · Request changes / Approve│
+└──────────────┘              └─────────────────────────────┘
+     approve → the agent pushes; nothing reaches GitHub before that
+```
+
+Both front ends drive **one** server and one event loop; only the document
+differs (a markdown file vs the repo). Plans are `planreview` (`/s/<id>`), code
+is `codereview` (`/r/<id>`), and the two coexist on the same server without
+seeing each other.
 
 ## How a session works
 
@@ -120,17 +144,65 @@ The symlink points at the repo, so tool edits take effect with no reinstall.
 shebang.) Prefer this over `npm link` / `npm install -g` if your Node lives in
 a managed cache dir that could be wiped.
 
+## Reviewing code
+
+```sh
+cd ~/work/some-repo
+node ~/work/plan-review-editor/bin/codereview.js start
+# -> {"id":"a1b2c3","url":"http://127.0.0.1:4780/r/a1b2c3","files":7,
+#     "additions":412,"deletions":38,"label":"origin/main...working tree"}
+```
+
+A tab opens with everything the branch adds — every commit since it left
+`origin/main`, plus uncommitted and untracked work, which is what the eventual
+PR will show. Narrow it with `--base <ref>`, `--range a..b`, or `--staged`.
+
+In the browser: click a line number to comment on it, drag down the gutter for a
+range, and switch a comment to **Suggest** to hand back the exact replacement
+text. Expand hidden context between hunks, mark files **Viewed** to fold them,
+and flip the whole diff between **Inline** and **Side-by-side**. Then
+**Request changes** or **Approve**.
+
+The agent side is the same loop as a plan review, with one difference —
+`present` takes no file, because the repo *is* the document:
+
+```sh
+codereview wait --session a1b2c3
+# {"type":"submit","comments":[{"file":"src/auth.ts","side":"new","line":42,
+#   "quote":"  const token = verify(req)","text":"throws on missing header",
+#   "suggestion":"  const token = verify(req) ?? null"}], "note":"…"}
+
+# fix the code, then:
+codereview present --session a1b2c3
+```
+
+Round two marks which files and lines changed since round one, and every comment
+thread re-anchors to the line its code moved to (matched by the quoted line
+text, nearest the old position). A comment whose code is gone is archived under
+"No longer in the diff" rather than re-pointed at something unrelated.
+
+`approve` is the gate for pushing, and it is only a gate: the tool never touches
+a git remote. Full reference: [docs/CODEREVIEW.md](docs/CODEREVIEW.md).
+
+### Install the `codereview` command
+
+```sh
+ln -s "$(pwd)/bin/codereview.js" ~/.local/bin/codereview
+```
+
 ### Automatic invocation from Claude Code
 
-`integration/claude/plan-review/` is a ready-made Claude Code skill. Symlink
-it into your personal skills directory and every session can trigger it on
-its own whenever it is about to present a plan, options, or a wall of text:
+`integration/claude/` holds two ready-made Claude Code skills. Symlink them
+into your personal skills directory and every session can trigger them on its
+own — `plan-review` whenever it is about to present a plan, options, or a wall
+of text, and `code-review` whenever it is about to push code it just wrote:
 
 ```sh
 ln -s "$(pwd)/integration/claude/plan-review" ~/.claude/skills/plan-review
+ln -s "$(pwd)/integration/claude/code-review" ~/.claude/skills/code-review
 ```
 
-To make it non-negotiable rather than model-judged, also add one line to
+To make them non-negotiable rather than model-judged, also add these to
 `~/.claude/CLAUDE.md`:
 
 ```
@@ -138,6 +210,11 @@ Whenever you are about to present a plan, a set of options, or a long text
 document for my review in an interactive session, do not print it to the
 terminal — use the plan-review skill and follow its event loop until I end
 the session.
+
+In an interactive session, do not push code you wrote or open a PR for it
+until I have reviewed the diff — use the code-review skill and follow its
+event loop until I approve or end the session. Unattended runs (riker crews,
+cron) skip this and are reviewed on GitHub.
 ```
 
 ### Driving it from any other agent

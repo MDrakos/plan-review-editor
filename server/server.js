@@ -7,6 +7,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { renderDiff, renderVersionDiff, parseChoiceSpecs } = require('./markdown');
 const { quoteAnchors } = require('./anchor');
+const { collectDiff, expandContext, resolveSpec } = require('./gitdiff');
+const { reanchor, annotateRound } = require('./diffanchor');
 const { codeVersion } = require('./version');
 
 const PORT = Number(process.env.PLANREVIEW_PORT || 4780);
@@ -64,6 +66,15 @@ const sessions = new Map(); // id -> session
 function blankSession(id) {
   return {
     id,
+    // What is under review: a markdown plan ('plan', /s/<id>) or a git diff
+    // ('diff', /r/<id>). Everything below this line — comments, chat, submit /
+    // approve / interrupt, persistence, presence — is kind-agnostic; only how a
+    // round is LOADED (loadDoc vs loadDiff) and which page is served differ.
+    kind: 'plan',
+    // Diff sessions only: the git spec the agent asked for, the model built from
+    // it, and the previous round's model (memory-only — it exists to mark "what
+    // changed since last round", which a restored session simply does without).
+    diff: { spec: null, model: null, prev: null },
     // Agent-seeded default reviewer name (from `planreview start --reviewer-name` /
     // $PLANREVIEW_REVIEWER_NAME / `git config user.name`). Injected into /s/<id> so a
     // fresh browser adopts it instead of prompting; '' means "no default, prompt as before".
@@ -143,12 +154,19 @@ function statusPayload(s) {
 function sessionSummary(s) {
   return {
     id: s.id,
+    kind: s.kind,
     title: s.doc.title || '(untitled)',
     status: s.status,
     version: s.doc.version,
     clients: s.sse.size,
-    url: `/s/${s.id}`,
+    url: sessionPath(s),
   };
+}
+
+// Where a session's review page lives. The two kinds get different pages
+// (a rendered document vs a diff), so they get different routes.
+function sessionPath(s) {
+  return s.kind === 'diff' ? `/r/${s.id}` : `/s/${s.id}`;
 }
 
 // ---------- persistence ----------
@@ -170,6 +188,8 @@ function sessionFile(id) {
 function serialize(s) {
   return {
     id: s.id,
+    kind: s.kind,
+    diff: s.kind === 'diff' ? { spec: s.diff.spec, model: s.diff.model } : undefined,
     defaultReviewerName: s.defaultReviewerName,
     status: s.status,
     lastAgentActivity: s.lastAgentActivity,
@@ -264,6 +284,9 @@ function restoreSessions() {
       const data = JSON.parse(fs.readFileSync(full, 'utf8'));
       if (!data || typeof data.id !== 'string') throw new Error('missing session id');
       const s = blankSession(data.id);
+      if (data.kind === 'diff') s.kind = 'diff';
+      if (s.kind === 'diff' && data.diff && typeof data.diff === 'object')
+        s.diff = { spec: data.diff.spec || null, model: data.diff.model || null, prev: null };
       if (typeof data.defaultReviewerName === 'string') s.defaultReviewerName = data.defaultReviewerName;
       if (typeof data.status === 'string') s.status = data.status;
       // Object fields fall back to blankSession's defaults if a hand-edited file
@@ -464,6 +487,44 @@ function loadDoc(s, docPath) {
   s.lastAgentActivity = Date.now(); // shared by /agent/start and /agent/present — either counts as agent activity
   touch(s);
   persist(s); // covers /agent/start and /agent/present
+}
+
+// The diff counterpart of loadDoc: collect the CURRENT state of the git spec
+// this session was started with and make it the next round. Called by
+// /agent/start and by /agent/present — a code review's "re-present" takes no
+// path, because the document is the repo: the agent edits files and asks for the
+// diff to be re-read.
+//
+// Comment threads carry forward the same way plan comments do, but re-anchored
+// by file+quote (server/diffanchor.js) rather than by quote alone, and the model
+// is annotated with what moved since the previous round.
+function loadDiff(s, spec) {
+  if (spec) s.diff.spec = spec;
+  const model = collectDiff(s.diff.spec || {});
+  annotateRound(model, s.diff.model);
+  s.diff.prev = s.diff.model;
+  s.diff.model = model;
+  const resolved = resolveSpec(s.diff.spec || {});
+  s.review = {
+    comments: reanchor(s.review.comments || [], model, resolved),
+    choices: s.review.choices || {},
+    resolutions: s.review.resolutions || {},
+  };
+  s.doc.path = null;
+  s.doc.title = diffTitle(model);
+  s.doc.html = '';
+  s.doc.version += 1;
+  s.doc.presentedAt = Date.now();
+  endWorkingRound(s);
+  s.lastAgentActivity = Date.now();
+  touch(s);
+  persist(s);
+}
+
+function diffTitle(model) {
+  const n = model.files.length;
+  const where = model.branch ? `${model.branch}` : model.label;
+  return `${where} — ${n} file${n === 1 ? '' : 's'}, +${model.additions} −${model.deletions}`;
 }
 
 // Normalize a review bundle from a browser POST (shared by submit + approve).
@@ -738,9 +799,9 @@ function sendHtml(res, html) {
 // name is agent/OS-derived and thus untrusted, so JSON-encode it and neutralize "<" (the
 // only character that could close the inline <script> early) — a "</script>" in the name
 // can't break out. Always emits a string, so the global is never `undefined`.
-function sendSessionPage(res, defaultReviewerName) {
-  fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
-    if (err) return sendJson(res, 500, { error: 'missing asset: index.html' });
+function sendSessionPage(res, defaultReviewerName, page = 'index.html') {
+  fs.readFile(path.join(PUBLIC_DIR, page), 'utf8', (err, html) => {
+    if (err) return sendJson(res, 500, { error: `missing asset: ${page}` });
     const literal = JSON.stringify(String(defaultReviewerName || '')).replace(/</g, '\\u003c');
     const boot = `<script>window.__planreviewDefaultName=${literal};</script>`;
     const out = html.includes('</head>') ? html.replace('</head>', `${boot}\n</head>`) : boot + html;
@@ -769,8 +830,8 @@ function indexHtml() {
   .sess .meta { color: var(--pr-ink-faint); font-family: var(--pr-mono); font-size: 11px; white-space: nowrap; }
   .empty { color: var(--pr-ink-faint); font-style: italic; }
 </style></head><body><div class="wrap">
-<h1>Plan Review</h1>
-<p class="sub">Open review sessions — each is isolated, one per agent.</p>
+<h1>Review</h1>
+<p class="sub">Open review sessions — plans and code diffs, each isolated, one per agent.</p>
 <div id="list"></div>
 </div>
 <script>
@@ -783,6 +844,7 @@ async function render(){
   list.innerHTML=items.map(function(s){
     return '<a class="sess" href="'+s.url+'">'
       +'<span class="pill" data-status="'+s.status+'">'+s.status+'</span>'
+      +'<span class="meta">'+(s.kind==='diff'?'code':'plan')+'</span>'
       +'<span class="title">'+esc(s.title)+'</span>'
       +'<span class="meta">v'+s.version+' &middot; '+s.clients+' tab'+(s.clients===1?'':'s')+'</span></a>';
   }).join('');
@@ -814,6 +876,12 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname === '/app.js') {
       return sendFile(res, 'app.js', 'text/javascript; charset=utf-8');
     }
+    if (method === 'GET' && pathname === '/review.js') {
+      return sendFile(res, 'review.js', 'text/javascript; charset=utf-8');
+    }
+    if (method === 'GET' && pathname === '/review.css') {
+      return sendFile(res, 'review.css', 'text/css; charset=utf-8');
+    }
     if (method === 'GET' && pathname === '/liveness.js') {
       return sendFile(res, 'liveness.js', 'text/javascript; charset=utf-8');
     }
@@ -837,23 +905,43 @@ const server = http.createServer(async (req, res) => {
     if (method === 'GET' && pathname.startsWith('/s/')) {
       const sid = decodeURIComponent(pathname.slice(3).split('/')[0] || '');
       const sess = sessions.get(sid);
-      return sendSessionPage(res, sess ? sess.defaultReviewerName : '');
+      return sendSessionPage(res, sess ? sess.defaultReviewerName : '', 'index.html');
+    }
+    // the code-review UI for one diff session — same seeded-name injection, its
+    // own page (public/review.html).
+    if (method === 'GET' && pathname.startsWith('/r/')) {
+      const sid = decodeURIComponent(pathname.slice(3).split('/')[0] || '');
+      const sess = sessions.get(sid);
+      return sendSessionPage(res, sess ? sess.defaultReviewerName : '', 'review.html');
     }
 
     // ----- start = create a session and present into it (agent-driven) -----
     if (method === 'POST' && pathname === '/agent/start') {
       const body = await readBody(req);
-      if (!body.path) return sendJson(res, 400, { error: 'missing "path"' });
+      const isDiff = body.kind === 'diff';
+      if (!isDiff && !body.path) return sendJson(res, 400, { error: 'missing "path"' });
       const s = createSession();
       // Agent-seeded default reviewer name (optional). Trimmed; missing/blank leaves it ''.
       if (typeof body.reviewerName === 'string') s.defaultReviewerName = body.reviewerName.trim();
-      loadDoc(s, path.resolve(body.path)); // persists the session, default name included
+      if (isDiff) {
+        s.kind = 'diff';
+        try {
+          loadDiff(s, body.spec && typeof body.spec === 'object' ? body.spec : {});
+        } catch (err) {
+          removeSession(s); // a bad spec must not leave an empty session behind
+          return sendJson(res, 400, { error: String((err && err.message) || err) });
+        }
+      } else {
+        loadDoc(s, path.resolve(body.path)); // persists the session, default name included
+      }
       return sendJson(res, 200, {
         ok: true,
         id: s.id,
-        url: `/s/${s.id}`,
+        kind: s.kind,
+        url: sessionPath(s),
         version: s.doc.version,
         title: s.doc.title,
+        ...(isDiff ? { files: s.diff.model.files.length, additions: s.diff.model.additions, deletions: s.diff.model.deletions, label: s.diff.model.label } : {}),
       });
     }
 
@@ -865,6 +953,11 @@ const server = http.createServer(async (req, res) => {
       touch(s);
       return sendJson(res, 200, {
         ...statusPayload(s),
+        kind: s.kind,
+        // The diff under review, for a code-review session: files -> hunks ->
+        // lines, annotated with what moved since the previous round. Absent for
+        // a plan session (which carries doc.html instead).
+        ...(s.kind === 'diff' ? { diff: s.diff.model } : {}),
         // versions: the retained version numbers (oldest→newest) the client can
         // diff between. Numbers only — the markdown source stays server-side.
         doc: {
@@ -915,6 +1008,27 @@ const server = http.createServer(async (req, res) => {
       }
       const { html } = renderVersionDiff(fromEntry.markdown, toEntry.markdown);
       return sendJson(res, 200, { from, to, html, versions, current });
+    }
+
+    // Context expansion for a code review: new-side lines [from..to] of one file
+    // in the diff, so the reviewer can open up the code around a hunk. Scoped to
+    // files the diff actually contains — this must never become a way to read an
+    // arbitrary path off the machine.
+    if (method === 'GET' && pathname === '/api/expand') {
+      touch(s);
+      if (s.kind !== 'diff') return sendJson(res, 400, { error: 'not a diff session' });
+      const file = reqUrl.searchParams.get('file') || '';
+      const known = (s.diff.model.files || []).some((f) => f.path === file);
+      if (!known) return sendJson(res, 404, { error: `not in this diff: ${file}` });
+      const from = Number(reqUrl.searchParams.get('from'));
+      const to = Number(reqUrl.searchParams.get('to'));
+      if (!Number.isFinite(from) || !Number.isFinite(to))
+        return sendJson(res, 400, { error: 'from and to must be line numbers' });
+      try {
+        return sendJson(res, 200, { file, ...expandContext(s.diff.spec || {}, file, from, to) });
+      } catch (err) {
+        return sendJson(res, 400, { error: String((err && err.message) || err) });
+      }
     }
 
     if (method === 'GET' && pathname === '/events') {
@@ -1058,7 +1172,7 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && pathname === '/agent/present') {
       const body = await readBody(req);
-      if (!body.path) return sendJson(res, 400, { error: 'missing "path"' });
+      if (s.kind !== 'diff' && !body.path) return sendJson(res, 400, { error: 'missing "path"' });
       // present is only ever a rework re-present (the initial doc comes from
       // /agent/start) — gating it on an active working round is what discards a
       // stale rework after a reviewer interrupt (issue 012) instead of silently
@@ -1068,9 +1182,26 @@ const server = http.createServer(async (req, res) => {
       // Let a re-present refresh the seeded name if one is supplied; never clear it with a blank.
       if (typeof body.reviewerName === 'string' && body.reviewerName.trim())
         s.defaultReviewerName = body.reviewerName.trim();
-      loadDoc(s, path.resolve(body.path));
+      if (s.kind === 'diff') {
+        // No path: a code review re-reads the repo. A spec in the body replaces
+        // the stored one (rare — e.g. the agent committed and wants a new base).
+        try {
+          loadDiff(s, body.spec && typeof body.spec === 'object' ? body.spec : null);
+        } catch (err) {
+          return sendJson(res, 400, { error: String((err && err.message) || err) });
+        }
+      } else {
+        loadDoc(s, path.resolve(body.path));
+      }
       broadcast(s, 'doc', { version: s.doc.version });
-      return sendJson(res, 200, { ok: true, version: s.doc.version, title: s.doc.title });
+      return sendJson(res, 200, {
+        ok: true,
+        version: s.doc.version,
+        title: s.doc.title,
+        ...(s.kind === 'diff'
+          ? { files: s.diff.model.files.length, additions: s.diff.model.additions, deletions: s.diff.model.deletions }
+          : {}),
+      });
     }
 
     if (method === 'GET' && pathname === '/agent/wait') {
