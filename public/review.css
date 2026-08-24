@@ -3,6 +3,46 @@
    comment cards, chat, overlays — is style.css, unchanged, so the two review
    surfaces stay one design. Tokens come from :root there (light and dark). */
 
+/* ---------- diff palette ----------
+   The one place this UI departs from style.css's pastels. Those are opaque
+   fills paired with dark ink, which is right for a highlighted block in a
+   document but wrong for a wall of code: in dark mode the page goes dark and
+   the diff would stay light, inverting the reading contrast.
+
+   So the diff uses GitHub's model instead — the code keeps the page's own ink
+   and the change is carried by a translucent TINT over the surface, muted for
+   the line and stronger for the word-level highlight. Scoped to `--cr-*` so
+   nothing else on the page (or in the plan UI) shifts. */
+:root {
+  --cr-add-line:  #E6FFEC;
+  --cr-add-word:  #ABF2BC;
+  --cr-add-num:   #CCFFD8;
+  --cr-del-line:  #FFEBE9;
+  --cr-del-word:  #FFC1C0;
+  --cr-del-num:   #FFD7D5;
+  --cr-hunk-bg:   #DDF4FF;
+  --cr-hunk-ink:  #57606A;
+  --cr-add-ink:   #1A7F37;   /* the +N counters, not the code */
+  --cr-del-ink:   #CF222E;
+  --cr-select:    rgba(56, 139, 253, 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cr-add-line:  rgba(46, 160, 67, 0.16);
+    --cr-add-word:  rgba(46, 160, 67, 0.40);
+    --cr-add-num:   rgba(46, 160, 67, 0.28);
+    --cr-del-line:  rgba(248, 81, 73, 0.14);
+    --cr-del-word:  rgba(248, 81, 73, 0.40);
+    --cr-del-num:   rgba(248, 81, 73, 0.26);
+    --cr-hunk-bg:   rgba(56, 139, 253, 0.12);
+    --cr-hunk-ink:  #8B949E;
+    --cr-add-ink:   #3FB950;
+    --cr-del-ink:   #F85149;
+    --cr-select:    rgba(56, 139, 253, 0.22);
+  }
+}
+
 .diff-pane {
   flex: 1;
   overflow-y: auto;
@@ -38,13 +78,8 @@
   gap: 6px;
 }
 
-.count-add { color: var(--pr-add-ink); }
-.count-del { color: var(--pr-remove-ink); }
-
-@media (prefers-color-scheme: dark) {
-  .count-add { color: #7FD69A; }
-  .count-del { color: #F0929E; }
-}
+.count-add { color: var(--cr-add-ink); }
+.count-del { color: var(--cr-del-ink); }
 
 .files-jump {
   display: flex;
@@ -122,8 +157,8 @@
   color: var(--pr-ink-muted);
 }
 
-.tag[data-status="added"]     { background: var(--pr-add);    color: var(--pr-add-ink); }
-.tag[data-status="deleted"]   { background: var(--pr-remove); color: var(--pr-remove-ink); }
+.tag[data-status="added"]     { background: var(--cr-add-num); color: var(--pr-ink); }
+.tag[data-status="deleted"]   { background: var(--cr-del-num); color: var(--pr-ink); }
 .tag[data-status="renamed"]   { background: var(--pr-change); color: var(--pr-change-ink); }
 .tag[data-status="untracked"] { background: var(--pr-warn);   color: var(--pr-warn-ink); }
 .tag[data-round]              { background: var(--pr-navy);   color: #fff; }
@@ -167,8 +202,8 @@ table.diff {
 table.diff td { vertical-align: top; }
 
 .hunk-head td {
-  background: var(--pr-alt);
-  color: var(--pr-ink-muted);
+  background: var(--cr-hunk-bg);
+  color: var(--cr-hunk-ink);
   padding: 3px 10px;
   font-size: 11px;
   border-top: 1px solid var(--pr-rule);
@@ -211,25 +246,31 @@ td.code .mark {
   color: var(--pr-ink-faint);
 }
 
-td.code.add { background: var(--pr-add);    color: var(--pr-add-ink); }
-td.code.del { background: var(--pr-remove); color: var(--pr-remove-ink); }
+td.code.add { background: var(--cr-add-line); }
+td.code.del { background: var(--cr-del-line); }
 td.code.empty { background: var(--pr-bg); }
 
-/* The word-level highlight — the substitute for syntax colouring. It only ever
-   sits on an add/del cell, and those keep their light pastel fill in dark mode
-   too, so it darkens in BOTH themes (a light wash here was invisible on the
-   pastel). */
+/* the gutter carries the same tint, a shade stronger, so a changed line reads
+   as one band from number to end of code */
+tr.line-row:has(td.code.add) td.ln.new { background: var(--cr-add-num); color: var(--pr-ink-muted); }
+tr.line-row:has(td.code.del) td.ln.old { background: var(--cr-del-num); color: var(--pr-ink-muted); }
+
+/* The word-level highlight — the substitute for syntax colouring. Same hue as
+   the line, stronger, so the run that actually changed stands out from the band
+   around it. */
 td.code .wd {
-  background: rgba(0, 0, 0, 0.20);
   border-radius: 2px;
   padding: 0 1px;
 }
+
+td.code.add .wd { background: var(--cr-add-word); }
+td.code.del .wd { background: var(--cr-del-word); }
 
 /* added this round: a left rule, so re-review goes straight to the new work */
 td.code.fresh { box-shadow: inset 3px 0 0 var(--pr-blue); }
 
 tr.line-row.selecting td.code,
-tr.line-row.selecting td.ln { background: var(--pr-change); color: var(--pr-change-ink); }
+tr.line-row.selecting td.ln { background: var(--cr-select); }
 
 /* ---------- context expansion ---------- */
 
@@ -320,8 +361,9 @@ tr.line-row.selecting td.ln { background: var(--pr-change); color: var(--pr-chan
 pre.suggestion {
   margin: 0;
   padding: 6px 8px;
-  background: var(--pr-add);
-  color: var(--pr-add-ink);
+  background: var(--cr-add-line);
+  border: 1px solid var(--cr-add-word);
+  color: var(--pr-ink);
   border-radius: var(--pr-r-sm);
   font-family: var(--pr-mono);
   font-size: 12px;
