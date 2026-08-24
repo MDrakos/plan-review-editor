@@ -108,8 +108,21 @@ const el = (id) => document.getElementById(id);
 async function boot() {
   el('identity').textContent = reviewer.name;
   wireChrome();
+  trackFilesBarHeight();
   await refresh();
   connect();
+}
+
+// The sticky file header parks under the files bar, and that bar's height moves
+// with the window (its jump chips wrap). Publish the measurement as a custom
+// property so review.css can position against it instead of a magic number.
+function trackFilesBarHeight() {
+  const bar = el('files-bar');
+  if (!bar || !window.ResizeObserver) return;
+  const publish = () =>
+    document.documentElement.style.setProperty('--files-bar-h', `${Math.round(bar.getBoundingClientRect().height)}px`);
+  new ResizeObserver(publish).observe(bar);
+  publish();
 }
 
 async function refresh() {
@@ -204,6 +217,15 @@ function wireChrome() {
     });
   }
   el('submit-btn').addEventListener('click', submitReview);
+
+  // The chat box is a textarea so it can grow with a long message (see
+  // #chat-form textarea in style.css). That costs it Enter-to-send, so put it
+  // back: Enter sends, shift+Enter starts a new line.
+  el('chat-input').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+    e.preventDefault();
+    el('chat-form').requestSubmit();
+  });
 
   el('chat-form').addEventListener('submit', async (e) => {
     e.preventDefault();
