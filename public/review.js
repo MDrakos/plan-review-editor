@@ -615,29 +615,111 @@ function codeCell(file, line, side, counterpart) {
   const mark = document.createElement('span');
   mark.className = 'mark';
   mark.textContent = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
-  td.append(mark, ...intraLine(line.text, counterpart, line.type));
+  td.append(mark, ...intraLine(line.text, counterpart, line.type, langFor(file.path)));
   return td;
 }
 
-// Word-level highlight instead of syntax colouring: on a paired del/add row,
-// mark the run that actually differs by trimming the common prefix and suffix.
+// ---------- syntax + word-level highlighting ----------
+//
+// Two layers on one line. highlight.js (vendored in public/vendor, loaded by
+// review.html) tokenises the text; the word-level del/add highlight is then
+// painted on top of those tokens with a Range, so a line can be both coloured
+// and marked as changed.
+//
+// lazydev: each line is tokenised on its own, so a line in the middle of a
+// multi-line construct (a /* */ block, a docstring, a template literal) loses
+// its context and renders plain. It degrades to "plain", never to "wrong". If
+// that starts to grate, tokenise each hunk side as one string and split the
+// resulting DOM on newlines.
+
+const langCache = new Map();
+
+// highlight.js registers the usual file extensions as aliases (pl, rs, py, ts,
+// yml, md, …), so the extension is the language id — no map to maintain here.
+function langFor(path) {
+  if (langCache.has(path)) return langCache.get(path);
+  const ext = ((path || '').match(/\.([A-Za-z0-9]+)$/) || [])[1];
+  const key = ext ? ext.toLowerCase() : null;
+  const lang = key && window.hljs && hljs.getLanguage(key) ? key : null;
+  langCache.set(path, lang);
+  return lang;
+}
+
+// The run that actually differs between a paired del/add, as [start, end) char
+// offsets: trim the common prefix and suffix.
 // lazydev: prefix/suffix trimming, not a token LCS — it nails the common case (a
 // changed argument, a flipped operator) and degrades to "the whole line differs"
 // on a rewrite, which is honest.
-function intraLine(text, counterpart, type) {
-  if (!counterpart || type === 'ctx') return [document.createTextNode(text)];
+function diffRange(text, counterpart, type) {
+  if (!counterpart || type === 'ctx') return null;
   const a = counterpart;
   const b = text;
   let p = 0;
   while (p < a.length && p < b.length && a[p] === b[p]) p += 1;
   let s = 0;
   while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s += 1;
-  const mid = b.slice(p, b.length - s);
-  if (!mid || mid.length === b.length) return [document.createTextNode(text)];
-  const span = document.createElement('span');
-  span.className = 'wd';
-  span.textContent = mid;
-  return [document.createTextNode(b.slice(0, p)), span, document.createTextNode(b.slice(b.length - s))];
+  const end = b.length - s;
+  if (end <= p || (p === 0 && end === b.length)) return null;
+  return [p, end];
+}
+
+function intraLine(text, counterpart, type, lang) {
+  const range = diffRange(text, counterpart, type);
+  const root = highlightLine(text, lang);
+  if (!root) {
+    // No highlighter for this file: the original flat prefix / mark / suffix.
+    if (!range) return [document.createTextNode(text)];
+    const span = document.createElement('span');
+    span.className = 'wd';
+    span.textContent = text.slice(range[0], range[1]);
+    return [
+      document.createTextNode(text.slice(0, range[0])),
+      span,
+      document.createTextNode(text.slice(range[1])),
+    ];
+  }
+  if (range) markRange(root, range[0], range[1]);
+  return [root];
+}
+
+// hljs.highlight escapes the source, so its output is safe to set as HTML. The
+// `hljs` class deliberately stays off this span: the vendored theme's base rules
+// (its own background and padding) would fight the diff row tint.
+function highlightLine(text, lang) {
+  if (!lang) return null;
+  try {
+    const span = document.createElement('span');
+    span.innerHTML = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+    return span;
+  } catch {
+    return null;
+  }
+}
+
+// Wrap [start, end) of root's text in span.wd. extractContents splits any token
+// span the range only partly covers, so the syntax colours survive underneath.
+function markRange(root, start, end) {
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  let pos = 0;
+  let opened = false;
+  let node;
+  while ((node = walk.nextNode())) {
+    const len = node.nodeValue.length;
+    if (!opened && start <= pos + len) {
+      range.setStart(node, start - pos);
+      opened = true;
+    }
+    if (opened && end <= pos + len) {
+      range.setEnd(node, end - pos);
+      const span = document.createElement('span');
+      span.className = 'wd';
+      span.append(range.extractContents());
+      range.insertNode(span);
+      return;
+    }
+    pos += len;
+  }
 }
 
 // ---------- selecting lines ----------

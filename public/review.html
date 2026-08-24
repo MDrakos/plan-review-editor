@@ -8,6 +8,11 @@
        from style.css; review.css adds only the diff table. -->
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/review.css">
+  <!-- Vendored highlight.js theme: token colours only. We never put the `hljs`
+       class on a diff cell, so the theme's own background/padding rules stay
+       inert and the add/del row tint shows through. -->
+  <link rel="stylesheet" href="/vendor/hljs-github.css">
+  <link rel="stylesheet" href="/vendor/hljs-github-dark.css" media="(prefers-color-scheme: dark)">
 </head>
 <body class="code-review">
   <header class="topbar">
@@ -109,6 +114,7 @@
     </aside>
   </main>
 
+  <script src="/vendor/highlight.min.js"></script>
   <script src="/liveness.js"></script>
   <script src="/review.js"></script>
 </body>
