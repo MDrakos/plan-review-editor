@@ -1,15 +1,19 @@
 {
   "name": "plan-review-editor",
   "version": "0.1.0",
-  "description": "Browser-based review loop for AI agent plans: comment, choose, chat, iterate.",
+  "description": "Browser-based review loop for AI agent work: plans (comment, choose, chat) and code diffs (GitHub-style review before push).",
   "bin": {
-    "planreview": "./bin/planreview.js"
+    "planreview": "./bin/planreview.js",
+    "codereview": "./bin/codereview.js"
   },
   "main": "server/server.js",
   "scripts": {
     "start": "node server/server.js",
     "demo": "node demo/demo.js",
-    "test": "node test/e2e.js"
+    "test": "node test/e2e.js && node test/codereview.js",
+    "test:plan": "node test/e2e.js",
+    "test:code": "node test/codereview.js",
+    "selfcheck": "node server/gitdiff.js && node server/diffanchor.js"
   },
   "engines": {
     "node": ">=18"

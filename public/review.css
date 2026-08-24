@@ -1,0 +1,396 @@
+/* ---------- code review ----------
+   Only the diff. Everything else on this page — topbar, panels, buttons,
+   comment cards, chat, overlays — is style.css, unchanged, so the two review
+   surfaces stay one design. Tokens come from :root there (light and dark). */
+
+/* ---------- diff palette ----------
+   The one place this UI departs from style.css's pastels. Those are opaque
+   fills paired with dark ink, which is right for a highlighted block in a
+   document but wrong for a wall of code: in dark mode the page goes dark and
+   the diff would stay light, inverting the reading contrast.
+
+   So the diff uses GitHub's model instead — the code keeps the page's own ink
+   and the change is carried by a translucent TINT over the surface, muted for
+   the line and stronger for the word-level highlight. Scoped to `--cr-*` so
+   nothing else on the page (or in the plan UI) shifts. */
+:root {
+  --cr-add-line:  #E6FFEC;
+  --cr-add-word:  #ABF2BC;
+  --cr-add-num:   #CCFFD8;
+  --cr-del-line:  #FFEBE9;
+  --cr-del-word:  #FFC1C0;
+  --cr-del-num:   #FFD7D5;
+  --cr-hunk-bg:   #DDF4FF;
+  --cr-hunk-ink:  #57606A;
+  --cr-add-ink:   #1A7F37;   /* the +N counters, not the code */
+  --cr-del-ink:   #CF222E;
+  --cr-select:    rgba(56, 139, 253, 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cr-add-line:  rgba(46, 160, 67, 0.16);
+    --cr-add-word:  rgba(46, 160, 67, 0.40);
+    --cr-add-num:   rgba(46, 160, 67, 0.28);
+    --cr-del-line:  rgba(248, 81, 73, 0.14);
+    --cr-del-word:  rgba(248, 81, 73, 0.40);
+    --cr-del-num:   rgba(248, 81, 73, 0.26);
+    --cr-hunk-bg:   rgba(56, 139, 253, 0.12);
+    --cr-hunk-ink:  #8B949E;
+    --cr-add-ink:   #3FB950;
+    --cr-del-ink:   #F85149;
+    --cr-select:    rgba(56, 139, 253, 0.22);
+  }
+}
+
+.diff-pane {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 0 96px;
+  position: relative;
+  background: var(--pr-bg);
+}
+
+/* ---------- files bar ---------- */
+
+.files-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--pr-surface);
+  border-bottom: 1px solid var(--pr-border);
+  padding: 10px 16px;
+}
+
+.files-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.files-counts,
+.file-counts {
+  font-family: var(--pr-mono);
+  font-size: 11px;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.count-add { color: var(--cr-add-ink); }
+.count-del { color: var(--cr-del-ink); }
+
+.files-jump {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.file-chip {
+  font-family: var(--pr-mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  border: 1px solid var(--pr-border);
+  border-radius: var(--pr-r-sm);
+  color: var(--pr-ink-muted);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-chip:hover { background: var(--pr-hover); color: var(--pr-ink); }
+.file-chip[data-round] { border-color: var(--pr-accent-line); color: var(--pr-ink); }
+
+.round-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--pr-blue);
+  display: inline-block;
+}
+
+/* ---------- file card ---------- */
+
+.files { padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+
+.file-card {
+  border: 1px solid var(--pr-border);
+  border-radius: var(--pr-r-md);
+  background: var(--pr-surface);
+  overflow: hidden;
+  scroll-margin-top: 92px; /* clear the sticky files bar when jumped to */
+}
+
+.file-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--pr-rule);
+  background: var(--pr-bg);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.file-name {
+  font-family: var(--pr-mono);
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-tags { display: inline-flex; gap: 6px; }
+
+.tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: var(--pr-r-sm);
+  background: var(--pr-alt);
+  color: var(--pr-ink-muted);
+}
+
+.tag[data-status="added"]     { background: var(--cr-add-num); color: var(--pr-ink); }
+.tag[data-status="deleted"]   { background: var(--cr-del-num); color: var(--pr-ink); }
+.tag[data-status="renamed"]   { background: var(--pr-change); color: var(--pr-change-ink); }
+.tag[data-status="untracked"] { background: var(--pr-warn);   color: var(--pr-warn-ink); }
+.tag[data-round]              { background: var(--pr-navy);   color: #fff; }
+
+.file-counts { margin-left: auto; }
+
+.viewed {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--pr-ink-muted);
+  user-select: none;
+}
+
+.btn.fold {
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.file-note {
+  margin: 0;
+  padding: 12px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--pr-ink-faint);
+}
+
+/* ---------- the diff table ---------- */
+
+table.diff {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--pr-mono);
+  font-size: 12px;
+  line-height: 1.55;
+  table-layout: fixed;
+}
+
+table.diff td { vertical-align: top; }
+
+.hunk-head td {
+  background: var(--cr-hunk-bg);
+  color: var(--cr-hunk-ink);
+  padding: 3px 10px;
+  font-size: 11px;
+  border-top: 1px solid var(--pr-rule);
+  border-bottom: 1px solid var(--pr-rule);
+}
+
+/* line-number gutters: fixed width, clickable, never selected as text */
+td.ln {
+  width: 52px;
+  min-width: 52px;
+  text-align: right;
+  padding: 0 8px;
+  color: var(--pr-ink-faint);
+  background: var(--pr-bg);
+  user-select: none;
+  border-right: 1px solid var(--pr-rule);
+  font-size: 11px;
+}
+
+td.ln.anchor { cursor: pointer; }
+td.ln.anchor:hover { background: var(--pr-accent-line); color: #fff; }
+
+/* the comment affordance: a + appears in the gutter on hover */
+td.ln.anchor:hover::before {
+  content: '+';
+  float: left;
+  font-weight: 700;
+}
+
+td.code {
+  padding: 0 10px 0 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+td.code .mark {
+  display: inline-block;
+  width: 1ch;
+  color: var(--pr-ink-faint);
+}
+
+td.code.add { background: var(--cr-add-line); }
+td.code.del { background: var(--cr-del-line); }
+td.code.empty { background: var(--pr-bg); }
+
+/* the gutter carries the same tint, a shade stronger, so a changed line reads
+   as one band from number to end of code */
+tr.line-row:has(td.code.add) td.ln.new { background: var(--cr-add-num); color: var(--pr-ink-muted); }
+tr.line-row:has(td.code.del) td.ln.old { background: var(--cr-del-num); color: var(--pr-ink-muted); }
+
+/* The word-level highlight — the substitute for syntax colouring. Same hue as
+   the line, stronger, so the run that actually changed stands out from the band
+   around it. */
+td.code .wd {
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+td.code.add .wd { background: var(--cr-add-word); }
+td.code.del .wd { background: var(--cr-del-word); }
+
+/* added this round: a left rule, so re-review goes straight to the new work */
+td.code.fresh { box-shadow: inset 3px 0 0 var(--pr-blue); }
+
+tr.line-row.selecting td.code,
+tr.line-row.selecting td.ln { background: var(--cr-select); }
+
+/* ---------- context expansion ---------- */
+
+.gap-row td {
+  padding: 2px 10px;
+  background: var(--pr-bg);
+  border-top: 1px solid var(--pr-rule);
+  border-bottom: 1px solid var(--pr-rule);
+}
+
+.btn.expand {
+  font-family: var(--pr-mono);
+  font-size: 11px;
+  padding: 2px 8px;
+  color: var(--pr-blue-text);
+}
+
+/* ---------- inline threads + composer ---------- */
+
+.thread-row td,
+.composer-row td {
+  background: var(--pr-bg);
+  padding: 10px 12px 10px 60px;
+  border-top: 1px solid var(--pr-rule);
+  border-bottom: 1px solid var(--pr-rule);
+}
+
+.thread-row .comment-card { margin-bottom: 8px; cursor: default; }
+.thread-row .comment-card:last-child { margin-bottom: 0; }
+
+.composer-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--pr-mono);
+  font-size: 11px;
+  color: var(--pr-ink-muted);
+  margin-bottom: 6px;
+}
+
+.composer-tabs { margin-left: auto; display: inline-flex; gap: 4px; }
+
+.btn.tab { font-size: 11px; padding: 2px 8px; }
+.btn.tab.active {
+  background: var(--pr-navy);
+  color: #fff;
+  border-color: var(--pr-navy);
+}
+
+.composer-row textarea {
+  width: 100%;
+  font-family: var(--pr-sans);
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid var(--pr-border);
+  border-radius: var(--pr-r-sm);
+  background: var(--pr-surface);
+  color: var(--pr-ink);
+  resize: vertical;
+}
+
+.composer-row textarea.suggestion-input {
+  font-family: var(--pr-mono);
+  font-size: 12px;
+  margin-top: 6px;
+  white-space: pre;
+}
+
+.composer-row textarea:focus { outline: 2px solid var(--pr-blue); outline-offset: -1px; }
+
+.composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* ---------- suggested changes ---------- */
+
+.suggestion-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--pr-ink-faint);
+  margin: 8px 0 4px;
+}
+
+pre.suggestion {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--cr-add-line);
+  border: 1px solid var(--cr-add-word);
+  color: var(--pr-ink);
+  border-radius: var(--pr-r-sm);
+  font-family: var(--pr-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.archived-head { padding: 8px 0 2px; }
+
+/* ---------- layout toggle in the topbar ---------- */
+
+.view-toggle { display: inline-flex; gap: 4px; margin-right: 4px; }
+
+/* Unpressed reads as a quiet outline on the navy bar (same idiom as
+   .ghost-on-navy); pressed is filled, so the selected layout is the loud one. */
+.view-btn {
+  font-size: 11px;
+  padding: 3px 9px;
+  background: transparent;
+  border-color: var(--pr-navy-divider);
+  color: var(--pr-on-navy-muted);
+}
+
+.view-btn:hover { background: var(--pr-navy-hover); color: #fff; }
+
+.view-btn[aria-pressed="true"] {
+  background: var(--pr-blue);
+  border-color: var(--pr-blue);
+  color: #fff;
+}

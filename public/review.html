@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code Review</title>
+  <!-- The shared design system (topbar, panels, buttons, overlays, chat) comes
+       from style.css; review.css adds only the diff table. -->
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/review.css">
+</head>
+<body class="code-review">
+  <header class="topbar">
+    <div class="brand">Code Review</div>
+    <span class="topbar-divider"></span>
+    <div class="doc-title" id="doc-title"></div>
+    <div class="session-meta" id="session-meta"></div>
+    <span class="spacer"></span>
+    <div class="view-toggle" role="group" aria-label="Diff layout">
+      <button class="btn view-btn" data-view="inline" aria-pressed="true">Inline</button>
+      <button class="btn view-btn" data-view="split" aria-pressed="false">Side&#8209;by&#8209;side</button>
+    </div>
+    <span class="pill" id="status-pill" data-status="idle">idle</span>
+    <span class="topbar-divider"></span>
+    <span id="identity" class="identity" title="Your reviewer name"></span>
+    <button id="end-btn" class="btn ghost-on-navy">End session</button>
+  </header>
+
+  <main class="layout">
+    <section class="diff-pane">
+      <div id="files-bar" class="files-bar"></div>
+      <div id="files" class="files"></div>
+
+      <div id="working-overlay" class="overlay" hidden>
+        <div class="overlay-card working-card">
+          <header class="overlay-head">
+            <span class="overlay-head-label">Addressing your review</span>
+            <span id="working-step" class="overlay-head-step"></span>
+          </header>
+          <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+          <div class="overlay-body">
+            <ul id="progress-list" class="progress-list"></ul>
+            <p class="overlay-rule"></p>
+            <p class="overlay-hint">The updated diff loads here automatically. Chat stays open.</p>
+            <button id="interrupt-btn" class="btn" type="button">Interrupt &amp; keep reviewing</button>
+            <p id="working-stale" class="working-stale" hidden></p>
+            <p class="overlay-elapsed">elapsed <span id="working-elapsed" class="working-elapsed"></span></p>
+          </div>
+        </div>
+      </div>
+      <div id="done-overlay" class="overlay" hidden>
+        <div class="overlay-card">
+          <div class="overlay-body">
+            <p>Review approved</p>
+            <p class="overlay-hint">The agent is applying your feedback and may push. You can close this tab.</p>
+          </div>
+        </div>
+      </div>
+      <div id="ended-overlay" class="overlay" hidden>
+        <div class="overlay-card">
+          <div class="overlay-body">
+            <p>Session ended</p>
+            <p class="overlay-hint">Control has returned to the agent in your terminal. You can close this tab.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel comments-panel">
+        <header class="panel-head">
+          Comments <span id="comment-count" class="count">0</span>
+          <span id="archived-note" class="panel-head-aside"></span>
+        </header>
+        <div id="comment-list" class="comment-list"></div>
+      </section>
+      <section class="submit-area">
+        <textarea id="overall-note" rows="2" placeholder="Overall note to the agent (optional)…"></textarea>
+        <div class="split-btn">
+          <button id="submit-btn" class="btn primary">Request changes</button>
+          <button id="submit-menu-toggle" class="btn primary split-caret" aria-haspopup="true" aria-expanded="false" title="Change action">▾</button>
+          <div id="submit-menu" class="split-menu" hidden>
+            <button class="split-item" data-mode="submit">
+              <span class="split-item-title">Request changes</span>
+              <span class="split-item-sub">Fix these, then show me again</span>
+            </button>
+            <button class="split-item" data-mode="approve">
+              <span class="split-item-title">Approve</span>
+              <span class="split-item-sub">Apply my notes, then push</span>
+            </button>
+          </div>
+        </div>
+        <div class="submit-caption">
+          <span id="submit-tally"></span>
+          <span id="submit-mode-label">fix these, then show me again</span>
+        </div>
+      </section>
+      <section class="panel chat-panel">
+        <header class="panel-head">
+          Chat with agent
+          <span id="chat-state" class="panel-head-aside">connected</span>
+        </header>
+        <div id="chat-list" class="chat-list"></div>
+        <form id="chat-form">
+          <input id="chat-input" placeholder="Message the agent…" autocomplete="off">
+          <button type="submit" class="btn primary">Send</button>
+        </form>
+      </section>
+    </aside>
+  </main>
+
+  <script src="/liveness.js"></script>
+  <script src="/review.js"></script>
+</body>
+</html>
