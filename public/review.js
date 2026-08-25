@@ -129,9 +129,14 @@ async function refresh() {
   const res = await fetch(api('/api/state'));
   if (!res.ok) return;
   const s = await res.json();
+  const version = (s.doc && s.doc.version) || 0;
+  // Refresh is now reviewer-triggerable at will, so two of these can be in flight
+  // at once and resolve out of order. Never apply an older read over a newer one.
+  // Equal versions still apply: comments and chat move without bumping it.
+  if (version < state.version) return;
   state.status = s.status;
   state.diff = s.diff || null;
-  state.version = (s.doc && s.doc.version) || 0;
+  state.version = version;
   state.comments = (s.review && s.review.comments) || [];
   state.chat = s.chat || [];
   state.progress = s.progress || [];
@@ -150,6 +155,12 @@ function connect() {
   es.addEventListener('open', () => (el('chat-state').textContent = 'connected'));
   es.addEventListener('error', () => (el('chat-state').textContent = 'reconnecting…'));
   // A new round: the agent re-read the repo, so the whole diff is replaced.
+  // A new round, or a reviewer re-read: the whole diff is replaced. This fires on
+  // our own refresh click too, after the click handler already refreshed inline —
+  // a duplicate render, deliberately left in. The obvious fix (skip the echo when
+  // it carries our own reviewerId) is wrong here: `reviewer.id` is stored per
+  // BROWSER, not per tab, so it also silences this reviewer's other tabs and lets
+  // them go stale invisibly. A second idempotent render is the cheaper mistake.
   es.addEventListener('doc', () => refresh());
   es.addEventListener('status', (e) => {
     const d = JSON.parse(e.data);
@@ -295,9 +306,19 @@ function renderAll() {
     state.diff.files.slice(EAGER_FILES).forEach((f) => folded.add(f.path));
   }
   renderFilesBar();
+  const draft = composerDraft; // replaceChildren below destroys the composer's DOM
   host.replaceChildren(...state.diff.files.map(renderFile));
   renderThreads();
   renderCommentList();
+  // Put a half-written comment back. Any re-render replaces the whole files DOM,
+  // and the composer lives ONLY in that DOM — so without this, every re-read of
+  // the diff silently ate whatever the reviewer was typing. Both callers hit it:
+  // the agent's `present` (SSE `doc`) and the reviewer's own "Re-read diff".
+  // lazydev: if the line the draft hung on is gone from the new diff, openComposer
+  // can't re-anchor it and there is no UI for it — the draft stays in memory, so a
+  // later round that brings the line back restores it. Give it a home of its own
+  // (a detached "orphaned draft" panel) only if that turns out to happen in practice.
+  if (draft) openComposer(draft.file, draft.side, draft.from, draft.to, draft);
 }
 
 function renderFilesBar() {
@@ -310,6 +331,8 @@ function renderFilesBar() {
   counts.className = 'files-counts';
   counts.append(plusMinus(d.additions, d.deletions));
   summary.append(counts);
+
+  summary.append(refreshButton());
 
   const jump = document.createElement('div');
   jump.className = 'files-jump';
@@ -328,6 +351,36 @@ function renderFilesBar() {
     jump.append(a);
   }
   bar.replaceChildren(summary, jump);
+}
+
+// Pull in work the agent committed AFTER the round it belonged to (issue 015).
+// The agent's `present` is gated to a working round, so without this the diff on
+// screen can lag the repo until the next round. Draft comments are saved first —
+// the re-read replaces state.comments from the server, so an unsaved draft would
+// otherwise be lost.
+function refreshButton() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn files-refresh';
+  btn.textContent = 'Re-read diff';
+  btn.title = 'Re-read the repo — picks up anything committed since this round';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      await saveReview();
+      const res = await post('/api/refresh');
+      if (!res.ok) {
+        btn.textContent = (res.data && res.data.error) || 'could not re-read';
+        return;
+      }
+      await refresh(); // repaints the bar, so this button (and its label) is replaced
+    } catch {
+      btn.textContent = 'could not re-read';
+    } finally {
+      btn.disabled = false; // never leave the control wedged on a dropped request
+    }
+  });
+  return btn;
 }
 
 function plusMinus(add, del) {
@@ -816,11 +869,31 @@ function cssEscape(v) {
 
 // ---------- composer ----------
 
-function openComposer(file, side, from, to) {
-  closeComposer();
+// The composer's text lives in the DOM and nowhere else, so a re-render loses it.
+// `composerDraft` is the memory copy that survives one — kept in step with the
+// textareas on every keystroke, and handed back in as `restore` by renderAll.
+let composerDraft = null;
+
+function openComposer(file, side, from, to, restore) {
+  closeComposer(); // clears composerDraft, so every path below re-sets it
   const row = anchorRow(file, side, to);
-  if (!row) return;
+  if (!row) {
+    // The line isn't in the DOM right now — its file is folded (folding and
+    // ticking "Viewed" both re-render), or it left the diff entirely. Hold the
+    // draft so unfolding restores it. Restoring is the ONLY case worth holding:
+    // a brand-new composer that failed to open has nothing typed in it.
+    composerDraft = restore || null;
+    return;
+  }
   const quote = quoteFor(file, side, from, to);
+  // Line numbers are not identity. A re-read can shift the draft's anchor onto
+  // different code, which is exactly what this feature makes more likely, so
+  // compare the quoted text the way the server's comment reanchor does and say
+  // so instead of silently rebinding the draft to whatever now sits there.
+  const drifted = Boolean(restore) && restore.quote !== quote;
+  const suggestionUntouched = Boolean(restore) && restore.suggestion === restore.quote;
+  composerDraft = restore || { file, side, from, to, mode: 'comment', text: '', suggestion: quote, quote };
+  composerDraft.quote = quote; // the new baseline; drift is announced once, not every render
   const tr = document.createElement('tr');
   tr.className = 'composer-row';
   const td = document.createElement('td');
@@ -840,6 +913,12 @@ function openComposer(file, side, from, to) {
   suggestTab.textContent = 'Suggest';
   tabs.append(commentTab, suggestTab);
   head.append(tabs);
+  if (drifted) {
+    const warn = document.createElement('span');
+    warn.className = 'composer-drift';
+    warn.textContent = 'the code here changed while you were typing';
+    head.append(warn);
+  }
 
   const text = document.createElement('textarea');
   text.rows = 3;
@@ -854,6 +933,7 @@ function openComposer(file, side, from, to) {
   let mode = 'comment';
   const setMode = (m) => {
     mode = m;
+    if (composerDraft) composerDraft.mode = m;
     commentTab.classList.toggle('active', m === 'comment');
     suggestTab.classList.toggle('active', m === 'suggest');
     suggestion.hidden = m !== 'suggest';
@@ -861,6 +941,8 @@ function openComposer(file, side, from, to) {
   };
   commentTab.addEventListener('click', () => setMode('comment'));
   suggestTab.addEventListener('click', () => setMode('suggest'));
+  text.addEventListener('input', () => composerDraft && (composerDraft.text = text.value));
+  suggestion.addEventListener('input', () => composerDraft && (composerDraft.suggestion = suggestion.value));
 
   const actions = document.createElement('div');
   actions.className = 'composer-actions';
@@ -897,10 +979,17 @@ function openComposer(file, side, from, to) {
   td.append(head, text, suggestion, actions);
   tr.append(td);
   row.parentNode.insertBefore(tr, row.nextSibling);
+  if (restore) {
+    text.value = restore.text;
+    suggestion.value = drifted && suggestionUntouched ? quote : restore.suggestion;
+    composerDraft.suggestion = suggestion.value;
+    setMode(restore.mode);
+  }
   text.focus();
 }
 
 function closeComposer() {
+  composerDraft = null; // cancel/save both discard the draft on purpose
   for (const tr of document.querySelectorAll('tr.composer-row')) tr.remove();
 }
 

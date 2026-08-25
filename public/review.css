@@ -81,6 +81,13 @@
 .count-add { color: var(--cr-add-ink); }
 .count-del { color: var(--cr-del-ink); }
 
+/* Sits at the end of the files-bar summary row, opposite the +/- counts. */
+.files-refresh {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
 .files-jump {
   display: flex;
   flex-wrap: wrap;
@@ -318,6 +325,13 @@ tr.line-row.selecting td.ln { background: var(--cr-select); }
 }
 
 .composer-tabs { margin-left: auto; display: inline-flex; gap: 4px; }
+
+/* The draft's anchor line moved onto different code while it was being typed. */
+.composer-drift {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--cr-del-ink);
+}
 
 .btn.tab { font-size: 11px; padding: 2px 8px; }
 .btn.tab.active {
