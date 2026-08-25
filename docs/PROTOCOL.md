@@ -380,6 +380,7 @@ Session-scoped endpoints take `?session=<id>` and 404 without a valid one.
 | POST | `/api/approve?session=` | browser | approve & finish (→ `done`; queued as `approve`) |
 | POST | `/api/end?session=` | browser | end the session (queued as `end`) |
 | POST | `/api/interrupt?session=` | browser | abort the current `working` round (→ `reviewing`, same doc; queued as `interrupt`); `409` unless `working` |
+| POST | `/api/refresh?session=` | browser | diff sessions only: re-read the diff in place without ending the round (round baseline and `lastAgentActivity` untouched); `400` on a plan session, `409` unless `reviewing` |
 | POST | `/agent/present?session=` | CLI | render a markdown file as the session's document; **`working`-only** — `409` otherwise (a stale/interrupted round) |
 | GET | `/agent/wait?session=` | CLI | long-poll for the next reviewer event (`&timeout=<ms>` optional) |
 | POST | `/agent/say?session=` | CLI | agent chat message to the reviewer |

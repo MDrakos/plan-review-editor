@@ -311,6 +311,8 @@ function renderFilesBar() {
   counts.append(plusMinus(d.additions, d.deletions));
   summary.append(counts);
 
+  summary.append(refreshButton());
+
   const jump = document.createElement('div');
   jump.className = 'files-jump';
   for (const f of d.files) {
@@ -328,6 +330,31 @@ function renderFilesBar() {
     jump.append(a);
   }
   bar.replaceChildren(summary, jump);
+}
+
+// Pull in work the agent committed AFTER the round it belonged to (issue 015).
+// The agent's `present` is gated to a working round, so without this the diff on
+// screen can lag the repo until the next round. Draft comments are saved first —
+// the re-read replaces state.comments from the server, so an unsaved draft would
+// otherwise be lost.
+function refreshButton() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn files-refresh';
+  btn.textContent = 'Re-read diff';
+  btn.title = 'Re-read the repo — picks up anything committed since this round';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    await saveReview();
+    const res = await post('/api/refresh');
+    if (!res.ok) {
+      btn.textContent = (res.data && res.data.error) || 'could not re-read';
+      btn.disabled = false;
+      return;
+    }
+    await refresh(); // repaints the bar, so this button (and its label) is replaced
+  });
+  return btn;
 }
 
 function plusMinus(add, del) {

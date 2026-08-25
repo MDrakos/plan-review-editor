@@ -400,3 +400,10 @@ pre.suggestion {
   border-color: var(--pr-blue);
   color: #fff;
 }
+
+/* Sits at the end of the files-bar summary row, opposite the +/- counts. */
+.files-refresh {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 3px 8px;
+}

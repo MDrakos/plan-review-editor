@@ -265,6 +265,67 @@ async function main() {
   const replied = s5.data.review.comments.find((x) => x.id === 'c-return');
   check('the agent reply is threaded under the comment', (replied.replies || []).some((r) => r.role === 'agent'));
 
+  console.log('the reviewer pulls in a commit made after the round');
+  // The agent's `present` is gated to an active working round, so an edit made
+  // AFTER the round it belonged to is invisible until the reviewer submits and
+  // the agent presents again (issue 015). Refresh re-reads the diff in place.
+  const beforeRefresh = (await browser(`/api/state?session=${id}`)).data;
+  fs.writeFileSync(
+    authPath,
+    [
+      '// refreshed after the round',
+      '// added a guard',
+      'const REQUIRED = true;',
+      '',
+      '// three',
+      '// more',
+      'function verify(req) {',
+      '  const token = jwt(req) || null;',
+      '  return token;',
+      '}',
+      '',
+      'module.exports = { verify };',
+      '',
+    ].join('\n')
+  );
+  const refreshed = await browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' });
+  check('refresh is accepted while reviewing', refreshed.status === 200, JSON.stringify(refreshed));
+
+  const s7 = (await browser(`/api/state?session=${id}`)).data;
+  const files7 = Object.fromEntries(s7.diff.files.map((f) => [f.path, f]));
+  check(
+    'the refresh re-read the diff',
+    files7['auth.js'].hunks.some((h) => h.lines.some((l) => /refreshed after the round/.test(l.text))),
+    JSON.stringify(files7['auth.js'].hunks)
+  );
+  const moved = s7.review.comments.find((x) => x.id === 'c-return');
+  check('the comment re-anchors across a refresh', moved.archived === false && moved.line === 9, JSON.stringify(moved));
+  check('the refresh does not end the round', s7.status === 'reviewing', s7.status);
+  check(
+    'the refresh is not agent activity',
+    s7.lastAgentActivity === beforeRefresh.lastAgentActivity,
+    `${s7.lastAgentActivity} vs ${beforeRefresh.lastAgentActivity}`
+  );
+  // The round the reviewer is IN did not restart: the baseline is still the
+  // model the agent presented against, so the round-3 additions stay fresh and
+  // a file untouched since then still carries no marker.
+  check(
+    'the refresh keeps the round baseline',
+    files7['auth.js'].hunks.some((h) => h.lines.some((l) => l.fresh && /\/\/ more/.test(l.text))),
+    JSON.stringify(files7['auth.js'].hunks)
+  );
+  check('an untouched file still carries no round marker', files7['jwt.js'].round === undefined, files7['jwt.js'].round);
+
+  // The working round belongs to the agent: refresh is refused until it hands back.
+  const waitingR = code('wait', '--session', id, '--timeout', '20');
+  await sleep(150);
+  await browser(`/api/submit?session=${id}`, { reviewerId: 'rev-1', comments: [], note: '' });
+  await waitingR;
+  const busy = await browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' });
+  check('refresh is refused while the agent is working', busy.status === 409, String(busy.status));
+  await browser(`/api/interrupt?session=${id}`, { reviewerId: 'rev-1' });
+  await code('wait', '--session', id, '--timeout', '20'); // drain the interrupt event
+
   console.log('a plan review and a code review coexist on one server');
   const planDoc = path.join(os.tmpdir(), 'codereview-e2e-plan.md');
   fs.writeFileSync(planDoc, '# A plan\n\nSome plan text.\n');
@@ -274,6 +335,8 @@ async function main() {
   check('the code session is listed as a diff at /r/', kinds[id].kind === 'diff' && kinds[id].url === `/r/${id}`);
   check('the plan session is listed as a plan at /s/', kinds[planSession.id].kind === 'plan' && kinds[planSession.id].url === `/s/${planSession.id}`);
   check('the code session is unaffected by the plan session', (await browser(`/api/state?session=${id}`)).data.kind === 'diff');
+  const planRefresh = await browser(`/api/refresh?session=${planSession.id}`, { reviewerId: 'rev-1' });
+  check('refresh is refused on a plan session', planRefresh.status === 400, String(planRefresh.status));
   await plan('stop', '--session', planSession.id);
 
   console.log('approve: the agent is told to proceed, not to re-present');

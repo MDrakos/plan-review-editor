@@ -498,11 +498,17 @@ function loadDoc(s, docPath) {
 // Comment threads carry forward the same way plan comments do, but re-anchored
 // by file+quote (server/diffanchor.js) rather than by quote alone, and the model
 // is annotated with what moved since the previous round.
-function loadDiff(s, spec) {
+// `reviewerRefresh` is the same re-read driven by the REVIEWER instead of the
+// agent (issue 015): it re-collects and re-anchors, but the round it lands in is
+// still the agent's. So it annotates against the round's existing baseline
+// (`s.diff.prev`) and leaves that baseline alone — the round dots keep meaning
+// "changed since the agent presented" — and it neither ends the working round
+// nor counts as agent activity (that would make the liveness hint lie).
+function loadDiff(s, spec, reviewerRefresh) {
   if (spec) s.diff.spec = spec;
   const model = collectDiff(s.diff.spec || {});
-  annotateRound(model, s.diff.model);
-  s.diff.prev = s.diff.model;
+  annotateRound(model, reviewerRefresh ? s.diff.prev : s.diff.model);
+  if (!reviewerRefresh) s.diff.prev = s.diff.model;
   s.diff.model = model;
   const resolved = resolveSpec(s.diff.spec || {});
   s.review = {
@@ -515,8 +521,10 @@ function loadDiff(s, spec) {
   s.doc.html = '';
   s.doc.version += 1;
   s.doc.presentedAt = Date.now();
-  endWorkingRound(s);
-  s.lastAgentActivity = Date.now();
+  if (!reviewerRefresh) {
+    endWorkingRound(s);
+    s.lastAgentActivity = Date.now();
+  }
   touch(s);
   persist(s);
 }
@@ -1173,6 +1181,38 @@ const server = http.createServer(async (req, res) => {
       enqueueAgentEvent(s, { type: 'interrupt' });
       persist(s);
       return sendJson(res, 200, { ok: true });
+    }
+
+    // Reviewer-initiated re-read of the diff (issue 015). /agent/present is gated
+    // to an active working round, so a commit the agent makes AFTER the round it
+    // belonged to stays invisible until the reviewer submits and the agent
+    // presents again. This pulls it in from the reviewer's side WITHOUT ending
+    // the round: same loadDiff, same reanchor path, but the round baseline and
+    // the agent's own present are untouched.
+    if (method === 'POST' && pathname === '/api/refresh') {
+      await readBody(req); // drain; refresh needs no author scoping
+      // LOAD-BEARING: guard AFTER the await, then mutate synchronously — same
+      // race closure as submit/approve/interrupt above (FM-3 family), so two
+      // refreshes racing each other, or a refresh racing a submit, resolve to
+      // exactly one side effect.
+      if (s.kind !== 'diff') return sendJson(res, 400, { error: 'refresh is only for a code review session' });
+      // The working round belongs to the agent: re-reading the repo under it
+      // would hand the reviewer a diff the agent is still mid-way through
+      // writing. `done`/`ended` have nothing left to refresh into.
+      if (s.status !== 'reviewing') return sendJson(res, 409, { error: `cannot refresh while ${s.status}` });
+      try {
+        loadDiff(s, null, true);
+      } catch (err) {
+        return sendJson(res, 400, { error: String((err && err.message) || err) });
+      }
+      broadcast(s, 'doc', { version: s.doc.version });
+      return sendJson(res, 200, {
+        ok: true,
+        version: s.doc.version,
+        files: s.diff.model.files.length,
+        additions: s.diff.model.additions,
+        deletions: s.diff.model.deletions,
+      });
     }
 
     // ----- agent API (driven by bin/planreview.js) -----

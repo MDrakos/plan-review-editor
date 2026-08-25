@@ -166,12 +166,19 @@ loop:
 An `end` is not an approval. This tool never touches a git remote — the gate is
 that the agent is blocked in `wait` until the reviewer decides.
 
+The reviewer can re-read the diff themselves at any point between rounds ("Re-read
+diff" in the files bar → `POST /api/refresh`), which is how a commit made *after*
+the round it belonged to gets pulled in — `present` is `working`-only, so it cannot.
+A refresh queues **no** agent event and does not end the round, so nothing in the
+loop above changes: the agent stays blocked in `wait`.
+
 ## HTTP surface (code-specific)
 
 | method | path | who | what |
 |---|---|---|---|
 | POST | `/agent/start` with `{kind:"diff",spec}` | agent | create a diff session; returns `{id,url:"/r/<id>",files,additions,deletions,label}` |
 | POST | `/agent/present?session=` with `{}` or `{spec}` | agent | re-read the diff (next round) |
+| POST | `/api/refresh?session=` | browser | re-read the diff in place, without starting a new round |
 | GET | `/api/state?session=` | browser | `kind:"diff"` + the model above |
 | GET | `/api/expand?session=&file=&from=&to=` | browser | context lines for one file |
 | GET | `/r/<id>` | browser | the code-review UI |
