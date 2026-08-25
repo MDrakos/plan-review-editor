@@ -159,6 +159,30 @@ step"), not one box, so a comment can anchor to several items at once.
   via `elementFromPoint` rather than the click target, which keeps it immune to the capture
   retarget above.
 
+## Dark mode
+
+The app already themes by overriding CSS custom properties under
+`@media (prefers-color-scheme: dark)` (`public/style.css:73`), with no toggle and no JS.
+The diagram joins that, adding no mechanism of its own. Two rules make it work, and both
+are easy to get wrong:
+
+- **Anything drawn as content uses a `-text` variant, never the raw brand colour.**
+  `--pr-navy` deliberately does not move between themes, so a `--pr-navy` box outline is
+  nearly invisible on a dark surface. Node strokes, edge strokes, arrowheads, hover and
+  focus rings all use `--pr-navy-text` / `--pr-blue-text`, which do move.
+- **Anything sitting on a pastel fill uses that pastel's paired `-ink`, never `--pr-ink`.**
+  The pastels (`--pr-change`, `--pr-remove`) are the same colour in both themes by design,
+  but `--pr-ink` inverts. A commented node keeps its `--pr-change` fill in dark mode, so its
+  label must be `--pr-change-ink`; leaving it `--pr-ink` puts near-white text on pale yellow
+  and the label disappears. Verified in the prototype: the label resolves to `#5C4400` on
+  `#FFEB9C` in both themes, about 7:1 contrast.
+
+A commented **edge** has no fill to tint, so it gets a `--pr-change` halo instead: a second
+path under the line, reusing the edge's own `d`, invisible until the edge is commented or
+flashed. This is why an edge emits three paths (hit strip, halo, line) rather than two.
+Tinting the line itself would need a colour that reads on both a white and a near-black
+background, and no single one does.
+
 ## Anchoring model
 
 The comment record grows one optional field:
@@ -233,6 +257,10 @@ existing agent integrations are unaffected.
   because that regression is invisible except by clicking; reset returns to identity; a
   marquee selects by centre and not by overlap (assert a long bowed edge whose bounding box
   covers the marquee is *not* selected); a group comment carries every member in `anchors`.
+- **Theme**: a stylesheet check that no `flow-` rule names `--pr-navy`, `--pr-blue` or a
+  literal hex, and that `.flow-node.commented .flow-node-label` resolves to
+  `--pr-change-ink`. Both regressions are invisible in the theme the author happens to be
+  running, which is exactly why they need an assertion rather than an eyeball.
 - **`test/e2e.js`** (drives the real server over HTTP): present a doc with a flow fence and
   assert the SVG and its `data-anchor-id`s are in the served HTML; post a node comment and
   an edge comment; re-present a doc keeping that node and assert the thread is active;
@@ -265,7 +293,8 @@ the following `click` to the capturing element. It survived a first round of tes
 because that round dispatched synthetic clicks straight at the node, which skips the
 retarget. **Interaction changes in this feature get verified with real input, not
 synthesised events.** The final pass also added the group-comment requirement, which is why
-`anchors` is a list.
+`anchors` is a list, and the dark-mode requirement, which surfaced the pastel-ink trap
+above.
 
 ## Files touched
 
@@ -276,7 +305,7 @@ synthesised events.** The final pass also added the group-comment requirement, w
 - `public/app.js` — click/Enter on `[data-anchor-id]`, `pendingAnchors` in the composer,
   `anchors` in the saved comment, class-based re-anchor in `renderDoc`, and the per-diagram
   pan/zoom/box-select binding.
-- `public/style.css` — node, edge, hit-strip, focus, selected, commented, marquee, frame and
-  control-cluster styles.
+- `public/style.css` — node, edge, hit-strip, halo, focus, selected, commented, marquee,
+  frame and control-cluster styles, all in existing theme variables (no new dark-mode block).
 - `docs/PROTOCOL.md` — `anchors`.
 - `test/e2e.js`, `package.json` (`selfcheck`).
