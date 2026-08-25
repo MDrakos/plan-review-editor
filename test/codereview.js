@@ -19,6 +19,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
+const { bootReview } = require('./reviewvm');
 
 const CLI = path.join(__dirname, '..', 'bin', 'codereview.js');
 const PLAN_CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
@@ -78,6 +79,198 @@ function check(name, cond, detail) {
   }
 }
 
+// ---------- the reviewer's browser (public/review.js under a VM + mini-DOM) ----------
+//
+// Everything above drives the server. This drives the PAGE: the real
+// public/review.js loaded into a VM against test/reviewvm.js's tiny DOM, which
+// is the only layer that can see the comment-draft machinery issue 015 added
+// (composerDraft, the restore path through renderAll, the folded-file hold, the
+// quote-drift comparison, and the suggestion re-base rule). That is a data-loss
+// path with branches; it was verified by hand in a browser three times, which is
+// not a regression guard.
+
+// One file with a one-line change, plus a second file so folding has a
+// neighbour to leave alone. `newTotal: null` keeps the trailing "expand" gap off
+// the table — context expansion is the server's story, tested above.
+function diffFixture({ label = 'r1', line2 = 'const two = 2;' } = {}) {
+  return {
+    label,
+    additions: 1,
+    deletions: 1,
+    files: [
+      {
+        path: 'src/a.js',
+        status: 'modified',
+        additions: 1,
+        deletions: 1,
+        newTotal: null,
+        hunks: [
+          {
+            oldStart: 1,
+            oldCount: 3,
+            newStart: 1,
+            newCount: 3,
+            heading: '',
+            lines: [
+              { type: 'ctx', oldNo: 1, newNo: 1, text: 'const one = 1;' },
+              { type: 'del', oldNo: 2, newNo: null, text: 'const two = 0;' },
+              { type: 'add', oldNo: null, newNo: 2, text: line2 },
+              { type: 'ctx', oldNo: 3, newNo: 3, text: 'const three = 3;' },
+            ],
+          },
+        ],
+      },
+      { path: 'src/b.js', status: 'modified', additions: 0, deletions: 0, newTotal: null, hunks: [] },
+    ],
+  };
+}
+
+const stateFor = (diff, version, comments = []) => ({
+  kind: 'diff',
+  status: 'reviewing',
+  doc: { title: 'code review', version },
+  diff,
+  review: { comments },
+  chat: [],
+  progress: [],
+});
+
+// The composer as the reviewer sees it: its two textareas and the drift notice.
+function composer(h) {
+  const tr = h.document.querySelector('tr.composer-row');
+  if (!tr) return null;
+  const areas = tr.querySelectorAll('textarea');
+  return { tr, head: tr.querySelector('div.composer-head'), text: areas[0], suggestion: areas[1], drift: tr.querySelector('span.composer-drift') };
+}
+
+// Click a line number: mousedown then mouseup on the gutter cell, as the page's
+// own document-level drag handlers expect.
+function clickLine(h, file, side, line) {
+  const td = h.document.querySelector(`td.ln.anchor[data-file="${file}"][data-side="${side}"][data-line="${line}"]`);
+  if (!td) throw new Error(`no gutter cell for ${file} ${side}:${line}`);
+  h.document.dispatch('mousedown', td);
+  h.document.dispatch('mouseup', td);
+  return composer(h);
+}
+
+const typeIn = (area, value) => {
+  area.value = value;
+  area.dispatch('input');
+};
+
+const fileCard = (h, path) => h.document.querySelector(`section.file-card[data-file="${path}"]`);
+const foldFile = (h, path) => fileCard(h, path).querySelector('button.fold').dispatch('click');
+
+async function frontEndChecks() {
+  console.log('the reviewer page: a half-written comment survives a re-render');
+
+  // --- the diff draws at all ---
+  {
+    const h = await bootReview({ respond: () => stateFor(diffFixture(), 1) });
+    check('the page renders both files as cards', h.document.querySelectorAll('section.file-card').length === 2);
+    check('the changed line gets a commentable gutter cell', !!h.document.querySelector('td.ln.anchor[data-file="src/a.js"][data-side="new"][data-line="2"]'));
+    check('the diff label reaches the header', h.el('session-meta').textContent === 'r1', h.el('session-meta').textContent);
+  }
+
+  // --- 1. fold the composer's file, unfold, get the draft back ---
+  {
+    const h = await bootReview({ respond: () => stateFor(diffFixture(), 1) });
+    typeIn(clickLine(h, 'src/a.js', 'new', 2).text, 'this needs a guard');
+    foldFile(h, 'src/a.js');
+    check('folding the file takes the composer off screen', composer(h) === null);
+    check('but leaves the other file alone', !!fileCard(h, 'src/b.js'));
+    foldFile(h, 'src/a.js');
+    const back = composer(h);
+    check('unfolding brings the composer back', !!back);
+    check('and the half-written comment with it', back && back.text.value === 'this needs a guard', back && JSON.stringify(back.text.value));
+  }
+
+  // --- 2/3. a re-read shifts the anchor onto different code ---
+  {
+    let cur = { diff: diffFixture({ label: 'r1' }), version: 1 };
+    const h = await bootReview({ respond: () => stateFor(cur.diff, cur.version) });
+    const c = clickLine(h, 'src/a.js', 'new', 2);
+    typeIn(c.text, 'why zero?');
+    check('a fresh composer shows no drift notice', !c.drift);
+    check('and seeds the suggestion with the line as it stands', c.suggestion.value === 'const two = 2;', c.suggestion.value);
+
+    cur = { diff: diffFixture({ label: 'r2', line2: 'const two = 22;' }), version: 2 };
+    h.fire('doc', { version: 2 });
+    await h.flush();
+
+    const after = composer(h);
+    check('the composer survives the re-read', !!after);
+    check('the typed comment survives it too', after && after.text.value === 'why zero?', after && JSON.stringify(after.text.value));
+    check('the reviewer is told the code under the draft changed', !!(after && after.drift));
+    check('an untouched suggestion re-bases onto the new code', after && after.suggestion.value === 'const two = 22;', after && JSON.stringify(after.suggestion.value));
+    check('the composer stays on the line it was opened on', after && after.head.textContent.startsWith('src/a.js:2'), after && after.head.textContent);
+
+    h.fire('doc', { version: 2 });
+    await h.flush();
+    const again = composer(h);
+    check('and the drift is announced once, not on every later render', again && !again.drift);
+  }
+
+  // --- 4. drift must not eat a hand-edited suggestion ---
+  {
+    let cur = { diff: diffFixture({ label: 'r1' }), version: 1 };
+    const h = await bootReview({ respond: () => stateFor(cur.diff, cur.version) });
+    const c = clickLine(h, 'src/a.js', 'new', 2);
+    typeIn(c.suggestion, 'const two = TWO; // mine');
+
+    cur = { diff: diffFixture({ label: 'r2', line2: 'const two = 22;' }), version: 2 };
+    h.fire('doc', { version: 2 });
+    await h.flush();
+
+    const after = composer(h);
+    check('drift still announced when the suggestion was edited', !!(after && after.drift));
+    check("a hand-edited suggestion is left alone, not re-based", after && after.suggestion.value === 'const two = TWO; // mine', after && JSON.stringify(after.suggestion.value));
+  }
+
+  // --- 5. two reads in flight, resolving out of order ---
+  {
+    let responder = () => stateFor(diffFixture({ label: 'r1' }), 1);
+    const h = await bootReview({ respond: (url, init) => responder(url, init) });
+
+    const pending = [];
+    responder = (url) =>
+      url.startsWith('/api/state') ? new Promise((resolve) => pending.push(resolve)) : { ok: true, status: 200, json: () => Promise.resolve({}) };
+
+    h.fire('doc', { version: 2 }); // the older read
+    h.fire('doc', { version: 3 }); // the newer read
+    await h.flush();
+    check('both re-reads are in flight at once', pending.length === 2, String(pending.length));
+
+    pending[1](stateFor(diffFixture({ label: 'r3' }), 3)); // newer lands first
+    await h.flush();
+    check('the newer read paints', h.el('session-meta').textContent === 'r3', h.el('session-meta').textContent);
+
+    pending[0](stateFor(diffFixture({ label: 'r2' }), 2)); // older arrives late
+    await h.flush();
+    check('the older read is dropped, not painted over the newer one', h.el('session-meta').textContent === 'r3', h.el('session-meta').textContent);
+  }
+
+  // --- 6. two tabs, one reviewer: a re-read in one repaints the other ---
+  {
+    // `reviewer.id` is stored per BROWSER, so both tabs share it. A `doc` echo
+    // suppressed by reviewerId (tried once, reverted) would silently strand the
+    // second tab on a stale diff — this is the check that fails if it comes back.
+    const storage = new Map();
+    let cur = { diff: diffFixture({ label: 'r1' }), version: 1 };
+    const respond = () => stateFor(cur.diff, cur.version);
+    const tabA = await bootReview({ respond, storage, session: 'shared' });
+    const tabB = await bootReview({ respond, storage, session: 'shared' });
+    const reviewerId = storage.get('pr.reviewerId');
+    check('both tabs are the same reviewer', !!reviewerId && tabA.es._url.includes(encodeURIComponent(reviewerId)) && tabB.es._url.includes(encodeURIComponent(reviewerId)));
+
+    cur = { diff: diffFixture({ label: 'r2' }), version: 2 };
+    tabB.fire('doc', { version: 2, by: reviewerId });
+    await tabB.flush();
+    check('a doc event carrying this reviewer\'s own id still repaints the tab', tabB.el('session-meta').textContent === 'r2', tabB.el('session-meta').textContent);
+    check('and the tab that did not hear it is left where it was', tabA.el('session-meta').textContent === 'r1', tabA.el('session-meta').textContent);
+  }
+}
+
 // ---------- fixture repo ----------
 
 function git(...args) {
@@ -102,6 +295,8 @@ function makeRepo() {
 }
 
 async function main() {
+  await frontEndChecks();
+
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;
   env = {
