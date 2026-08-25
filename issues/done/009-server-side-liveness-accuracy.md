@@ -25,6 +25,6 @@
 
 ## Code pointers
 
-- `issues/001-working-overlay-liveness-hint.md` — the "Optional server assist" section this implements.
+- `issues/done/001-working-overlay-liveness-hint.md` — the "Optional server assist" section this implements.
 - `server/server.js` — `/agent/wait`, `/agent/progress`, `/agent/present`, the status/events payload, and `persist`/restore (005).
 - `public/app.js` — the working overlay timer and staleness hint from 001.

@@ -128,7 +128,7 @@ reviewing --submit--> working --interrupt--> reviewing (same doc, feedback intac
 - `public/app.js:181,447,461` — the working overlay, its elapsed timer, and the
   "still working" advisory where the Interrupt control belongs.
 - `docs/PROTOCOL.md:69` (`submit` event) and the HTTP reference table (line ~329).
-- `issues/009-server-side-liveness-accuracy.md` — the liveness timestamps this
+- `issues/done/009-server-side-liveness-accuracy.md` — the liveness timestamps this
   must leave unchanged.
 
 ## Out of scope

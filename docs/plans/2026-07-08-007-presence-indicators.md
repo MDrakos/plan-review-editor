@@ -8,7 +8,7 @@
 
 **Tech stack:** Node's built-in `http` (no framework), vanilla browser JS (two classic `<script>`s: `liveness.js` + `app.js`), `node test/e2e.js` as the whole suite. Run tests with a **unique** port so parallel worktrees never collide — the suite auto-selects a free port; `PLANREVIEW_TEST_PORT=<port> npm test` pins one.
 
-**Design source:** `issues/007-presence-indicators.md` (groomed 2026-07-07). Builds on 004 (`docs/plans/2026-07-07-multiple-reviewers.md`) and 005 persistence.
+**Design source:** `issues/done/007-presence-indicators.md` (groomed 2026-07-07). Builds on 004 (`docs/plans/2026-07-07-multiple-reviewers.md`) and 005 persistence.
 
 **Key data shapes (after this plan):**
 - Session (live handles, not serialized): `presence: Map<reviewerId, { id, name, connectedAt, count }>`, `presenceTimer: NodeJS.Timeout | null`.

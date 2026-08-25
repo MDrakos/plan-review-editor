@@ -1,6 +1,6 @@
 # Plan — Issue 002: comment threads (agent replies to a specific inline comment)
 
-**Source:** `issues/002-comment-threads-with-agent-replies.md` · **Path:** Standard (objective adapter)
+**Source:** `issues/done/002-comment-threads-with-agent-replies.md` · **Path:** Standard (objective adapter)
 **Branch:** `miked/issue-002-comment-threads-let-the-agent-reply-to-a`
 **Design decisions:** pre-decided in `.riker/brief.md` (a–d) — not re-brainstormed.
 

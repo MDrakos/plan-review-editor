@@ -8,7 +8,7 @@
 
 **Tech stack:** Node's built-in `http` (no framework), vanilla browser JS (two classic `<script>`s: `liveness.js` + `app.js`), `node test/e2e.js` as the whole test suite. Run tests with a **unique** port: `PLANREVIEW_TEST_PORT=<port> npm test` (avoids the shared-4799 collision across worktrees).
 
-**Design source:** `docs/specs/2026-07-07-multiple-reviewers-design.md` (locked/approved). Issue: `issues/004-multiple-reviewers-on-one-plan.md`.
+**Design source:** `docs/specs/2026-07-07-multiple-reviewers-design.md` (locked/approved). Issue: `issues/done/004-multiple-reviewers-on-one-plan.md`.
 
 **Key data shapes (after this plan):**
 - Comment: `{ id, quote, text, ts, author?: {id, name?}, replies?: [{role:'agent'|'reviewer', text, ts, author?}], archived? }`

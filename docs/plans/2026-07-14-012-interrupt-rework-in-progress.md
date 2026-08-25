@@ -1,6 +1,6 @@
 # Plan: interrupt an in-progress rework (issue 012)
 
-**Source:** `issues/012-interrupt-rework-in-progress.md`
+**Source:** `issues/done/012-interrupt-rework-in-progress.md`
 **Branch:** `miked/interrupt-rework-in-progress`
 **Path:** Standard
 

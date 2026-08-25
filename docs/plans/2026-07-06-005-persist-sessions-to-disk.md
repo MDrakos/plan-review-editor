@@ -1,6 +1,6 @@
 # Plan: persist sessions to disk so they survive a server restart (issue 005)
 
-**Path:** Standard · **Source:** `issues/005-persist-sessions-to-disk.md` (design LOCKED, reviewer-approved 2026-07-06) · **File touched:** `server/server.js`, `.gitignore`, `test/e2e.js`
+**Path:** Standard · **Source:** `issues/done/005-persist-sessions-to-disk.md` (design LOCKED, reviewer-approved 2026-07-06) · **File touched:** `server/server.js`, `.gitignore`, `test/e2e.js`
 
 ## Objective
 

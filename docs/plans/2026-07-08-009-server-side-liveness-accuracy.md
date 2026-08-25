@@ -1,7 +1,7 @@
 # Plan: server-side liveness accuracy (issue 009)
 
-**Path:** Standard · **Source:** `issues/009-server-side-liveness-accuracy.md` (the deferred
-"optional server assist" from `issues/001-working-overlay-liveness-hint.md`) · **Files touched:**
+**Path:** Standard · **Source:** `issues/done/009-server-side-liveness-accuracy.md` (the deferred
+"optional server assist" from `issues/done/001-working-overlay-liveness-hint.md`) · **Files touched:**
 `server/server.js`, `public/app.js`, `test/e2e.js`
 
 ## Objective

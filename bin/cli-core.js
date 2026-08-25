@@ -90,10 +90,31 @@ async function serverAlive() {
   return (await serverHealth()) !== null;
 }
 
+// WSL is Linux without a browser or (usually) xdg-open, so the URL has to cross
+// over to the Windows side: `wslview` when wslu is installed, `explorer.exe`
+// otherwise — it is always there and opens the default Windows browser.
+// $BROWSER wins everywhere it is set, which is also the no-GUI escape hatch.
+function browserOpener() {
+  if (process.env.BROWSER) return process.env.BROWSER;
+  if (process.platform === 'darwin') return 'open';
+  if (process.platform === 'win32') return 'start';
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
+    return onPath('wslview') ? 'wslview' : 'explorer.exe';
+  }
+  return 'xdg-open';
+}
+
+function onPath(cmd) {
+  try {
+    execFileSync('/bin/sh', ['-c', `command -v ${cmd}`], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function openBrowser(url) {
-  const opener =
-    process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-  execFile(opener, [url], () => {});
+  execFile(browserOpener(), [url], () => {});
 }
 
 async function spawnServer(want) {
