@@ -109,6 +109,32 @@ diagrams, and is the attribute 017's prototype shim reuses for elements.
 The whole diagram is one rendered block, so `markChanges` and `renderVersionDiff` treat a
 diagram edit as one changed block with no changes to either.
 
+## Pan and zoom
+
+A diagram bigger than a paragraph is unreadable pinned at one scale, so each diagram is a
+viewport, not a picture. Everything drawable sits in a single `<g class="flow-pan">` and
+the whole interaction is one `transform` on it: `translate(tx ty) scale(s)`.
+
+- **Drag** anywhere in the frame pans. A drag that moves more than 4px sets a `moved` flag,
+  and a capture-phase `click` listener swallows the click that follows, so releasing a pan
+  on top of a box does not also open the composer.
+- **Cmd/Ctrl + scroll** zooms about the cursor, clamped to 0.4x–5x. A **plain wheel is left
+  alone** so the page still scrolls normally, and a trackpad pinch arrives as a `ctrlKey`
+  wheel event, so pinch-to-zoom works with no extra code.
+- **Double-click**, the **Fit** button, or **0** resets. `+` / `-` and the two buttons step
+  by 1.25x about the frame centre. The button cluster and a one-line gesture hint fade in
+  on hover.
+- Screen-to-user coordinates come from `svg.getScreenCTM()`, never from a width ratio. The
+  SVG is wider than its `viewBox` and letterboxes its content, so a ratio silently
+  mis-maps the cursor and the diagram drifts as you zoom.
+- The frame is the diagram's natural height with a 240px floor, full document width, and
+  clips. At 1x a diagram looks exactly as it would with no pan/zoom at all.
+
+View state is per-diagram, in-memory, and **resets on re-present**. Persisting a pan across
+a rework round would leave the reviewer looking at empty space where a deleted box used to
+be. Touch pinch on a real touchscreen (two live pointers) is not handled; trackpad and
+mouse are.
+
 ## Anchoring model
 
 The comment record grows one optional field:
@@ -170,6 +196,10 @@ Absent for every prose comment, so existing agent integrations are unaffected.
   back edge, malformed fallback to code, escaping.
 - **`server/anchor.js`**: `idAnchors` finds a present id, misses an absent one, and is not
   fooled by a prefix (`…:node:store` must not match `…:node:store2`).
+- **Pan/zoom** (in the `public/app.js` vm harness, the pattern `test/reviewvm.js`
+  established): zoom about a point leaves that point fixed; a plain wheel changes nothing;
+  a drag past the threshold suppresses exactly one following click and a clean click still
+  opens the composer; reset returns to identity.
 - **`test/e2e.js`** (drives the real server over HTTP): present a doc with a flow fence and
   assert the SVG and its `data-anchor-id`s are in the served HTML; post a node comment and
   an edge comment; re-present a doc keeping that node and assert the thread is active;
@@ -179,7 +209,8 @@ Absent for every prose comment, so existing agent integrations are unaffected.
 
 ## Out of scope
 
-Reviewer-editable diagrams, per-node version diffs, edge routing that avoids overlaps,
+Reviewer-editable diagrams, per-node version diffs, persisted view state, two-finger
+touchscreen pinch, edge routing that avoids overlaps,
 sub-graphs or swimlanes, and any second fence type. 017's prototype fence reuses
 `anchorId` and `data-anchor-id` but is not built here.
 
@@ -189,8 +220,11 @@ Built before implementation at the reviewer's request: the real parser, layer as
 and SVG emitter, wired to a mock comment panel. It confirmed the layout is legible without
 a layout library, and caught two defects that are now folded into **Layout and SVG** above:
 multi-layer edges cutting through intervening boxes, and a `viewBox` sized off the boxes
-alone clipping a bowed edge's label. The parser, layering and emitter port across close to
-as-is; the mock panel is thrown away.
+alone clipping a bowed edge's label. Reviewing it also added the **Pan and zoom**
+requirement above, which in turn caught a third defect: mapping the cursor by width ratio
+instead of by the element's CTM makes the diagram drift under the pointer as it zooms. The
+parser, layering, emitter and pan/zoom port across close to as-is; the mock panel is thrown
+away.
 
 ## Files touched
 
@@ -199,7 +233,8 @@ as-is; the mock panel is thrown away.
 - `server/anchor.js` — `idAnchors`.
 - `server/server.js` — one line in the carry-forward.
 - `public/app.js` — click/Enter on `[data-anchor-id]`, `pendingAnchorId` in the composer,
-  `anchorId` in the saved comment, class-based re-anchor in `renderDoc`.
-- `public/style.css` — node, edge, hit-strip, focus and commented styles.
+  `anchorId` in the saved comment, class-based re-anchor in `renderDoc`, and the per-diagram
+  pan/zoom binding.
+- `public/style.css` — node, edge, hit-strip, focus, commented, frame and zoom-control styles.
 - `docs/PROTOCOL.md` — `anchorId`.
 - `test/e2e.js`, `package.json` (`selfcheck`).
