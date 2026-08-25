@@ -326,6 +326,13 @@ tr.line-row.selecting td.ln { background: var(--cr-select); }
 
 .composer-tabs { margin-left: auto; display: inline-flex; gap: 4px; }
 
+/* The draft's anchor line moved onto different code while it was being typed. */
+.composer-drift {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--cr-del-ink);
+}
+
 .btn.tab { font-size: 11px; padding: 2px 8px; }
 .btn.tab.active {
   background: var(--pr-navy);

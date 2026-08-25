@@ -150,7 +150,20 @@ function connect() {
   es.addEventListener('open', () => (el('chat-state').textContent = 'connected'));
   es.addEventListener('error', () => (el('chat-state').textContent = 'reconnecting…'));
   // A new round: the agent re-read the repo, so the whole diff is replaced.
-  es.addEventListener('doc', () => refresh());
+  es.addEventListener('doc', (e) => {
+    // Our own refresh click already called refresh() inline; without this the
+    // broadcast echo rebuilds the whole files DOM a second time. Mirrors the
+    // self-echo guard the `review` listener below has. An agent `present` sends
+    // no `by`, so it never matches and always repaints.
+    let by = null;
+    try {
+      by = (JSON.parse(e.data) || {}).by;
+    } catch {
+      /* older payloads carried no body */
+    }
+    if (by && by === reviewer.id) return;
+    refresh();
+  });
   es.addEventListener('status', (e) => {
     const d = JSON.parse(e.data);
     state.status = d.status;
@@ -864,11 +877,25 @@ function cssEscape(v) {
 let composerDraft = null;
 
 function openComposer(file, side, from, to, restore) {
-  closeComposer(); // clears composerDraft, so set it below, not above
+  closeComposer(); // clears composerDraft, so every path below re-sets it
   const row = anchorRow(file, side, to);
-  if (!row) return;
+  if (!row) {
+    // The line isn't in the DOM right now — its file is folded (folding and
+    // ticking "Viewed" both re-render), or it left the diff entirely. Hold the
+    // draft so unfolding restores it. Restoring is the ONLY case worth holding:
+    // a brand-new composer that failed to open has nothing typed in it.
+    composerDraft = restore || null;
+    return;
+  }
   const quote = quoteFor(file, side, from, to);
-  composerDraft = restore || { file, side, from, to, mode: 'comment', text: '', suggestion: quote };
+  // Line numbers are not identity. A re-read can shift the draft's anchor onto
+  // different code, which is exactly what this feature makes more likely, so
+  // compare the quoted text the way the server's comment reanchor does and say
+  // so instead of silently rebinding the draft to whatever now sits there.
+  const drifted = Boolean(restore) && restore.quote !== quote;
+  const suggestionUntouched = Boolean(restore) && restore.suggestion === restore.quote;
+  composerDraft = restore || { file, side, from, to, mode: 'comment', text: '', suggestion: quote, quote };
+  composerDraft.quote = quote; // the new baseline; drift is announced once, not every render
   const tr = document.createElement('tr');
   tr.className = 'composer-row';
   const td = document.createElement('td');
@@ -888,6 +915,12 @@ function openComposer(file, side, from, to, restore) {
   suggestTab.textContent = 'Suggest';
   tabs.append(commentTab, suggestTab);
   head.append(tabs);
+  if (drifted) {
+    const warn = document.createElement('span');
+    warn.className = 'composer-drift';
+    warn.textContent = 'the code here changed while you were typing';
+    head.append(warn);
+  }
 
   const text = document.createElement('textarea');
   text.rows = 3;
@@ -950,7 +983,8 @@ function openComposer(file, side, from, to, restore) {
   row.parentNode.insertBefore(tr, row.nextSibling);
   if (restore) {
     text.value = restore.text;
-    suggestion.value = restore.suggestion;
+    suggestion.value = drifted && suggestionUntouched ? quote : restore.suggestion;
+    composerDraft.suggestion = suggestion.value;
     setMode(restore.mode);
   }
   text.focus();

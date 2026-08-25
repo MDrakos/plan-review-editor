@@ -290,17 +290,24 @@ async function main() {
   );
   const refreshed = await browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' });
   check('refresh is accepted while reviewing', refreshed.status === 200, JSON.stringify(refreshed));
+  check('the refresh body reports ok', refreshed.data.ok === true, JSON.stringify(refreshed.data));
   check(
-    'refresh answers with its documented body, not just a status',
-    refreshed.data.ok === true &&
-      refreshed.data.version === beforeRefresh.doc.version + 1 &&
-      refreshed.data.files === beforeRefresh.diff.files.length &&
-      typeof refreshed.data.additions === 'number' &&
-      typeof refreshed.data.deletions === 'number',
-    JSON.stringify(refreshed.data)
+    'the refresh body reports the bumped version',
+    refreshed.data.version === beforeRefresh.doc.version + 1,
+    `${refreshed.data.version} vs ${beforeRefresh.doc.version}`
+  );
+  check(
+    'the refresh body reports the file count',
+    refreshed.data.files === beforeRefresh.diff.files.length,
+    `${refreshed.data.files} vs ${beforeRefresh.diff.files.length}`
   );
 
   const s7 = (await browser(`/api/state?session=${id}`)).data;
+  check(
+    'the refresh body counts match the model it produced',
+    refreshed.data.additions === s7.diff.additions && refreshed.data.deletions === s7.diff.deletions,
+    `${refreshed.data.additions}/${refreshed.data.deletions} vs ${s7.diff.additions}/${s7.diff.deletions}`
+  );
   const files7 = Object.fromEntries(s7.diff.files.map((f) => [f.path, f]));
   check(
     'the refresh re-read the diff',
@@ -326,6 +333,32 @@ async function main() {
   );
   check('an untouched file still carries no round marker', files7['jwt.js'].round === undefined, files7['jwt.js'].round);
 
+  // R6: a refresh must NOT wake the agent. The documented `wait` loop has no case
+  // for a refresh event, so one would send the agent down a branch it has no
+  // handler for. This file's own `wait` is the tool that proves it.
+  const quiet = await code('wait', '--session', id, '--timeout', '2');
+  check('a refresh queues no agent event', quiet.type === 'timeout', JSON.stringify(quiet));
+
+  // The round baseline is now load-bearing for /api/refresh, so it has to reach
+  // disk — before this feature `prev` was write-only and a restore dropped it.
+  const persistedAfterRefresh = JSON.parse(fs.readFileSync(path.join(env.PLANREVIEW_STATE_DIR, `${id}.json`), 'utf8'));
+  check(
+    'the round baseline is persisted, not just held in memory',
+    Boolean(persistedAfterRefresh.diff.prev) && Array.isArray(persistedAfterRefresh.diff.prev.files),
+    JSON.stringify(Object.keys(persistedAfterRefresh.diff || {}))
+  );
+
+  // A second refresh in the same round must leave the baseline where it is —
+  // that is what keeps the round markers meaning the same thing all round.
+  const prevBefore2nd = JSON.stringify(persistedAfterRefresh.diff.prev);
+  await browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' });
+  const persistedAfter2nd = JSON.parse(fs.readFileSync(path.join(env.PLANREVIEW_STATE_DIR, `${id}.json`), 'utf8'));
+  check(
+    'a second refresh in the same round leaves the baseline untouched',
+    JSON.stringify(persistedAfter2nd.diff.prev) === prevBefore2nd,
+    'baseline moved on the second refresh'
+  );
+
   // The working round belongs to the agent: refresh is refused until it hands back.
   const waitingR = code('wait', '--session', id, '--timeout', '20');
   await sleep(150);
@@ -337,11 +370,13 @@ async function main() {
   await browser(`/api/interrupt?session=${id}`, { reviewerId: 'rev-1' });
   await code('wait', '--session', id, '--timeout', '20'); // drain the interrupt event
 
-  // FM-6: the handler guards AFTER its await and mutates with none in between,
-  // the same race closure /api/submit and /api/interrupt use. Submit's
-  // precondition cannot be defeated by a racing refresh (refresh never changes
-  // status), so submit always lands — but a refresh that lands must have landed
-  // while still `reviewing`, never under the working round it raced.
+  // A refresh racing a submit settles cleanly either way. Note what this can and
+  // cannot prove: unlike submit/interrupt, /api/refresh guards on `status` but
+  // never MUTATES it, so a guard placed before its await would produce the same
+  // observable result as one placed after. The ordering is therefore not
+  // testable from outside; the guard-after-await placement stands on matching
+  // its siblings, and what this test pins is that neither request is lost, no
+  // 500 escapes, and the round the submit opened survives the race.
   const versionBeforeRace = (await browser(`/api/state?session=${id}`)).data.doc.version;
   const [raceRefresh, raceSubmit] = await Promise.all([
     browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' }),
@@ -375,6 +410,14 @@ async function main() {
   check('the 400 carries the git error', Boolean((brokenRefresh.data || {}).error), JSON.stringify(brokenRefresh.data));
   const survived = await browser(`/api/state?session=${doomedSession.id}`);
   check('the session survives a failed refresh', survived.status === 200 && survived.data.status === 'reviewing', String(survived.status));
+  check(
+    'a failed refresh leaves the diff model it could not replace intact',
+    survived.data.diff.files.length === doomedSession.files &&
+      survived.data.diff.additions === doomedSession.additions &&
+      survived.data.diff.deletions === doomedSession.deletions,
+    JSON.stringify({ now: survived.data.diff.files.length, was: doomedSession.files })
+  );
+  check('a failed refresh does not bump the version', survived.data.doc.version === 1, String(survived.data.doc.version));
   await code('stop', '--session', doomedSession.id);
 
   console.log('a plan review and a code review coexist on one server');
@@ -403,6 +446,8 @@ async function main() {
   check('the agent gets an approve event', approve.type === 'approve', approve.type);
   const s6 = await browser(`/api/state?session=${id}`);
   check('the session is done, not working', s6.data.status === 'done', s6.data.status);
+  const doneRefresh = await browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' });
+  check('refresh is refused once the review is done, not only while working', doneRefresh.status === 409, String(doneRefresh.status));
 
   console.log('teardown');
   await code('stop', '--session', id);
