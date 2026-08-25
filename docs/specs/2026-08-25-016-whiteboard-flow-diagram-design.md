@@ -215,8 +215,8 @@ existing agent integrations are unaffected.
   it.
 - Labels and ids are escaped through `escapeHtml` on the way into the SVG. Nothing in a
   fence reaches the page unescaped.
-- An `anchorId` on an incoming comment that matches nothing in the current render archives
-  the comment. It is never dropped, matching today's behaviour for a stale quote.
+- An `anchors` entry on an incoming comment that matches nothing in the current render is
+  dead; a comment whose every entry is dead archives. It is never dropped, matching today's behaviour for a stale quote.
 
 ## Testing
 
@@ -237,7 +237,7 @@ existing agent integrations are unaffected.
   assert the SVG and its `data-anchor-id`s are in the served HTML; post a node comment and
   an edge comment; re-present a doc keeping that node and assert the thread is active;
   re-present without it and assert `archived: true` rather than gone; assert the `submit`
-  bundle carries `anchorId`; assert a doc with no flow fence renders byte-identically to
+  bundle carries `anchors`; assert a doc with no flow fence renders byte-identically to
   today.
 
 ## Out of scope
@@ -245,7 +245,7 @@ existing agent integrations are unaffected.
 Reviewer-editable diagrams, per-node version diffs, persisted view state, two-finger
 touchscreen pinch, edge routing that avoids overlaps,
 sub-graphs or swimlanes, and any second fence type. 017's prototype fence reuses
-`anchorId` and `data-anchor-id` but is not built here.
+`anchors` and `data-anchor-id` but is not built here.
 
 ## Prototype
 
@@ -278,5 +278,5 @@ synthesised events.** The final pass also added the group-comment requirement, w
   pan/zoom/box-select binding.
 - `public/style.css` — node, edge, hit-strip, focus, selected, commented, marquee, frame and
   control-cluster styles.
-- `docs/PROTOCOL.md` — `anchorId`.
+- `docs/PROTOCOL.md` — `anchors`.
 - `test/e2e.js`, `package.json` (`selfcheck`).
