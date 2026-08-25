@@ -189,7 +189,11 @@ function serialize(s) {
   return {
     id: s.id,
     kind: s.kind,
-    diff: s.kind === 'diff' ? { spec: s.diff.spec, model: s.diff.model } : undefined,
+    // `prev` rides along because /api/refresh reads it as the round's baseline
+    // (issue 015). It was write-only dead state before that, which is why a
+    // restore used to drop it — dropping it now silently flattens the round
+    // markers on the first refresh after a restart.
+    diff: s.kind === 'diff' ? { spec: s.diff.spec, model: s.diff.model, prev: s.diff.prev } : undefined,
     defaultReviewerName: s.defaultReviewerName,
     status: s.status,
     lastAgentActivity: s.lastAgentActivity,
@@ -286,7 +290,7 @@ function restoreSessions() {
       const s = blankSession(data.id);
       if (data.kind === 'diff') s.kind = 'diff';
       if (s.kind === 'diff' && data.diff && typeof data.diff === 'object')
-        s.diff = { spec: data.diff.spec || null, model: data.diff.model || null, prev: null };
+        s.diff = { spec: data.diff.spec || null, model: data.diff.model || null, prev: data.diff.prev || null };
       if (typeof data.defaultReviewerName === 'string') s.defaultReviewerName = data.defaultReviewerName;
       if (typeof data.status === 'string') s.status = data.status;
       // Object fields fall back to blankSession's defaults if a hand-edited file

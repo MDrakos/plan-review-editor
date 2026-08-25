@@ -81,6 +81,13 @@
 .count-add { color: var(--cr-add-ink); }
 .count-del { color: var(--cr-del-ink); }
 
+/* Sits at the end of the files-bar summary row, opposite the +/- counts. */
+.files-refresh {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
 .files-jump {
   display: flex;
   flex-wrap: wrap;
@@ -399,11 +406,4 @@ pre.suggestion {
   background: var(--pr-blue);
   border-color: var(--pr-blue);
   color: #fff;
-}
-
-/* Sits at the end of the files-bar summary row, opposite the +/- counts. */
-.files-refresh {
-  margin-left: auto;
-  font-size: 11px;
-  padding: 3px 8px;
 }

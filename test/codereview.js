@@ -290,6 +290,15 @@ async function main() {
   );
   const refreshed = await browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' });
   check('refresh is accepted while reviewing', refreshed.status === 200, JSON.stringify(refreshed));
+  check(
+    'refresh answers with its documented body, not just a status',
+    refreshed.data.ok === true &&
+      refreshed.data.version === beforeRefresh.doc.version + 1 &&
+      refreshed.data.files === beforeRefresh.diff.files.length &&
+      typeof refreshed.data.additions === 'number' &&
+      typeof refreshed.data.deletions === 'number',
+    JSON.stringify(refreshed.data)
+  );
 
   const s7 = (await browser(`/api/state?session=${id}`)).data;
   const files7 = Object.fromEntries(s7.diff.files.map((f) => [f.path, f]));
@@ -299,7 +308,8 @@ async function main() {
     JSON.stringify(files7['auth.js'].hunks)
   );
   const moved = s7.review.comments.find((x) => x.id === 'c-return');
-  check('the comment re-anchors across a refresh', moved.archived === false && moved.line === 9, JSON.stringify(moved));
+  check('the comment survives a refresh instead of archiving', moved.archived === false, JSON.stringify(moved));
+  check('the comment re-anchors to the line the refresh moved it to', moved.line === 9, String(moved.line));
   check('the refresh does not end the round', s7.status === 'reviewing', s7.status);
   check(
     'the refresh is not agent activity',
@@ -323,8 +333,49 @@ async function main() {
   await waitingR;
   const busy = await browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' });
   check('refresh is refused while the agent is working', busy.status === 409, String(busy.status));
+  check('the refusal says which state blocked it', /working/.test((busy.data || {}).error || ''), JSON.stringify(busy.data));
   await browser(`/api/interrupt?session=${id}`, { reviewerId: 'rev-1' });
   await code('wait', '--session', id, '--timeout', '20'); // drain the interrupt event
+
+  // FM-6: the handler guards AFTER its await and mutates with none in between,
+  // the same race closure /api/submit and /api/interrupt use. Submit's
+  // precondition cannot be defeated by a racing refresh (refresh never changes
+  // status), so submit always lands — but a refresh that lands must have landed
+  // while still `reviewing`, never under the working round it raced.
+  const versionBeforeRace = (await browser(`/api/state?session=${id}`)).data.doc.version;
+  const [raceRefresh, raceSubmit] = await Promise.all([
+    browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' }),
+    browser(`/api/submit?session=${id}`, { reviewerId: 'rev-1', comments: [], note: '' }),
+  ]);
+  check('CONCURRENT refresh‖submit: the submit always lands', raceSubmit.status === 200, String(raceSubmit.status));
+  check(
+    'CONCURRENT refresh‖submit: the refresh either wins cleanly or 409s — never anything else',
+    raceRefresh.status === 200 || raceRefresh.status === 409,
+    String(raceRefresh.status)
+  );
+  const raceState = (await browser(`/api/state?session=${id}`)).data;
+  check('CONCURRENT refresh‖submit: the working round the submit opened stands', raceState.status === 'working', raceState.status);
+  check(
+    'CONCURRENT refresh‖submit: the diff was re-read exactly as often as the refresh won',
+    raceState.doc.version === versionBeforeRace + (raceRefresh.status === 200 ? 1 : 0),
+    `${raceState.doc.version} vs ${versionBeforeRace}, refresh ${raceRefresh.status}`
+  );
+  await code('wait', '--session', id, '--timeout', '20'); // drain the submit event
+  await browser(`/api/interrupt?session=${id}`, { reviewerId: 'rev-1' });
+  await code('wait', '--session', id, '--timeout', '20'); // drain the interrupt event
+
+  // FM-7: a git failure inside the re-read must surface as a 400, not an
+  // uncaught 500 that takes the session with it. Broken on its OWN session and
+  // its own throwaway base ref, so nothing else in this file is disturbed.
+  git('branch', 'fm7-base', 'main');
+  const doomedSession = await code('start', '--base', 'fm7-base', '--no-open');
+  git('branch', '-qD', 'fm7-base');
+  const brokenRefresh = await browser(`/api/refresh?session=${doomedSession.id}`, { reviewerId: 'rev-1' });
+  check('a git failure during refresh is a 400, not a 500', brokenRefresh.status === 400, String(brokenRefresh.status));
+  check('the 400 carries the git error', Boolean((brokenRefresh.data || {}).error), JSON.stringify(brokenRefresh.data));
+  const survived = await browser(`/api/state?session=${doomedSession.id}`);
+  check('the session survives a failed refresh', survived.status === 200 && survived.data.status === 'reviewing', String(survived.status));
+  await code('stop', '--session', doomedSession.id);
 
   console.log('a plan review and a code review coexist on one server');
   const planDoc = path.join(os.tmpdir(), 'codereview-e2e-plan.md');
@@ -337,6 +388,11 @@ async function main() {
   check('the code session is unaffected by the plan session', (await browser(`/api/state?session=${id}`)).data.kind === 'diff');
   const planRefresh = await browser(`/api/refresh?session=${planSession.id}`, { reviewerId: 'rev-1' });
   check('refresh is refused on a plan session', planRefresh.status === 400, String(planRefresh.status));
+  check(
+    'the plan-session refusal says refresh is code-review only',
+    /code review/.test((planRefresh.data || {}).error || ''),
+    JSON.stringify(planRefresh.data)
+  );
   await plan('stop', '--session', planSession.id);
 
   console.log('approve: the agent is told to proceed, not to re-present');

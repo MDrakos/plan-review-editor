@@ -295,9 +295,19 @@ function renderAll() {
     state.diff.files.slice(EAGER_FILES).forEach((f) => folded.add(f.path));
   }
   renderFilesBar();
+  const draft = composerDraft; // replaceChildren below destroys the composer's DOM
   host.replaceChildren(...state.diff.files.map(renderFile));
   renderThreads();
   renderCommentList();
+  // Put a half-written comment back. Any re-render replaces the whole files DOM,
+  // and the composer lives ONLY in that DOM — so without this, every re-read of
+  // the diff silently ate whatever the reviewer was typing. Both callers hit it:
+  // the agent's `present` (SSE `doc`) and the reviewer's own "Re-read diff".
+  // lazydev: if the line the draft hung on is gone from the new diff, openComposer
+  // can't re-anchor it and there is no UI for it — the draft stays in memory, so a
+  // later round that brings the line back restores it. Give it a home of its own
+  // (a detached "orphaned draft" panel) only if that turns out to happen in practice.
+  if (draft) openComposer(draft.file, draft.side, draft.from, draft.to, draft);
 }
 
 function renderFilesBar() {
@@ -345,14 +355,19 @@ function refreshButton() {
   btn.title = 'Re-read the repo — picks up anything committed since this round';
   btn.addEventListener('click', async () => {
     btn.disabled = true;
-    await saveReview();
-    const res = await post('/api/refresh');
-    if (!res.ok) {
-      btn.textContent = (res.data && res.data.error) || 'could not re-read';
-      btn.disabled = false;
-      return;
+    try {
+      await saveReview();
+      const res = await post('/api/refresh');
+      if (!res.ok) {
+        btn.textContent = (res.data && res.data.error) || 'could not re-read';
+        return;
+      }
+      await refresh(); // repaints the bar, so this button (and its label) is replaced
+    } catch {
+      btn.textContent = 'could not re-read';
+    } finally {
+      btn.disabled = false; // never leave the control wedged on a dropped request
     }
-    await refresh(); // repaints the bar, so this button (and its label) is replaced
   });
   return btn;
 }
@@ -843,11 +858,17 @@ function cssEscape(v) {
 
 // ---------- composer ----------
 
-function openComposer(file, side, from, to) {
-  closeComposer();
+// The composer's text lives in the DOM and nowhere else, so a re-render loses it.
+// `composerDraft` is the memory copy that survives one — kept in step with the
+// textareas on every keystroke, and handed back in as `restore` by renderAll.
+let composerDraft = null;
+
+function openComposer(file, side, from, to, restore) {
+  closeComposer(); // clears composerDraft, so set it below, not above
   const row = anchorRow(file, side, to);
   if (!row) return;
   const quote = quoteFor(file, side, from, to);
+  composerDraft = restore || { file, side, from, to, mode: 'comment', text: '', suggestion: quote };
   const tr = document.createElement('tr');
   tr.className = 'composer-row';
   const td = document.createElement('td');
@@ -881,6 +902,7 @@ function openComposer(file, side, from, to) {
   let mode = 'comment';
   const setMode = (m) => {
     mode = m;
+    if (composerDraft) composerDraft.mode = m;
     commentTab.classList.toggle('active', m === 'comment');
     suggestTab.classList.toggle('active', m === 'suggest');
     suggestion.hidden = m !== 'suggest';
@@ -888,6 +910,8 @@ function openComposer(file, side, from, to) {
   };
   commentTab.addEventListener('click', () => setMode('comment'));
   suggestTab.addEventListener('click', () => setMode('suggest'));
+  text.addEventListener('input', () => composerDraft && (composerDraft.text = text.value));
+  suggestion.addEventListener('input', () => composerDraft && (composerDraft.suggestion = suggestion.value));
 
   const actions = document.createElement('div');
   actions.className = 'composer-actions';
@@ -924,10 +948,16 @@ function openComposer(file, side, from, to) {
   td.append(head, text, suggestion, actions);
   tr.append(td);
   row.parentNode.insertBefore(tr, row.nextSibling);
+  if (restore) {
+    text.value = restore.text;
+    suggestion.value = restore.suggestion;
+    setMode(restore.mode);
+  }
   text.focus();
 }
 
 function closeComposer() {
+  composerDraft = null; // cancel/save both discard the draft on purpose
   for (const tr of document.querySelectorAll('tr.composer-row')) tr.remove();
 }
 
