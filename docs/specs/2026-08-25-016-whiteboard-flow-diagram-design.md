@@ -1,6 +1,6 @@
 # 016 — flow diagram the reviewer can comment on
 
-**Status:** design, awaiting approval
+**Status:** approved 2026-08-25, prototype built and reviewed
 **Issue:** `issues/todo/016-whiteboard-flow-diagram.md`
 **Sibling:** `issues/todo/017-inline-prototypes-in-the-plan.md` (reuses the anchor field defined here)
 
@@ -23,7 +23,7 @@ own acceptance criteria; the fifth was the user's call.
 | Fork | Decision | Why |
 |---|---|---|
 | Who authors the diagram | The agent, from a text fence | Round-trips the existing present/review/rework loop for free. A reviewer-editable canvas means the reviewer mutates the document, which nothing in this tool does. |
-| Renderer | ~150 lines of server-side layout emitting SVG | Carry-forward needs the server to see node ids (`server/anchor.js` reads rendered HTML). Client-side Mermaid moves that out of reach, so the server would need its own fence parser regardless, leaving only layout+emit saved for a bundle an order of magnitude past the 127 KB highlight.js one, and the README's "zero runtime dependencies". |
+| Renderer | ~190 lines of server-side layout emitting SVG | Carry-forward needs the server to see node ids (`server/anchor.js` reads rendered HTML). Client-side Mermaid moves that out of reach, so the server would need its own fence parser regardless, leaving only layout+emit saved for a bundle an order of magnitude past the 127 KB highlight.js one, and the README's "zero runtime dependencies". |
 | Comment identity | One new optional field, `anchorId` | Acceptance criterion 4 requires the bundle to identify the node. A synthesised text quote cannot satisfy that and collides on duplicate labels. |
 | Version diff | Stays block-level | `renderVersionDiff` compares rendered blocks. Per-node diff marks are a separate feature with its own issue. |
 | Nodes vs nodes + edges | **Both** | The arrows are where a lot of the wrongness lives. Because an edge carries the same kind of id as a node, click handling, anchoring, carry-forward and the panel card are one code path; the only extra is a transparent hit strip so a thin line is clickable. |
@@ -72,9 +72,18 @@ so their comments archive. Rare enough to not pay for.
 Layered top to bottom. Layer of a node is `1 + max(layer of its predecessors)` by
 longest path; an edge pointing back to an equal or earlier layer is a back edge and does
 not raise anything. Within a layer, nodes sit in first-appearance order, centred. Fixed
-box size, fixed gaps, no physics, no routing cleverness. Forward edges are straight lines
-from bottom-centre to top-centre with an arrow marker; back edges are a bezier bowed out
-to the right so they are visibly distinct.
+box size, fixed gaps, no physics.
+
+Edge routing has exactly one rule, which the prototype forced. An edge between **adjacent
+layers** drops from bottom-centre to top-centre as a bezier. Anything else, a back edge or
+a forward edge spanning more than one layer, would cut straight through the boxes in
+between, so it bows out past the side of the whole diagram (whichever side its endpoints
+sit nearer) and its label rides on the bow. Back edges are additionally dashed and greyed
+so a return arrow reads as one.
+
+The `viewBox` is computed from the boxes **and** the bow extents, with a negative `minX`
+when a bow goes left. Sizing off the boxes alone silently clips a bowed edge and its
+label, which is what the first prototype did.
 
 Each node and each edge is a `<g>` carrying the anchor id on a **generic** attribute:
 
@@ -173,6 +182,15 @@ Absent for every prose comment, so existing agent integrations are unaffected.
 Reviewer-editable diagrams, per-node version diffs, edge routing that avoids overlaps,
 sub-graphs or swimlanes, and any second fence type. 017's prototype fence reuses
 `anchorId` and `data-anchor-id` but is not built here.
+
+## Prototype
+
+Built before implementation at the reviewer's request: the real parser, layer assignment
+and SVG emitter, wired to a mock comment panel. It confirmed the layout is legible without
+a layout library, and caught two defects that are now folded into **Layout and SVG** above:
+multi-layer edges cutting through intervening boxes, and a `viewBox` sized off the boxes
+alone clipping a bowed edge's label. The parser, layering and emitter port across close to
+as-is; the mock panel is thrown away.
 
 ## Files touched
 
