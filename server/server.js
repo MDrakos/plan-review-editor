@@ -511,7 +511,7 @@ function loadDoc(s, docPath) {
 function loadDiff(s, spec, reviewerRefresh) {
   if (spec) s.diff.spec = spec;
   const model = collectDiff(s.diff.spec || {});
-  annotateRound(model, reviewerRefresh ? s.diff.prev : s.diff.model);
+  annotateRound(model, reviewerRefresh ? s.diff.prev || s.diff.model : s.diff.model);
   if (!reviewerRefresh) s.diff.prev = s.diff.model;
   s.diff.model = model;
   const resolved = resolveSpec(s.diff.spec || {});
@@ -1194,7 +1194,7 @@ const server = http.createServer(async (req, res) => {
     // the round: same loadDiff, same reanchor path, but the round baseline and
     // the agent's own present are untouched.
     if (method === 'POST' && pathname === '/api/refresh') {
-      const refreshBody = await readBody(req); // `reviewerId` only, to skip the initiator's own echo
+      await readBody(req); // drain; refresh needs no author scoping
       // LOAD-BEARING: guard AFTER the await, then mutate synchronously — same
       // race closure as submit/approve/interrupt above (FM-3 family), so two
       // refreshes racing each other, or a refresh racing a submit, resolve to
@@ -1209,9 +1209,7 @@ const server = http.createServer(async (req, res) => {
       } catch (err) {
         return sendJson(res, 400, { error: String((err && err.message) || err) });
       }
-      // `by` lets the initiating tab ignore its own echo (it refreshes inline);
-      // every OTHER reviewer's tab still repaints. /agent/present sends no `by`.
-      broadcast(s, 'doc', { version: s.doc.version, by: refreshBody.reviewerId || null });
+      broadcast(s, 'doc', { version: s.doc.version });
       return sendJson(res, 200, {
         ok: true,
         version: s.doc.version,

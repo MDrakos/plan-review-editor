@@ -129,9 +129,14 @@ async function refresh() {
   const res = await fetch(api('/api/state'));
   if (!res.ok) return;
   const s = await res.json();
+  const version = (s.doc && s.doc.version) || 0;
+  // Refresh is now reviewer-triggerable at will, so two of these can be in flight
+  // at once and resolve out of order. Never apply an older read over a newer one.
+  // Equal versions still apply: comments and chat move without bumping it.
+  if (version < state.version) return;
   state.status = s.status;
   state.diff = s.diff || null;
-  state.version = (s.doc && s.doc.version) || 0;
+  state.version = version;
   state.comments = (s.review && s.review.comments) || [];
   state.chat = s.chat || [];
   state.progress = s.progress || [];
@@ -150,20 +155,13 @@ function connect() {
   es.addEventListener('open', () => (el('chat-state').textContent = 'connected'));
   es.addEventListener('error', () => (el('chat-state').textContent = 'reconnecting…'));
   // A new round: the agent re-read the repo, so the whole diff is replaced.
-  es.addEventListener('doc', (e) => {
-    // Our own refresh click already called refresh() inline; without this the
-    // broadcast echo rebuilds the whole files DOM a second time. Mirrors the
-    // self-echo guard the `review` listener below has. An agent `present` sends
-    // no `by`, so it never matches and always repaints.
-    let by = null;
-    try {
-      by = (JSON.parse(e.data) || {}).by;
-    } catch {
-      /* older payloads carried no body */
-    }
-    if (by && by === reviewer.id) return;
-    refresh();
-  });
+  // A new round, or a reviewer re-read: the whole diff is replaced. This fires on
+  // our own refresh click too, after the click handler already refreshed inline —
+  // a duplicate render, deliberately left in. The obvious fix (skip the echo when
+  // it carries our own reviewerId) is wrong here: `reviewer.id` is stored per
+  // BROWSER, not per tab, so it also silences this reviewer's other tabs and lets
+  // them go stale invisibly. A second idempotent render is the cheaper mistake.
+  es.addEventListener('doc', () => refresh());
   es.addEventListener('status', (e) => {
     const d = JSON.parse(e.data);
     state.status = d.status;

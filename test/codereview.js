@@ -304,9 +304,14 @@ async function main() {
 
   const s7 = (await browser(`/api/state?session=${id}`)).data;
   check(
-    'the refresh body counts match the model it produced',
-    refreshed.data.additions === s7.diff.additions && refreshed.data.deletions === s7.diff.deletions,
-    `${refreshed.data.additions}/${refreshed.data.deletions} vs ${s7.diff.additions}/${s7.diff.deletions}`
+    'the refresh body additions match the model it produced',
+    refreshed.data.additions === s7.diff.additions,
+    `${refreshed.data.additions} vs ${s7.diff.additions}`
+  );
+  check(
+    'the refresh body deletions match the model it produced',
+    refreshed.data.deletions === s7.diff.deletions,
+    `${refreshed.data.deletions} vs ${s7.diff.deletions}`
   );
   const files7 = Object.fromEntries(s7.diff.files.map((f) => [f.path, f]));
   check(
@@ -318,6 +323,8 @@ async function main() {
   check('the comment survives a refresh instead of archiving', moved.archived === false, JSON.stringify(moved));
   check('the comment re-anchors to the line the refresh moved it to', moved.line === 9, String(moved.line));
   check('the refresh does not end the round', s7.status === 'reviewing', s7.status);
+  check('the refresh does not clear workingSince', s7.workingSince === beforeRefresh.workingSince, String(s7.workingSince));
+  check('the refresh does not wipe the round progress', s7.progress.length === beforeRefresh.progress.length, String(s7.progress.length));
   check(
     'the refresh is not agent activity',
     s7.lastAgentActivity === beforeRefresh.lastAgentActivity,
@@ -370,13 +377,13 @@ async function main() {
   await browser(`/api/interrupt?session=${id}`, { reviewerId: 'rev-1' });
   await code('wait', '--session', id, '--timeout', '20'); // drain the interrupt event
 
-  // A refresh racing a submit settles cleanly either way. Note what this can and
-  // cannot prove: unlike submit/interrupt, /api/refresh guards on `status` but
-  // never MUTATES it, so a guard placed before its await would produce the same
-  // observable result as one placed after. The ordering is therefore not
-  // testable from outside; the guard-after-await placement stands on matching
-  // its siblings, and what this test pins is that neither request is lost, no
-  // 500 escapes, and the round the submit opened survives the race.
+  // A refresh racing a submit settles cleanly either way. Be precise about what
+  // this proves. A guard placed BEFORE the await would be observable — it would
+  // let a refresh return 200 and re-read the diff under the working round the
+  // submit had already opened — but nothing here can force that one interleaving
+  // deterministically, so this test cannot single it out. It pins the rest:
+  // neither request is lost, no 500 escapes, and the submit's round survives.
+  // The guard-after-await placement stands on matching its siblings, not on this.
   const versionBeforeRace = (await browser(`/api/state?session=${id}`)).data.doc.version;
   const [raceRefresh, raceSubmit] = await Promise.all([
     browser(`/api/refresh?session=${id}`, { reviewerId: 'rev-1' }),
@@ -411,11 +418,19 @@ async function main() {
   const survived = await browser(`/api/state?session=${doomedSession.id}`);
   check('the session survives a failed refresh', survived.status === 200 && survived.data.status === 'reviewing', String(survived.status));
   check(
-    'a failed refresh leaves the diff model it could not replace intact',
-    survived.data.diff.files.length === doomedSession.files &&
-      survived.data.diff.additions === doomedSession.additions &&
-      survived.data.diff.deletions === doomedSession.deletions,
-    JSON.stringify({ now: survived.data.diff.files.length, was: doomedSession.files })
+    'a failed refresh leaves the file list it could not replace intact',
+    survived.data.diff.files.length === doomedSession.files,
+    `${survived.data.diff.files.length} vs ${doomedSession.files}`
+  );
+  check(
+    'a failed refresh leaves the additions count intact',
+    survived.data.diff.additions === doomedSession.additions,
+    `${survived.data.diff.additions} vs ${doomedSession.additions}`
+  );
+  check(
+    'a failed refresh leaves the deletions count intact',
+    survived.data.diff.deletions === doomedSession.deletions,
+    `${survived.data.diff.deletions} vs ${doomedSession.deletions}`
   );
   check('a failed refresh does not bump the version', survived.data.doc.version === 1, String(survived.data.doc.version));
   await code('stop', '--session', doomedSession.id);
