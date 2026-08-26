@@ -40,6 +40,7 @@ seeing each other.
 │ agent         │              │  · rendered plan document   │
 │ (Claude Code) │              │  · select text → comment    │
 │               │              │  · choice blocks            │
+│               │              │  · flow diagrams → comment  │
 │               │   feedback   │  · chat sidebar             │
 │               │ ◀─────────── │  · Submit review            │
 └──────────────┘              └─────────────────────────────┘
@@ -51,9 +52,10 @@ seeing each other.
 
 1. The agent starts a local server and presents a plan (markdown).
 2. The plan renders as an HTML document in your browser.
-3. You select text and leave inline comments, answer any choice blocks the
-   plan embeds, and can chat with the agent in a sidebar about anything —
-   related to the document or not.
+3. You select text and leave inline comments, click a box or an arrow in any
+   flow diagram to comment on that, answer any choice blocks the plan embeds,
+   and can chat with the agent in a sidebar about anything — related to the
+   document or not.
 4. **Submit review** bundles every comment, choice, and note and hands it to
    the agent. The session pauses while the agent reworks the plan.
 5. The reworked document loads into the same browser window and the cycle
@@ -276,6 +278,28 @@ byName, reason}`) alongside the raw `picks`, so the agent sees the agreed decisi
 **and** the underlying split. The resolve control appears only on divergence, so
 single-reviewer and all-agree blocks are unchanged.
 
+### Flow diagrams
+
+Plans can embed a flow the reviewer can comment on directly:
+
+````markdown
+```flow
+id: ratelimit
+request[Incoming request] -> limiter[Token bucket]: 1 token
+limiter -> store[Redis counter]: read count
+store -> limiter
+limiter -> response[200 / 429]
+```
+````
+
+The server lays it out and renders inline SVG, so there is no diagram library and
+no layout to specify. The reviewer clicks a **box or an arrow** to leave a comment
+on it, drags a box around several to comment on a group, and can pan and zoom the
+diagram (drag, ⌘/ctrl + scroll or pinch, double-click to fit). Diagram comments
+carry an `anchors` list in the submit bundle naming exactly which nodes and edges
+they are about, and they survive a rework round the same way a quoted comment
+does: a comment archives (never disappears) once the boxes it named are gone.
+
 ### Comparing versions
 
 Every rework round is a new version. Above the document, a **Compare** control
@@ -292,6 +316,7 @@ dismissible "what changed since your last review" highlight on each new round.
 - [x] Select text to leave inline comments
 - [x] Bundle comments and submit them as one review
 - [x] Interactive choice blocks inside documents
+- [x] Flow diagrams with commentable boxes and arrows
 - [x] Chat sidebar alongside the document
 - [x] `planreview` CLI and the blocking agent event loop
 - [x] Pause → rework → reload cycle in the same browser window

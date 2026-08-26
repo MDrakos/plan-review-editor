@@ -1529,3 +1529,120 @@ mark.hl {
 }
 
 .identity-edit:hover { background: var(--pr-navy-hover); }
+
+/* ---------- flow diagrams (```flow) ---------- */
+/*
+   Two rules keep this readable in both themes and both are easy to get wrong.
+   Anything drawn as content uses a `-text` variant, never the raw brand colour:
+   --pr-navy is the same in both themes by design, so a --pr-navy outline is
+   invisible on a dark surface. And anything sitting on a pastel fill uses that
+   pastel's paired `-ink`, never --pr-ink, which inverts: a commented node keeps
+   its --pr-change fill in dark mode, so --pr-ink on it would vanish.
+*/
+
+.flow-block {
+  position: relative;
+  margin: 18px 0;
+  border: 1px solid var(--pr-rule);
+  border-radius: 6px;
+  background: var(--pr-surface);
+  overflow: hidden;
+  min-height: 240px;
+  display: flex;
+  align-items: center;
+}
+
+.flow-svg {
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  font-family: var(--pr-sans);
+  touch-action: none;
+  cursor: grab;
+}
+.flow-svg.panning { cursor: grabbing; }
+.flow-svg.selecting { cursor: crosshair; }
+
+.flow-box { fill: var(--pr-surface); stroke: var(--pr-navy-text); stroke-width: 1.5; }
+.flow-node-label { font-size: 13px; fill: var(--pr-ink); }
+.flow-line { fill: none; stroke: var(--pr-navy-text); stroke-width: 1.6; }
+.flow-svg marker path { fill: var(--pr-navy-text); }
+.flow-edge.back .flow-line { stroke: var(--pr-ink-faint); stroke-dasharray: 5 4; }
+.flow-edge.back marker path { fill: var(--pr-ink-faint); }
+
+/* A fat transparent strip so a thin line is clickable. */
+.flow-hit { fill: none; stroke: transparent; stroke-width: 18; cursor: pointer; }
+
+/* An edge has no fill to tint, so a commented one gets a halo under the line. */
+.flow-halo { fill: none; stroke: none; stroke-width: 9; stroke-linecap: round; }
+
+.flow-edge-label {
+  font-size: 11.5px;
+  fill: var(--pr-ink-muted);
+  paint-order: stroke;
+  stroke: var(--pr-surface);
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+
+.flow-node, .flow-edge { cursor: pointer; outline: none; }
+.flow-node:hover .flow-box { fill: var(--pr-hover); stroke: var(--pr-blue-text); }
+.flow-edge:hover .flow-line { stroke: var(--pr-blue-text); stroke-width: 2.4; }
+.flow-node:focus-visible .flow-box,
+.flow-edge:focus-visible .flow-line { stroke: var(--pr-blue-text); stroke-width: 3; }
+
+.flow-node.commented .flow-box { fill: var(--pr-change); stroke: var(--pr-change-ink); stroke-width: 2; }
+.flow-node.commented .flow-node-label { fill: var(--pr-change-ink); }
+.flow-edge.commented .flow-halo { stroke: var(--pr-change); }
+.flow-edge.commented .flow-line { stroke: var(--pr-change-ink); stroke-width: 2; }
+
+.flow-node.selected .flow-box { fill: var(--pr-hover); stroke: var(--pr-blue-text); stroke-width: 2.5; }
+.flow-edge.selected .flow-line { stroke: var(--pr-blue-text); stroke-width: 3; }
+
+.flow-marquee {
+  fill: color-mix(in srgb, var(--pr-blue-text) 12%, transparent);
+  stroke: var(--pr-blue-text);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.flow-tools {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 3px;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+.flow-block:hover .flow-tools,
+.flow-block:focus-within .flow-tools { opacity: 1; }
+
+.flow-tools button {
+  font-family: var(--pr-sans);
+  font-size: 12px;
+  line-height: 1;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--pr-rule);
+  border-radius: 4px;
+  background: var(--pr-surface);
+  color: var(--pr-ink-muted);
+  cursor: pointer;
+}
+.flow-tools button:hover { background: var(--pr-hover); color: var(--pr-navy-text); border-color: var(--pr-blue-text); }
+.flow-tools button[aria-pressed="true"] { background: var(--pr-navy-text); color: var(--pr-surface); border-color: var(--pr-navy-text); }
+
+.flow-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  font-size: 11px;
+  color: var(--pr-ink-faint);
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+  pointer-events: none;
+}
+.flow-block:hover .flow-hint { opacity: 1; }

@@ -58,6 +58,26 @@ user is never boxed into your options — their custom text arrives in
 `choices[id]` just like a preset would. Add `other: false` to a block to force a
 pick from the listed options only.
 
+**Draw a flow as a diagram, not as prose.** When the plan describes a sequence of
+steps, a request path, or a state machine, write it as a `flow` fence. The server
+renders it to SVG and the reviewer can click a box or an arrow to object to that
+specific step, which is where the useful disagreements land:
+
+````markdown
+```flow
+id: ratelimit
+request[Incoming request] -> limiter[Token bucket]: 1 token
+limiter -> store[Redis counter]: read count
+store -> limiter
+limiter -> response[200 / 429]
+```
+````
+
+`id:` is required and namespaces the diagram. `name[Human label]` gives a box a
+stable id plus a display label; a bare `name` uses the id as the label. Comments
+on the diagram come back with an `anchors` list naming the exact nodes and edges
+they are about — more than one entry means the reviewer selected a group.
+
 **Link external references inline.** When the plan names an external resource — a
 Jira issue key (`ENG-1234`), a Confluence page, a design doc, a PR, or any
 off-plan URL — resolve it to its real URL (via your Jira/Confluence connectors or

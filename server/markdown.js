@@ -5,13 +5,8 @@
 // checkboxes), fenced code, tables, and inline code/bold/italic/links.
 // Deliberately not full CommonMark — plans don't need it.
 
-function escapeHtml(s) {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+const { escapeHtml } = require('./escapehtml');
+const { renderFlow } = require('./flow');
 
 function inline(text) {
   let out = escapeHtml(text);
@@ -27,6 +22,7 @@ function inline(text) {
 
 function renderFence(lang, body) {
   if (lang === 'choice') return renderChoice(body);
+  if (lang === 'flow') return renderFlow(body);
   const cls = lang ? ` class="language-${escapeHtml(lang)}"` : '';
   return `<pre><code${cls}>${escapeHtml(body)}</code></pre>`;
 }

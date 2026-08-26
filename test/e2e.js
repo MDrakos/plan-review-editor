@@ -30,7 +30,7 @@ let env;
 const CLI = path.join(__dirname, '..', 'bin', 'planreview.js');
 const { render, renderDiff, renderVersionDiff, parseChoiceSpecs } = require(path.join(__dirname, '..', 'server', 'markdown'));
 const liveness = require(path.join(__dirname, '..', 'public', 'liveness'));
-const { quoteAnchors } = require(path.join(__dirname, '..', 'server', 'anchor'));
+const { quoteAnchors, idAnchors } = require(path.join(__dirname, '..', 'server', 'anchor'));
 
 // Ask the OS for a free TCP port: bind port 0, read the actual port back off the
 // listening socket, then release it. Every worktree that runs this suite gets
@@ -3072,6 +3072,162 @@ async function main() {
     JSON.stringify(carried.data.review)
   );
   await cli('stop', '--session', cy.id);
+
+  console.log('issue 016: flow diagrams — rendering, id anchoring, carry-forward, and the bundle');
+  const FLOW_A =
+    '# Flow\n\nBefore the diagram.\n\n```flow\nid: rl\nrequest[Incoming request] -> limiter[Token bucket]: 1 token\n' +
+    'limiter -> store[Redis counter]: read count\nstore -> limiter\nlimiter -> response[200 / 429]\n```\n';
+  // The same flow with `store` (and both its edges) taken out.
+  const FLOW_B =
+    '# Flow\n\nBefore the diagram.\n\n```flow\nid: rl\nrequest[Incoming request] -> limiter[Token bucket]: 1 token\n' +
+    'limiter -> response[200 / 429]\n```\n';
+
+  const flowHtml = render(FLOW_A);
+  check(
+    'a ```flow fence renders inline SVG with an anchor id per node and per edge',
+    /<svg class="flow-svg"/.test(flowHtml) &&
+      flowHtml.includes('data-anchor-id="rl:node:limiter"') &&
+      flowHtml.includes('data-anchor-id="rl:edge:limiter-&gt;store"') &&
+      flowHtml.includes('Redis counter'),
+    flowHtml.slice(0, 200)
+  );
+  check(
+    'a malformed flow fence falls back to plain code, exactly as a malformed choice does',
+    render('# T\n\n```flow\nnot a diagram\n```\n').includes('<pre><code class="language-flow">')
+  );
+  check(
+    'a document with no flow fence is untouched by the feature',
+    !/flow-/.test(render('# T\n\nJust prose, and `code`.\n\n```js\nlet a = 1;\n```\n'))
+  );
+  check(
+    'idAnchors is not fooled by a prefix of a longer id',
+    idAnchors('rl:node:store', flowHtml) === true &&
+      idAnchors('rl:node:stor', flowHtml) === false &&
+      idAnchors('rl:edge:limiter->store', flowHtml) === true
+  );
+
+  const flowDoc = path.join(dir, 'planreview-e2e-flow.md');
+  fs.writeFileSync(flowDoc, FLOW_A);
+  const fl = await cli('start', flowDoc, '--no-open');
+  const flState = await browser(`/api/state?session=${fl.id}`);
+  check(
+    'the served document carries the rendered diagram and its anchor ids',
+    flState.data.doc.html.includes('data-anchor-id="rl:node:store"') &&
+      flState.data.doc.html.includes('data-anchor-id="rl:edge:store-&gt;limiter"')
+  );
+
+  await browser(`/api/review-state?session=${fl.id}`, {
+    reviewerId: 'A',
+    comments: [
+      { id: 'fn', quote: 'Redis counter', text: 'why Redis?', anchors: ['rl:node:store'], author: { id: 'A' } },
+      { id: 'fe', quote: 'Token bucket → Redis counter', text: 'this read is hot', anchors: ['rl:edge:limiter->store'], author: { id: 'A' } },
+      { id: 'fg', quote: 'Redis counter, 200 / 429', text: 'these two are one step', anchors: ['rl:node:store', 'rl:node:response'], author: { id: 'A' } },
+      { id: 'fp', quote: 'Before the diagram.', text: 'a prose comment', author: { id: 'A' } },
+    ],
+    choices: {},
+  });
+
+  const flSubmit = cli('wait', '--session', fl.id, '--timeout', '10');
+  await sleep(300);
+  await browser(`/api/submit?session=${fl.id}`, { comments: [], choices: {}, note: '' });
+  const flEv = await flSubmit;
+  const bundled = (flEv.comments || []).find((c) => c.id === 'fn');
+  check(
+    'the submit bundle carries anchors naming what the comment is attached to',
+    !!bundled &&
+      Array.isArray(bundled.anchors) &&
+      bundled.anchors[0] === 'rl:node:store' &&
+      !('anchors' in (flEv.comments.find((c) => c.id === 'fp') || {})),
+    JSON.stringify(bundled)
+  );
+
+  // Re-present the SAME diagram: every diagram comment must still be active.
+  fs.writeFileSync(flowDoc, FLOW_A + '\nA reworked addition.\n');
+  await cli('present', flowDoc, '--session', fl.id);
+  const flKept = await browser(`/api/state?session=${fl.id}`);
+  const flById = (st) => Object.fromEntries(st.data.review.comments.map((c) => [c.id, c]));
+  const kept = flById(flKept);
+  check(
+    'a re-present that keeps the diagram carries every node/edge comment forward, unarchived',
+    kept.fn && !kept.fn.archived && kept.fe && !kept.fe.archived && kept.fg && !kept.fg.archived,
+    JSON.stringify(flKept.data.review.comments.map((c) => [c.id, !!c.archived]))
+  );
+
+  // Re-present with `store` removed: its node and edge comments archive; the
+  // group comment survives on `response`, which is still there.
+  await browser(`/api/submit?session=${fl.id}`, { comments: [], choices: {}, note: '' });
+  fs.writeFileSync(flowDoc, FLOW_B);
+  await cli('present', flowDoc, '--session', fl.id);
+  const flGone = flById(await browser(`/api/state?session=${fl.id}`));
+  check(
+    'removing a node archives its comment rather than dropping it',
+    flGone.fn && flGone.fn.archived === true && flGone.fn.text === 'why Redis?',
+    JSON.stringify(flGone.fn)
+  );
+  check(
+    'removing a node archives the edge comments that pointed at it too',
+    flGone.fe && flGone.fe.archived === true
+  );
+  check(
+    'a group comment survives while ANY member survives',
+    flGone.fg && flGone.fg.archived === false,
+    JSON.stringify(flGone.fg)
+  );
+  check(
+    'a prose comment in the same document still anchors on its quote',
+    flGone.fp && flGone.fp.archived === false
+  );
+
+  // Now take the last member away as well.
+  await browser(`/api/submit?session=${fl.id}`, { comments: [], choices: {}, note: '' });
+  fs.writeFileSync(flowDoc, '# Flow\n\nBefore the diagram.\n\nNo diagram at all now.\n');
+  await cli('present', flowDoc, '--session', fl.id);
+  const flAllGone = flById(await browser(`/api/state?session=${fl.id}`));
+  check(
+    'a group comment archives once the agent has removed all of its members',
+    flAllGone.fg && flAllGone.fg.archived === true,
+    JSON.stringify(flAllGone.fg)
+  );
+  await cli('stop', '--session', fl.id);
+
+  // Two regressions this feature can ship with that are invisible in whatever
+  // theme (and whatever click) the author happened to try. Both get an assertion
+  // rather than an eyeball; everything else about the interaction is verified in
+  // a real browser, because synthesised clicks skip the very retarget below.
+  const flowCss = fs
+    .readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8')
+    .split('\n')
+    .filter((l) => /^\s*\.flow-|^\s*\.flow-svg marker/.test(l));
+  check(
+    'theme: no flow- rule paints with a literal colour or a brand variable that does not move between themes',
+    flowCss.length > 20 &&
+      !flowCss.some((l) => /#[0-9a-fA-F]{3,8}\b/.test(l)) &&
+      !flowCss.some((l) => /var\(--pr-(navy|blue|ink)\)/.test(l) && !/--pr-ink\)/.test(l)),
+    flowCss.filter((l) => /#[0-9a-fA-F]{3,8}\b|var\(--pr-(navy|blue)\)/.test(l)).join(' | ')
+  );
+  check(
+    'theme: a commented node labels itself with the pastel\'s paired ink, not --pr-ink (which inverts to white on yellow)',
+    flowCss.some((l) => /\.flow-node\.commented \.flow-node-label\b/.test(l) && /--pr-change-ink/.test(l)),
+    flowCss.filter((l) => /commented/.test(l)).join(' | ')
+  );
+
+  // Capturing the pointer on `pointerdown` retargets the following `click` to the
+  // <svg>, so closest('[data-anchor-id]') finds nothing and clicking a box
+  // silently stops opening the composer. Capture belongs in `pointermove`, once
+  // a drag is confirmed — except on the marquee branch, which never clicks.
+  const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const pd = appSrc.slice(appSrc.indexOf("svg.addEventListener('pointerdown'"));
+  const panBranch = pd.slice(pd.indexOf('drag = { x: e.clientX'), pd.indexOf("svg.addEventListener('pointermove'"));
+  check(
+    'pan: pointerdown must NOT capture the pointer — capture retargets the click and kills click-to-comment',
+    pd.indexOf('drag = { x: e.clientX') !== -1 && !/setPointerCapture/.test(panBranch),
+    panBranch.trim().slice(0, 160)
+  );
+  check(
+    'pan: capture is taken in pointermove, once the drag passes the 4px threshold',
+    /Math\.abs\(dx\) \+ Math\.abs\(dy\) < 4/.test(appSrc) &&
+      /if \(!moved\) \{\s*moved = true;\s*svg\.classList\.add\('panning'\);\s*try \{\s*svg\.setPointerCapture/.test(appSrc)
+  );
 
   console.log('issue 008: a re-present carries a choice resolution forward (persists until cleared)');
   const rcDoc = path.join(dir, 'planreview-e2e-carry-res.md');

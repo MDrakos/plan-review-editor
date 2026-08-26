@@ -178,6 +178,9 @@ const state = {
 
 let pendingRange = null;
 let pendingQuote = '';
+// Set instead of pendingRange when the composer was opened from a flow diagram:
+// a non-empty list of node/edge anchor ids the comment will be attached to.
+let pendingAnchors = null;
 let editingId = null; // id of the comment currently open for inline editing
 
 // ---------- status & document ----------
@@ -272,6 +275,7 @@ function renderDoc(doc) {
   docEl.innerHTML =
     doc.html || '<p class="empty">Waiting for the agent to present a plan…</p>';
   highlightDoc();
+  bindFlows();
   state.version = doc.version;
   state.versions = doc.versions || [];
   state.presentedAt = doc.presentedAt || null;
@@ -415,6 +419,7 @@ async function showDiff() {
     ? data.html
     : '<p class="empty">No changes between these versions.</p>';
   highlightDoc();
+  bindFlows();
   diffLegend.hidden = false;
   diffShowBtn.hidden = true;
   diffCloseBtn.hidden = false;
@@ -451,7 +456,11 @@ async function fetchState() {
   state.resolutions = (s.review && s.review.resolutions) || {};
   // Only active comments anchor into the document; archived ones (their quote is
   // gone from the reworked plan) have nothing to highlight and live collapsed.
-  for (const c of state.comments) if (!c.archived) anchorByQuote(c.quote, c.id);
+  for (const c of state.comments)
+    if (!c.archived) {
+      if (c.anchors) markFlowAnchors(c.anchors, c.id);
+      else anchorByQuote(c.quote, c.id);
+    }
   renderComments();
   bindChoices();
   hideTyping();
@@ -1066,6 +1075,7 @@ document.addEventListener('mouseup', (e) => {
   if (state.status !== 'reviewing') return;
   if (state.diffing) return; // the diff view is read-only — no commenting on it
   if (composerEl.contains(e.target) || fabEl.contains(e.target)) return;
+  if (e.target.closest && e.target.closest('.flow-block')) return; // panning, not selecting
   // let the selection settle before reading it
   setTimeout(() => {
     const range = selectionInDoc();
@@ -1086,22 +1096,29 @@ document.querySelector('.doc-pane').addEventListener('scroll', () => {
   fabEl.hidden = true;
 });
 
-document.getElementById('fab-btn').addEventListener('click', () => {
-  if (!pendingRange) return;
+// Open the composer next to `rect`, quoting `quote`. Shared by the selection fab
+// and by a click on a diagram node or edge.
+function openComposerAt(rect, quote) {
   fabEl.hidden = true;
-  const rect = pendingRange.getBoundingClientRect();
-  composerQuoteEl.textContent = truncate(pendingQuote, 160);
+  composerQuoteEl.textContent = truncate(quote, 160);
   composerTextEl.value = '';
   composerEl.style.left = `${Math.max(16, Math.min(rect.left, window.innerWidth - 380))}px`;
   composerEl.style.top = `${Math.min(rect.bottom + 8, window.innerHeight - 220)}px`;
   composerEl.hidden = false;
   composerTextEl.focus();
+}
+
+document.getElementById('fab-btn').addEventListener('click', () => {
+  if (!pendingRange) return;
+  openComposerAt(pendingRange.getBoundingClientRect(), pendingQuote);
 });
 
 function dismissComposer() {
   composerEl.hidden = true;
   pendingRange = null;
+  pendingAnchors = null;
   pendingQuote = '';
+  clearFlowSelection();
 }
 
 document.getElementById('composer-cancel').addEventListener('click', dismissComposer);
@@ -1115,10 +1132,16 @@ composerTextEl.addEventListener('keydown', (e) => {
 
 function saveComment() {
   const text = composerTextEl.value.trim();
-  if (!text || !pendingRange) return;
+  if (!text || (!pendingRange && !pendingAnchors)) return;
   const id = 'c' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
-  highlightRange(pendingRange, id);
-  state.comments.push({ id, quote: pendingQuote, text, ts: Date.now(), author: author() });
+  const comment = { id, quote: pendingQuote, text, ts: Date.now(), author: author() };
+  if (pendingAnchors) {
+    comment.anchors = pendingAnchors;
+    markFlowAnchors(pendingAnchors, id);
+  } else {
+    highlightRange(pendingRange, id);
+  }
+  state.comments.push(comment);
   window.getSelection().removeAllRanges();
   dismissComposer();
   renderComments();
@@ -1514,8 +1537,9 @@ function deleteComment(id) {
 // card — never by recolouring the mark. The highlight colour is semantic
 // ("there is a comment here"), so flashing it would say something untrue.
 function focusComment(id) {
-  const mark = docEl.querySelector(`mark[data-cid="${id}"]`);
-  if (mark) mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const target =
+    docEl.querySelector(`mark[data-cid="${id}"]`) || docEl.querySelector(`[data-cids~="${id}"]`);
+  if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
   for (const card of commentListEl.querySelectorAll('.comment-card.focused'))
     card.classList.remove('focused');
   const card = commentListEl.querySelector(`.comment-card[data-cid="${id}"]`);
@@ -1688,6 +1712,14 @@ function highlightRange(range, cid) {
 }
 
 function removeHighlight(cid) {
+  for (const g of docEl.querySelectorAll(`[data-cids~="${cid}"]`)) {
+    const rest = g.dataset.cids.split(' ').filter((x) => x && x !== cid);
+    if (rest.length) g.dataset.cids = rest.join(' ');
+    else {
+      delete g.dataset.cids;
+      g.classList.remove('commented');
+    }
+  }
   for (const mark of docEl.querySelectorAll(`mark[data-cid="${cid}"]`)) {
     const parent = mark.parentNode;
     while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
@@ -1769,6 +1801,309 @@ function renderIdentity() {
   });
   el.append(lead, label, edit);
 }
+
+// ---------- flow diagrams (```flow) ----------
+//
+// A diagram is a viewport, not a picture: everything drawable sits in one
+// <g class="flow-pan"> and the whole pan/zoom interaction is a single transform
+// on it. Clicking a box or an arrow opens the same composer a text selection
+// does; the comment carries `anchors` (node/edge ids) instead of anchoring on
+// its quote, and the server carries it forward on those ids.
+
+const flowClamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function flowEl(id) {
+  return docEl.querySelector(`[data-anchor-id="${CSS.escape(id)}"]`);
+}
+
+// Mark every still-present member of `anchors` as carrying comment `cid`. Ids
+// that no longer exist are simply skipped — the comment itself is unaffected,
+// exactly as a quote that no longer anchors is.
+function markFlowAnchors(anchors, cid) {
+  for (const id of anchors) {
+    const el = flowEl(id);
+    if (!el) continue;
+    el.classList.add('commented');
+    const cids = (el.dataset.cids || '').split(' ').filter(Boolean);
+    if (!cids.includes(cid)) cids.push(cid);
+    el.dataset.cids = cids.join(' ');
+  }
+}
+
+function clearFlowSelection() {
+  for (const el of docEl.querySelectorAll('.flow-node.selected, .flow-edge.selected'))
+    el.classList.remove('selected');
+}
+
+// The composer's quote for a group: the members' visible labels, abbreviated
+// past three so a twelve-box selection doesn't fill the card.
+function flowLabel(ids) {
+  const names = ids.map((id) => (flowEl(id) || {}).dataset?.label).filter(Boolean);
+  if (names.length <= 3) return names.join(', ');
+  return `${names.slice(0, 2).join(', ')} and ${names.length - 2} more`;
+}
+
+function flowCommentable() {
+  return state.status === 'reviewing' && !state.diffing;
+}
+
+function openFlowComposer(els) {
+  if (!els.length) return;
+  const ids = els.map((el) => el.dataset.anchorId);
+  // Already commented, and only one thing picked: take the reviewer to that
+  // thread rather than starting a second one, as clicking a highlight does.
+  if (els.length === 1 && els[0].dataset.cids) {
+    focusComment(els[0].dataset.cids.split(' ')[0]);
+    return;
+  }
+  if (!flowCommentable()) return;
+  pendingRange = null;
+  pendingAnchors = ids;
+  pendingQuote = flowLabel(ids);
+  openComposerAt(els[0].getBoundingClientRect(), pendingQuote);
+}
+
+// Wire pan / zoom / box-select onto every diagram in the freshly rendered
+// document. View state is per-diagram, in memory, and deliberately resets on
+// re-present: a pan carried across a rework round leaves the reviewer looking at
+// empty space where a deleted box used to be.
+function bindFlows() {
+  for (const block of docEl.querySelectorAll('.flow-block')) {
+    if (block.dataset.flowBound) continue;
+    block.dataset.flowBound = '1';
+    const svg = block.querySelector('.flow-svg');
+    const pan = block.querySelector('.flow-pan');
+    if (!svg || !pan) continue;
+
+    let scale = 1;
+    let tx = 0;
+    let ty = 0;
+    const apply = () => pan.setAttribute('transform', `translate(${tx} ${ty}) scale(${scale})`);
+    // Screen to user space via the element's own CTM. A width ratio silently
+    // mis-maps once the SVG is wider than its viewBox and letterboxes, and the
+    // diagram then drifts under the pointer as it zooms.
+    const toUser = (cx, cy) => {
+      const m = svg.getScreenCTM();
+      if (!m) return { x: 0, y: 0 };
+      const p = new DOMPoint(cx, cy).matrixTransform(m.inverse());
+      return { x: p.x, y: p.y };
+    };
+    const pxToUser = () => {
+      const m = svg.getScreenCTM();
+      return m && m.a ? 1 / m.a : 1;
+    };
+    // Zoom about a point: that point must land where it already is, so the
+    // translate absorbs the scale change instead of the diagram drifting.
+    const zoomTo = (next, px, py) => {
+      next = flowClamp(next, 0.4, 5);
+      tx = px - (px - tx) * (next / scale);
+      ty = py - (py - ty) * (next / scale);
+      scale = next;
+      apply();
+    };
+    const centre = () => {
+      const r = svg.getBoundingClientRect();
+      return toUser(r.left + r.width / 2, r.top + r.height / 2);
+    };
+    const reset = () => {
+      scale = 1;
+      tx = 0;
+      ty = 0;
+      apply();
+    };
+
+    // A plain wheel must still scroll the page — only the zoom gesture is taken.
+    // A trackpad pinch arrives as a ctrlKey wheel, so pinch works for free.
+    svg.addEventListener(
+      'wheel',
+      (e) => {
+        if (!e.ctrlKey && !e.metaKey) return;
+        e.preventDefault();
+        const p = toUser(e.clientX, e.clientY);
+        zoomTo(scale * Math.exp(-e.deltaY / 300), p.x, p.y);
+      },
+      { passive: false }
+    );
+
+    const marquee = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    marquee.setAttribute('class', 'flow-marquee');
+    let drag = null;
+    let marq = null;
+    let moved = false;
+    let selectMode = false;
+
+    const drawMarquee = (cx, cy) => {
+      const a = toUser(marq.x, marq.y);
+      const b = toUser(cx, cy);
+      marquee.setAttribute('x', Math.min(a.x, b.x));
+      marquee.setAttribute('y', Math.min(a.y, b.y));
+      marquee.setAttribute('width', Math.abs(b.x - a.x));
+      marquee.setAttribute('height', Math.abs(b.y - a.y));
+      if (!marquee.parentNode) svg.appendChild(marquee);
+    };
+    // An item is in the box when its bounding-box CENTRE is, for nodes and edges
+    // alike. Plain overlap over-selects wildly: a long bowed edge has a bounding
+    // box spanning most of the diagram.
+    const hits = (cx, cy) => {
+      const l = Math.min(marq.x, cx);
+      const r = Math.max(marq.x, cx);
+      const t = Math.min(marq.y, cy);
+      const b = Math.max(marq.y, cy);
+      const out = [];
+      for (const el of svg.querySelectorAll('[data-anchor-id]')) {
+        const k = el.getBoundingClientRect();
+        const mx = k.left + k.width / 2;
+        const my = k.top + k.height / 2;
+        if (mx >= l && mx <= r && my >= t && my <= b) out.push(el);
+      }
+      return out;
+    };
+
+    svg.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      moved = false;
+      if (e.shiftKey || selectMode) {
+        e.preventDefault();
+        marq = { x: e.clientX, y: e.clientY };
+        clearFlowSelection();
+        drawMarquee(e.clientX, e.clientY);
+        svg.setPointerCapture(e.pointerId);
+        return;
+      }
+      // Deliberately NO setPointerCapture here. While capture is held the browser
+      // retargets the following `click` to the capturing <svg>, so
+      // closest('[data-anchor-id]') finds nothing and clicking a box silently
+      // stops opening the composer. Capture is taken below, once it is a real drag.
+      drag = { x: e.clientX, y: e.clientY, tx, ty };
+    });
+
+    svg.addEventListener('pointermove', (e) => {
+      if (marq) {
+        drawMarquee(e.clientX, e.clientY);
+        moved = true;
+        clearFlowSelection();
+        for (const el of hits(e.clientX, e.clientY)) el.classList.add('selected');
+        return;
+      }
+      if (!drag) return;
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
+      if (!moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+      if (!moved) {
+        moved = true;
+        svg.classList.add('panning');
+        try {
+          svg.setPointerCapture(e.pointerId);
+        } catch {
+          /* the pointer may already be gone */
+        }
+      }
+      const k = pxToUser();
+      tx = drag.tx + dx * k;
+      ty = drag.ty + dy * k;
+      apply();
+    });
+
+    const finish = (e) => {
+      if (marq) {
+        let sel = hits(e.clientX, e.clientY);
+        // A shift-click with no drag: fall back to whatever is under the pointer.
+        if (!sel.length) {
+          const under = document.elementFromPoint(e.clientX, e.clientY);
+          const g = under && under.closest && under.closest('[data-anchor-id]');
+          if (g) sel = [g];
+        }
+        marquee.remove();
+        marq = null;
+        moved = true; // swallow the click this release is about to produce
+        try {
+          svg.releasePointerCapture(e.pointerId);
+        } catch {
+          /* already released */
+        }
+        clearFlowSelection();
+        for (const el of sel) el.classList.add('selected');
+        openFlowComposer(sel);
+        return;
+      }
+      if (!drag) return;
+      drag = null;
+      svg.classList.remove('panning');
+      try {
+        svg.releasePointerCapture(e.pointerId);
+      } catch {
+        /* already released */
+      }
+    };
+    svg.addEventListener('pointerup', finish);
+    svg.addEventListener('pointercancel', finish);
+
+    // A pan or a box-select that ends over an item must not also click that item.
+    svg.addEventListener(
+      'click',
+      (e) => {
+        if (!moved) return;
+        e.stopPropagation();
+        e.preventDefault();
+        moved = false;
+      },
+      true
+    );
+    svg.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      reset();
+    });
+
+    block.querySelector('.flow-tools').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      e.stopPropagation();
+      if (b.dataset.mode === 'select') {
+        selectMode = !selectMode;
+        b.setAttribute('aria-pressed', String(selectMode));
+        svg.classList.toggle('selecting', selectMode);
+        if (!selectMode) clearFlowSelection();
+        return;
+      }
+      const c = centre();
+      if (b.dataset.zoom === 'in') zoomTo(scale * 1.25, c.x, c.y);
+      else if (b.dataset.zoom === 'out') zoomTo(scale / 1.25, c.x, c.y);
+      else reset();
+    });
+
+    block.addEventListener('keydown', (e) => {
+      if (e.target.closest('.flow-tools')) return;
+      if (e.key === '+' || e.key === '=') {
+        e.preventDefault();
+        const c = centre();
+        zoomTo(scale * 1.25, c.x, c.y);
+      } else if (e.key === '-') {
+        e.preventDefault();
+        const c = centre();
+        zoomTo(scale / 1.25, c.x, c.y);
+      } else if (e.key === '0') {
+        e.preventDefault();
+        reset();
+      }
+    });
+  }
+}
+
+// Click and Enter are delegated to the document, so they survive every
+// re-render; the per-diagram state above is what needs re-binding.
+docEl.addEventListener('click', (e) => {
+  if (e.target.closest('.flow-tools')) return;
+  const g = e.target.closest('[data-anchor-id]');
+  if (g) openFlowComposer([g]);
+});
+
+docEl.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const g = e.target.closest && e.target.closest('[data-anchor-id]');
+  if (!g) return;
+  e.preventDefault();
+  openFlowComposer([g]);
+});
 
 // ---------- boot ----------
 
