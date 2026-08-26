@@ -1,7 +1,7 @@
 # 016 — flow diagram the reviewer can comment on
 
-**Status:** approved 2026-08-25, prototype built and reviewed
-**Issue:** `issues/todo/016-whiteboard-flow-diagram.md`
+**Status:** shipped 2026-08-26 in 9c71adf ([PR #34](https://github.com/MDrakos/plan-review-editor/pull/34))
+**Issue:** `issues/done/016-whiteboard-flow-diagram.md`
 **Sibling:** `issues/todo/017-inline-prototypes-in-the-plan.md` (reuses the anchor field defined here)
 
 ## What this builds
@@ -298,8 +298,9 @@ above.
 
 ## Files touched
 
-- `server/markdown.js` — `flow` in the `renderFence` dispatch, plus the parser, layout and
-  SVG emitter.
+- `server/flow.js` (new) — the parser, layout and SVG emitter, with its own self-check;
+  `server/markdown.js` gains one line in the `renderFence` dispatch, and `escapeHtml` moved
+  to `server/escapehtml.js` so the two files do not require each other.
 - `server/anchor.js` — `idAnchors`.
 - `server/server.js` — one line in the carry-forward.
 - `public/app.js` — click/Enter on `[data-anchor-id]`, `pendingAnchors` in the composer,

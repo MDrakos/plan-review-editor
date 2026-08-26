@@ -1,6 +1,6 @@
 # 017 — live prototypes in the plan, commentable like the document
 
-**Type:** feature (needs a brainstorming pass; shares an anchoring decision with 016)
+**Type:** feature (needs a brainstorming pass; the anchoring decision is already made, see below)
 **Status:** open
 **Area:** `server/markdown.js` (new fence), `public/app.js` (frame host, element anchoring,
 `renderDoc`), `server/server.js` + `server/anchor.js` (carry-forward), `public/style.css`
@@ -77,10 +77,14 @@ So a comment on "the Save button" needs one of:
 
 ## Design decisions to settle first
 
-- **Anchor model** — the three options above. This is the same decision 016 faces for
-  diagram nodes: both need a comment anchored to *a thing that is not a run of prose*.
-  Whichever ships first should introduce the anchor kind (`quote` | `id`) and the other
-  should reuse it, rather than each growing its own.
+- ~~**Anchor model**~~ — **settled by 016, reuse it.** A comment carries an optional
+  `anchors` field: a non-empty list of ids, absent on a prose comment. The element itself
+  carries `data-anchor-id="<fenceId>:<kind>:<id>"`, the server matches on that attribute
+  in the rendered HTML (`idAnchors`, `server/anchor.js`), and a multi-item comment survives
+  while any one member does. Do not grow a second model for prototype elements: give the
+  element a `data-anchor-id` and the carry-forward, the panel card and the bundle already
+  work. The open part is the frame boundary, not the anchor: `data-anchor-id` inside a
+  sandboxed iframe is invisible to both `idAnchors` and the parent document.
 - **How much prototype is a prototype.** Markup + scoped CSS only (static, safe, boring),
   vs. `allow-scripts` for real interaction (a tab bar you can actually click). Scripts are
   safe *inside* the sandbox; the cost is that the reviewer can now change the prototype's
@@ -119,4 +123,6 @@ So a comment on "the Save button" needs one of:
 - `server/server.js:478-485` — comment carry-forward / archiving on re-present.
 - `public/app.js:1121` — the comment record (`{ id, quote, text, ts, author }`).
 - `public/app.js:1703` — `anchorByQuote`, which cannot cross into a sandboxed frame.
-- `issues/todo/016-whiteboard-flow-diagram.md` — the shared non-text anchor decision.
+- `issues/done/016-whiteboard-flow-diagram.md` — shipped the `anchors` model this reuses.
+- `server/flow.js`, `server/anchor.js` (`idAnchors`), `public/app.js` (`markFlowAnchors`,
+  `openFlowComposer`) — the working non-text anchor path, end to end.

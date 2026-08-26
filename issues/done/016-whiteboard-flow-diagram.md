@@ -1,9 +1,16 @@
 # 016 — a whiteboard flow diagram the reviewer can comment on
 
-**Type:** feature (needs a brainstorming pass before implementing)
-**Status:** open
-**Area:** `server/markdown.js` (new fence + SVG render), `server/anchor.js` + `server/server.js`
-(comment carry-forward), `public/app.js` (node selection, comment anchoring), `public/style.css`
+**Type:** feature
+**Status:** done — merged 2026-08-26 in 9c71adf ([PR #34](https://github.com/MDrakos/plan-review-editor/pull/34))
+**Design:** `docs/specs/2026-08-25-016-whiteboard-flow-diagram-design.md`
+**Shipped in:** `server/flow.js` (new: parser, layout, SVG), `server/markdown.js` (dispatch),
+`server/escapehtml.js` (new: shared, breaks the require cycle), `server/anchor.js` (`idAnchors`),
+`server/server.js` (carry-forward), `public/app.js` (click, pan/zoom, box-select, anchors),
+`public/style.css`, `docs/PROTOCOL.md`, `README.md`, `integration/claude/plan-review/SKILL.md`
+
+All six acceptance criteria are met, and the reviewer can comment on **arrows as well as
+boxes** and box-select a group (so `anchors` is a list, not a single id). Pan/zoom and dark
+mode were added during the prototype review and are not in the criteria below.
 
 ## Problem
 
