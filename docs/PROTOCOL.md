@@ -100,6 +100,14 @@ shows a "reworking" overlay until you `present` again.
 
 - `comments[].quote` is the selected passage — locate it in your markdown
   source to understand what the comment anchors to.
+- `comments[].anchors` is present only when the comment is attached to a flow
+  diagram rather than to a passage. It is a non-empty array of
+  `<fenceId>:node:<id>` / `<fenceId>:edge:<src>-><dst>` values, each naming a
+  statement in the matching ```` ```flow ```` fence, so you can find exactly what
+  is being talked about. More than one entry means the reviewer box-selected a
+  group and the comment is about all of them together. `quote` then holds the
+  members' visible labels, for reading, not for locating. Absent on every prose
+  comment, so an existing integration is unaffected.
 - `comments[].author` (`{ id, name? }`) attributes the comment to a reviewer —
   see **Multiple reviewers** below. It is absent only for a pre-identity client
   (treated as `anonymous`). One bundle consolidates **every** reviewer's
@@ -263,6 +271,38 @@ doc, a reviewer isn't re-asked — their own previous pick shows collapsed, with
 "Change" option — and `submit`/`approve` still report the current per-reviewer
 value for every answered `id`.
 
+## Flow diagrams
+
+Draw a flow the reviewer can comment on with a `flow` fence:
+
+````markdown
+```flow
+id: ratelimit
+request[Incoming request] -> limiter[Token bucket]: 1 token
+limiter -> store[Redis counter]: read count
+store -> limiter
+limiter -> response[200 / 429]
+```
+````
+
+One statement per line; blank lines are ignored.
+
+- `id: <slug>` — required, like `choice`. It namespaces this diagram's anchor
+  ids, so adding a second diagram above never renames the first one's nodes.
+- `SRC -> DST` — an arrow, with an optional `: label` after the destination.
+- `SRC` alone — a box with no arrows.
+- `name[Human label]` — `name` is the id comments are anchored on; the bracketed
+  label is what is drawn, taken from the first mention, and defaults to the id.
+  Explicit ids mean two boxes both labelled "validate" never collide.
+
+A malformed block (no `id:`, no statements, an unparseable line) falls back to
+rendering as plain code, exactly as a malformed `choice` does.
+
+The server lays the boxes out top to bottom and renders inline SVG; there is no
+layout to specify and no diagram library involved. The reviewer clicks a box or
+an arrow — or shift-drags a box around a group — and comments on it, and those
+comments come back with `anchors` (see **`submit`** above).
+
 ## Choice-conflict resolution
 
 When reviewers diverge on a choice, any of them can **resolve** it to a single
@@ -299,9 +339,14 @@ is re-checked against the new text:
   section in the reviewer's panel. It is **never silently dropped** — the thread
   is preserved, and you can still `reply` to it.
 
+A diagram comment is re-checked on its `anchors` instead of its quote, and
+survives while **any** one of them is still in the reworked diagram — so
+renaming one box of a box-selected group keeps the thread. It archives only once
+you have removed all of them.
+
 The comment shape is therefore
-`{ id, quote, text, ts, author?, replies?, archived? }`; `submit`/`approve`
-bundles carry the full threads (archived comments included).
+`{ id, quote, text, ts, author?, anchors?, replies?, archived? }`;
+`submit`/`approve` bundles carry the full threads (archived comments included).
 
 ## Multiple reviewers
 

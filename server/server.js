@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { renderDiff, renderVersionDiff, parseChoiceSpecs } = require('./markdown');
-const { quoteAnchors } = require('./anchor');
+const { quoteAnchors, idAnchors } = require('./anchor');
 const { collectDiff, expandContext, resolveSpec } = require('./gitdiff');
 const { reanchor, annotateRound } = require('./diffanchor');
 const { codeVersion } = require('./version');
@@ -479,9 +479,14 @@ function loadDoc(s, docPath) {
   // Archived comments accumulate unbounded across many rounds; that's an
   // accepted trade-off for a localhost single-user tool that idle-shuts-down —
   // capping the list could drop a thread the reviewer still cares about.
+  // A diagram comment anchors on node/edge ids instead of a quote, and a
+  // box-selected group survives while any one member does — archiving the whole
+  // thread the moment one box goes would throw away a still-live conversation.
   const carried = (s.review.comments || []).map((c) => ({
     ...c,
-    archived: !quoteAnchors(c.quote, html),
+    archived: c.anchors
+      ? !c.anchors.some((a) => idAnchors(a, html))
+      : !quoteAnchors(c.quote, html),
   }));
   // Carry choices AND resolutions forward across the rework round: a resolution is an
   // explicit shared decision (008) that persists until cleared, so re-presenting a
