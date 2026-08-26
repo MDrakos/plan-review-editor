@@ -19,6 +19,10 @@
 - A prototype element's anchor id is `<fenceId>:el:<x>`, mirroring flow's `<fenceId>:node:<id>` / `<fenceId>:edge:<key>`.
 - `server/server.js` and `server/anchor.js` get **zero** changes — the existing `idAnchors`/`quoteAnchors` branch and comment carry-forward are already generic over any `anchors` array.
 - New/renamed npm-visible commands: `server/prototype.js` joins `npm run selfcheck` alongside `flow.js` and `anchor.js`.
+- The prototype iframe's `srcdoc` always opens with a fixed CSP meta tag (`default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:`) — the very first thing in the inner document, before the base stylesheet, the markup, and the shim. Inline CSS and inline script keep working; every URL-loaded subresource and all network egress (`fetch`, `sendBeacon`, a remote `<img>`, a web font) is blocked.
+- The server is the only thing allowed to mint `data-anchor-id`. Any `data-anchor-id` already present in the agent's raw markup is stripped before the server's own is added, and `openProtoComposer` only honors a reported `anchorId` that is prefixed with the sending block's own `<fenceId>:el:` — the frame is the one thing in this feature that isn't trusted.
+- A `prototype` fence's `id:` must be unique within its document. A repeat falls back to a plain code block, exactly like a missing `id:` does. This uniqueness check is scoped to prototype fence ids only — a `flow` fence may share an `id:` with a `prototype` fence, since flow's `node`/`edge` namespacing already keeps their anchor ids distinct from a prototype's `el` namespace.
+- Every element the server rewrites with `data-anchor-id` also gets `tabindex="0"` (unless it already declares a `tabindex`), and the shim reports Enter/Space the same way it reports a click — the same keyboard parity `server/flow.js` already gives its `<g>` elements.
 
 ---
 
@@ -46,7 +50,7 @@
 
 **Interfaces:**
 - Consumes: none — first task.
-- Produces: `renderPrototype(body: string): string` — Task 2 (`server/markdown.js` dispatch) calls this directly. Internal helpers `parseHeader`, `scanStubs`, `rewriteMarkup` are exported too, for the self-check, but no later task depends on them directly.
+- Produces: `renderPrototype(body: string, usedIds?: Set<string>): string` — Task 2 (`server/markdown.js` dispatch) calls this directly, threading through the per-document `Set` of prototype fence ids already seen so a repeated `id:` falls back to a code block. Internal helpers `parseHeader`, `scanStubs`, `rewriteMarkup` are exported too, for the self-check, but no later task depends on them directly.
 
 - [ ] **Step 1: Write the header-parsing assertions (RED)**
 
@@ -56,14 +60,18 @@ Create `server/prototype.js` with just enough to run and fail meaningfully:
 'use strict';
 
 // The ```prototype fence: an inline sandboxed iframe carrying agent-authored
-// markup, click-to-comment via a shim that reports clicks up as anchor ids
-// mirrored outside the frame as hidden stubs. server/markdown.js dispatches to
-// renderPrototype; server/anchor.js's idAnchors carries comments forward on
-// the stub ids exactly as it does for flow.js's <g> anchors.
+// markup, click-to-comment via a shim that reports clicks (and Enter/Space)
+// up as anchor ids mirrored outside the frame as stubs. server/markdown.js
+// dispatches to renderPrototype; server/anchor.js's idAnchors carries
+// comments forward on the stub ids exactly as it does for flow.js's <g>
+// anchors.
 //
 // The frame is sandbox="allow-scripts" and deliberately NOT allow-same-origin:
 // that keeps its origin opaque, so agent-authored script inside it can never
-// reach the reviewer page, no matter what it does.
+// reach the reviewer page, no matter what it does. A frame-level CSP closes
+// the one channel the sandbox attribute doesn't: it blocks every URL-loaded
+// subresource and all network egress, leaving only inline CSS/script, which
+// the sandbox already grants.
 
 const { escapeHtml } = require('./escapehtml');
 
@@ -159,16 +167,26 @@ Insert into the self-check block, right after the header-parsing assertions (bef
 
 ```javascript
   // stub scanning: id namespacing, first-wins on a duplicate data-proto-id,
-  // a bare data-proto-id defaults its label to the id itself
+  // a bare data-proto-id defaults its label to the id itself, and a
+  // data-proto-id sitting inside a comment/<pre>/<script> is not a real tag
+  // so it is never picked up
   const stubs = scanStubs(
     '<button data-proto-id="save" data-proto-label="Save button">Save</button>' +
-      '<span data-proto-id="save">dup</span><i data-proto-id="cancel">x</i>',
+      '<span data-proto-id="save">dup</span><i data-proto-id="cancel">x</i>' +
+      '<!-- <b data-proto-id="ghost">not real</b> -->' +
+      '<pre>&lt;b data-proto-id="ghost2"&gt;not real&lt;/b&gt;</pre>' +
+      '<script>var s = "data-proto-id=\\"ghost3\\"";</script>',
     'signup'
   );
   assert.deepStrictEqual(stubs, [
     { id: 'save', label: 'Save button', anchorId: 'signup:el:save' },
     { id: 'cancel', label: 'cancel', anchorId: 'signup:el:cancel' },
   ]);
+
+  // an element carrying two data-proto-id attributes: the first wins, and
+  // scanStubs/rewriteMarkup must agree on which one that is
+  const dupAttrStubs = scanStubs('<button data-proto-id="a" data-proto-id="b">x</button>', 'signup');
+  assert.deepStrictEqual(dupAttrStubs, [{ id: 'a', label: 'a', anchorId: 'signup:el:a' }]);
 
   // markup rewrite: every occurrence of a given data-proto-id gets a matching
   // data-anchor-id, so a click on either duplicate reports the same anchor
@@ -180,6 +198,55 @@ Insert into the self-check block, right after the header-parsing assertions (bef
     (rewritten.match(/data-anchor-id="signup:el:save"/g) || []).length,
     2,
     'both elements sharing a data-proto-id get the anchor attribute'
+  );
+
+  // rewriteMarkup obeys the same first-wins rule as scanStubs on a
+  // duplicate-attribute element
+  assert.ok(
+    rewriteMarkup('<button data-proto-id="a" data-proto-id="b">x</button>', 'signup').includes(
+      'data-anchor-id="signup:el:a"'
+    ),
+    'rewriteMarkup must agree with scanStubs on which duplicate attribute wins'
+  );
+
+  // the server is the only thing allowed to mint data-anchor-id: a literal
+  // one already in the markup is stripped before the generated one is added
+  const forged = rewriteMarkup(
+    '<button data-anchor-id="other:el:x" data-proto-id="save">Save</button>',
+    'signup'
+  );
+  assert.ok(!/data-anchor-id="other:el:x"/.test(forged), 'a pre-existing data-anchor-id is stripped');
+  assert.strictEqual((forged.match(/data-anchor-id=/g) || []).length, 1, 'exactly one data-anchor-id remains');
+  const forgedSingleQuoted = rewriteMarkup(
+    "<button data-anchor-id='other:el:x' data-proto-id=\"save\">Save</button>",
+    'signup'
+  );
+  assert.ok(!/data-anchor-id='other:el:x'/.test(forgedSingleQuoted), 'a single-quoted forgery is stripped too');
+  // the strip is unconditional: an element with no data-proto-id is never
+  // given an anchor id, so a forged one there must not survive either
+  const forgedBare = rewriteMarkup(
+    '<div data-anchor-id="signup:el:save">x</div><span data-anchor-id=signup:el:save>y</span>',
+    'signup'
+  );
+  assert.ok(!/data-anchor-id/.test(forgedBare), 'a forgery on a tag with no data-proto-id is stripped, quoted or not');
+
+  // every rewritten element gets a keyboard path: tabindex="0" unless it
+  // already declares one, in which case its own value is left alone
+  assert.ok(/<button[^>]*\btabindex="0"/.test(rewriteMarkup('<button data-proto-id="x">x</button>', 'signup')));
+  const ownTabindex = rewriteMarkup('<button tabindex="-1" data-proto-id="x">x</button>', 'signup');
+  assert.ok(/tabindex="-1"/.test(ownTabindex), "the element's own tabindex is left alone, not overwritten");
+  assert.ok(!/tabindex="0"/.test(ownTabindex), 'no second tabindex is added on top of an existing one');
+
+  // a data-proto-id occurrence inside a comment, <pre>, or <script> body is
+  // never rewritten — only a real tag's own attribute is
+  const protectedMarkup =
+    '<!-- <b data-proto-id="ghost">not real</b> -->' +
+    '<pre>&lt;b data-proto-id="ghost2"&gt;not real&lt;/b&gt;</pre>' +
+    '<script>var s = "data-proto-id=\\"ghost3\\"";</script>';
+  assert.strictEqual(
+    (rewriteMarkup(protectedMarkup, 'signup').match(/data-anchor-id=/g) || []).length,
+    0,
+    'nothing inside a comment, <pre>, or <script> body is treated as a real attribute'
   );
 ```
 
@@ -193,33 +260,73 @@ Expected: `ReferenceError: scanStubs is not defined`
 Add below `parseHeader`, above `module.exports`:
 
 ```javascript
-// Scan `markup` for every `data-proto-id="x"` occurrence (an attribute scan,
-// not an HTML parse — the markup is agent-authored and well-formed by
-// construction) and build the stub list: one entry per distinct id, first
-// occurrence wins. A missing `data-proto-label` defaults the label to the id.
+// Blank out the interior of protected regions — HTML comments, <pre> blocks,
+// and <script> bodies — while keeping every other character's position the
+// same, so a later tag scan can never mistake text inside them (a JS string
+// literal, a code sample) for a real attribute on a real tag.
+// lazydev: this is a regex mask, not an HTML parser — a <pre> or <script>
+// whose own opening tag is malformed enough to confuse `[^>]*` can still slip
+// past it. The markup is agent-authored and well-formed by construction; a
+// real parser is a bigger tool than this fence needs.
+function maskProtected(markup) {
+  const blank = (s) => s.replace(/[^\n]/g, ' ');
+  return markup
+    .replace(/<!--[\s\S]*?-->/g, blank)
+    .replace(/(<pre\b[^>]*>)([\s\S]*?)(<\/pre>)/gi, (m, open, body, close) => open + blank(body) + close)
+    .replace(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi, (m, open, body, close) => open + blank(body) + close);
+}
+
+// Scan `markup` for every real tag (an attribute scan over masked markup, not
+// an HTML parse) carrying data-proto-id="x" and build the stub list: one
+// entry per distinct id, first tag wins, and within one tag its first
+// data-proto-id attribute wins if it carries more than one. A missing
+// data-proto-label defaults the label to the id.
 function scanStubs(markup, fenceId) {
+  const masked = maskProtected(markup);
+  const tagRe = /<[a-zA-Z][^>]*>/g;
   const seen = new Set();
   const stubs = [];
-  const tagRe = /<[a-zA-Z][^>]*\bdata-proto-id="([^"]*)"[^>]*>/g;
   let m;
-  while ((m = tagRe.exec(markup))) {
-    const id = m[1];
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const label = m[0].match(/data-proto-label="([^"]*)"/);
-    stubs.push({ id, label: label ? label[1] : id, anchorId: `${fenceId}:el:${id}` });
+  while ((m = tagRe.exec(masked))) {
+    const idMatch = m[0].match(/\bdata-proto-id="([^"]*)"/);
+    if (!idMatch || !idMatch[1] || seen.has(idMatch[1])) continue;
+    seen.add(idMatch[1]);
+    const label = m[0].match(/\bdata-proto-label="([^"]*)"/);
+    stubs.push({ id: idMatch[1], label: label ? label[1] : idMatch[1], anchorId: `${fenceId}:el:${idMatch[1]}` });
   }
   return stubs;
 }
 
-// Add a matching data-anchor-id="<fenceId>:el:<x>" beside every data-proto-id="x"
-// in the markup, so the in-frame shim can report a ready-made anchor id and the
-// stub outside the frame carries the same attribute name flowEl() queries on.
+// Rewrite one already-matched opening tag: drop any data-anchor-id already on
+// it (the server is the only thing allowed to mint that attribute — an
+// agent-authored one could forge a click onto a different element), add
+// tabindex="0" when the tag doesn't already declare one, and append a fresh
+// data-anchor-id beside its first data-proto-id attribute.
+function rewriteTag(tag, fenceId) {
+  // Strip first and unconditionally: a tag with no data-proto-id can still
+  // carry a forged data-anchor-id, and it would otherwise survive untouched.
+  let out = tag.replace(/\s+data-anchor-id=(?:"[^"]*"|'[^']*'|[^\s>]*)/g, '');
+  const idMatch = tag.match(/\bdata-proto-id="([^"]*)"/);
+  if (!idMatch || !idMatch[1]) return out;
+  if (!/\btabindex\s*=/.test(out)) out = out.replace(/^<([a-zA-Z][^\s>]*)/, '<$1 tabindex="0"');
+  const anchorId = escapeHtml(`${fenceId}:el:${idMatch[1]}`);
+  return out.replace(/\/?>$/, (close) => ` data-anchor-id="${anchorId}"${close}`);
+}
+
+// Apply rewriteTag to every real tag in `markup` (scanned on masked markup,
+// applied to the original at the same offsets — masking never changes
+// length), leaving comment/<pre>/<script> bodies untouched.
 function rewriteMarkup(markup, fenceId) {
-  return markup.replace(/data-proto-id="([^"]*)"/g, (full, id) => {
-    if (!id) return full;
-    return `${full} data-anchor-id="${escapeHtml(`${fenceId}:el:${id}`)}"`;
-  });
+  const masked = maskProtected(markup);
+  const tagRe = /<[a-zA-Z][^>]*>/g;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = tagRe.exec(masked))) {
+    out += markup.slice(last, m.index) + rewriteTag(markup.slice(m.index, m.index + m[0].length), fenceId);
+    last = m.index + m[0].length;
+  }
+  return out + markup.slice(last);
 }
 
 module.exports = { parseHeader, scanStubs, rewriteMarkup };
@@ -235,19 +342,49 @@ Expected: `prototype.js self-check ok`
 Insert into the self-check block, after the stub/rewrite assertions:
 
 ```javascript
-  // full render: sandbox attrs, no allow-same-origin, the declared height on
-  // the CSS var, a hidden stub per data-proto-id, the raw markup only inside
-  // the escaped srcdoc — never verbatim in the outer HTML
+  // full render: CSP meta first, sandbox attrs, no allow-same-origin, the
+  // declared height on the CSS var, a hidden-free stub per data-proto-id, and
+  // the raw markup only inside the escaped srcdoc — never verbatim in the
+  // outer HTML
   const html = renderPrototype('id: signup\nheight: 320\n<button data-proto-id="save">Save</button>');
   assert.ok(html.includes('sandbox="allow-scripts"'));
   assert.ok(!/allow-same-origin/.test(html));
   assert.ok(html.includes('--proto-h:320px'));
   assert.ok(html.includes('data-anchor-id="signup:el:save"'));
-  assert.ok(html.includes('class="proto-anchors" hidden'));
+  assert.ok(
+    html.includes('class="proto-anchors"') && !/proto-anchors"\s+hidden/.test(html),
+    'the stub container carries no hidden attribute — the CSS hides it instead, so focusComment can still scroll to it'
+  );
   assert.ok(
     !html.includes('<button data-proto-id="save">Save</button>'),
     'the raw markup must never appear unescaped outside the srcdoc attribute'
   );
+
+  // the CSP meta tag is the very first thing in the inner document — before
+  // the base stylesheet, the markup, and the shim
+  const decoded = html
+    .match(/srcdoc="([^"]*)"/)[1]
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+  assert.ok(decoded.startsWith('<meta http-equiv="Content-Security-Policy"'));
+  assert.ok(decoded.includes("default-src 'none'"));
+
+  // the shim's own <script> sits before the agent's markup, so a raw
+  // </script> inside the agent's own inline script can never orphan it
+  const shimIdx = decoded.indexOf('<script>');
+  const markupIdx = decoded.indexOf('data-anchor-id="signup:el:save"');
+  assert.ok(shimIdx !== -1 && shimIdx < markupIdx, 'the shim script is injected before the markup');
+  assert.ok(decoded.includes("addEventListener('keydown'"), 'the shim also listens for keydown, not just click');
+
+  // two prototype fences sharing an id: the second falls back to a plain
+  // code block, exactly like a missing id: does
+  const usedIds = new Set();
+  const first = renderPrototype('id: signup\n<button data-proto-id="save">Save</button>', usedIds);
+  const second = renderPrototype('id: signup\n<button data-proto-id="cancel">Cancel</button>', usedIds);
+  assert.ok(first.includes('sandbox="allow-scripts"'));
+  assert.ok(second.startsWith('<pre><code class="language-prototype">'), 'a reused id falls back to a code block');
 
   // malformed fence falls back to a plain code block, like choice/flow
   assert.ok(renderPrototype('no id here').startsWith('<pre><code class="language-prototype">'));
@@ -263,23 +400,38 @@ Expected: `ReferenceError: renderPrototype is not defined`
 Add below `rewriteMarkup`, above `module.exports`:
 
 ```javascript
+// The frame's own CSP: no URL-loaded subresource and no network egress of any
+// kind (fetch, sendBeacon, a remote <img>, a web font) — only inline CSS and
+// inline script, which the sandbox already grants, keep working.
+const CSP_META =
+  '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; script-src \'unsafe-inline\'; img-src data:">';
+
 // A minimal reset — the prototype is a screen the agent designed, not part of
 // the reviewer's chrome, so it always gets a plain light surface regardless
 // of the reviewer's theme.
 const BASE_STYLE =
   '<style>*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;color:#1a1a1a;background:#fff}</style>';
 
-// Click → walk up to the nearest [data-anchor-id] → report it to the parent.
-// Two inbound messages: 'proto-commented' marks an element as carrying a
-// thread, 'proto-clear' drops the selection highlight. '*' is the only
-// possible target origin in both directions, because sandbox="allow-scripts"
+// Click, or Enter/Space on the nearest [data-anchor-id] → report it to the
+// parent. Two inbound messages: 'proto-commented' marks an element as
+// carrying a thread, 'proto-clear' drops the selection highlight. '*' is the
+// only possible target origin in both directions, because sandbox="allow-scripts"
 // without allow-same-origin gives this frame an opaque (null) origin.
 const SHIM = `(function(){
-document.addEventListener('click', function(e){
-  var el = e.target.closest('[data-anchor-id]');
-  if (!el) return;
+function report(el){
   var r = el.getBoundingClientRect();
   parent.postMessage({ kind: 'proto-click', anchorId: el.dataset.anchorId, rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } }, '*');
+}
+document.addEventListener('click', function(e){
+  var el = e.target.closest('[data-anchor-id]');
+  if (el) report(el);
+});
+document.addEventListener('keydown', function(e){
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  var el = e.target.closest('[data-anchor-id]');
+  if (!el) return;
+  e.preventDefault();
+  report(el);
 });
 window.addEventListener('message', function(e){
   var d = e.data || {};
@@ -293,22 +445,28 @@ window.addEventListener('message', function(e){
 });
 })();`;
 
-// Render one ```prototype fence body to a sandboxed iframe plus its hidden
-// anchor stubs, or fall back to a plain code block when the fence is
-// malformed (no id:, or blank markup) — exactly as renderChoice/renderFlow do.
-function renderPrototype(body) {
+// Render one ```prototype fence body to a sandboxed iframe plus its anchor
+// stubs, or fall back to a plain code block when the fence is malformed (no
+// id:, blank markup, or an id: already used elsewhere in this document) —
+// exactly as renderChoice/renderFlow do. `usedIds`, when passed, is the
+// per-document set of prototype fence ids already rendered; the caller
+// (renderBlocks) owns its lifetime.
+function renderPrototype(body, usedIds) {
   const parsed = parseHeader(body);
-  if (!parsed) return `<pre><code class="language-prototype">${escapeHtml(body)}</code></pre>`;
+  if (!parsed || (usedIds && usedIds.has(parsed.id))) {
+    return `<pre><code class="language-prototype">${escapeHtml(body)}</code></pre>`;
+  }
+  if (usedIds) usedIds.add(parsed.id);
   const { id, height, markup } = parsed;
   const stubs = scanStubs(markup, id);
-  const inner = BASE_STYLE + rewriteMarkup(markup, id) + `<script>${SHIM}</script>`;
+  const inner = CSP_META + BASE_STYLE + `<script>${SHIM}</script>` + rewriteMarkup(markup, id);
   const stubHtml = stubs
     .map((s) => `<span data-anchor-id="${escapeHtml(s.anchorId)}" data-label="${escapeHtml(s.label)}"></span>`)
     .join('');
   return (
     `<div class="proto-block" data-proto-id="${escapeHtml(id)}" style="--proto-h:${height}px">` +
     `<iframe class="proto-frame" sandbox="allow-scripts" srcdoc="${escapeHtml(inner)}"></iframe>` +
-    `<div class="proto-anchors" hidden>${stubHtml}</div>` +
+    `<div class="proto-anchors">${stubHtml}</div>` +
     `</div>`
   );
 }
@@ -352,14 +510,14 @@ git commit -m "feat: add server/prototype.js to render the prototype fence"
 ### Task 2: `server/markdown.js` dispatch + full e2e suite
 
 **Files:**
-- Modify: `server/markdown.js:9` (import), `server/markdown.js:23-27` (`renderFence` dispatch)
+- Modify: `server/markdown.js:9` (import), `server/markdown.js:23-27` (`renderFence` dispatch), `server/markdown.js:178-197` (`renderBlocks`, to own the per-document `Set` of prototype fence ids)
 - Modify: `test/e2e.js` (new section, inserted after the existing "issue 016: flow diagrams" section, which currently ends at the `await cli('stop', '--session', fl.id);` on the line right before the `// Two regressions…` comment, and — including that section's CSS/app.js regression checks — spans through the block ending at the `panBranch` check just before `console.log('issue 008: …')`; insert the new section immediately before that `console.log('issue 008: …')` line)
 
 **Reuse:** `render`, `idAnchors` (already imported in `test/e2e.js:29-31`); `cli`, `browser`, `check`, `sleep`, `dir`, `path`, `fs` (all already in scope in `test/e2e.js`, used identically by the existing flow-diagram test block). `searched, none — NEW` for the dispatch line itself: it is the one-line pattern `choice`/`flow` already establish.
 
 **Interfaces:**
-- Consumes: `renderPrototype(body)` from Task 1 (`server/prototype.js`).
-- Produces: nothing new — `render()` (from `server/markdown.js`, already exported) now also handles `prototype` fences, for any later task/test to call.
+- Consumes: `renderPrototype(body, usedIds)` from Task 1 (`server/prototype.js`).
+- Produces: nothing new — `render()` (from `server/markdown.js`, already exported) now also handles `prototype` fences, for any later task/test to call. `renderBlocks` creates a fresh `protoIds` `Set` on every call and passes it through `renderFence` to `renderPrototype`; since `renderDiff` calls `renderBlocks` once and `renderVersionDiff` calls it twice (once per markdown string), each render gets its own `Set` for free — a diff render never inherits or leaks prototype-id state from the other side of the diff.
 
 - [ ] **Step 1: Write the e2e test section (RED)**
 
@@ -400,6 +558,36 @@ In `test/e2e.js`, insert this new block immediately before the line `console.log
     'idAnchors is not fooled by a prefix of a longer prototype anchor id',
     idAnchors('signup:el:save', protoHtml) === true &&
       idAnchors('signup:el:sav', protoHtml) === false
+  );
+  check(
+    "the frame's CSP blocks network egress and every URL-loaded subresource, leaving only inline CSS/script",
+    protoHtml.includes('Content-Security-Policy') && protoHtml.includes("default-src 'none'")
+  );
+  check(
+    'every rewritten element gets a keyboard path to the composer, matching flow.js\'s <g> elements (tabindex lives inside the escaped srcdoc, so its own quotes come back as &quot;)',
+    protoHtml.includes('tabindex=&quot;0&quot;')
+  );
+  check(
+    'a document reusing an already-used prototype fence id falls back to a code block for the repeat, never a second indistinguishable stub set',
+    (() => {
+      const dupeHtml = render(
+        '```prototype\nid: signup\n<button data-proto-id="save">Save</button>\n```\n' +
+          '```prototype\nid: signup\n<button data-proto-id="cancel">Cancel</button>\n```\n'
+      );
+      const stubCount = (dupeHtml.match(/data-anchor-id="signup:el:save"/g) || []).length;
+      return (
+        stubCount === 1 &&
+        dupeHtml.includes('<pre><code class="language-prototype">') &&
+        !dupeHtml.includes('data-anchor-id="signup:el:cancel"')
+      );
+    })()
+  );
+  check(
+    'a flow fence and a prototype fence may share an id: without colliding — the kind segment (node/edge vs el) already keeps them distinct',
+    render(
+      '```flow\nid: signup\nsave[Save]\n```\n' +
+        '```prototype\nid: signup\n<button data-proto-id="save">Save</button>\n```\n'
+    ).includes('data-anchor-id="signup:el:save"')
   );
 
   const protoDoc = path.join(dir, 'planreview-e2e-proto.md');
@@ -469,7 +657,7 @@ In `test/e2e.js`, insert this new block immediately before the line `console.log
 Run: `npm run test:plan`
 Expected: FAIL — the first `check` for the `prototype` fence fails, because `renderFence` doesn't dispatch to `renderPrototype` yet (the fence renders as `<pre><code class="language-prototype">`, so `sandbox="allow-scripts"` is absent).
 
-- [ ] **Step 3: Wire the dispatch line**
+- [ ] **Step 3: Wire the dispatch line and thread the per-document prototype-id `Set`**
 
 In `server/markdown.js`, change line 9 from:
 
@@ -498,14 +686,73 @@ function renderFence(lang, body) {
 to:
 
 ```javascript
-function renderFence(lang, body) {
+function renderFence(lang, body, protoIds) {
   if (lang === 'choice') return renderChoice(body);
   if (lang === 'flow') return renderFlow(body);
-  if (lang === 'prototype') return renderPrototype(body);
+  if (lang === 'prototype') return renderPrototype(body, protoIds);
   const cls = lang ? ` class="language-${escapeHtml(lang)}"` : '';
   return `<pre><code${cls}>${escapeHtml(body)}</code></pre>`;
 }
 ```
+
+`flow` is deliberately left out of `protoIds` — it stays untouched, and its own `id:` collisions (if any) are its own concern; a `flow` and a `prototype` fence sharing an `id:` is fine because `node`/`edge` and `el` already keep their anchor ids apart.
+
+Then change `renderBlocks` (currently lines 178-197) from:
+
+```javascript
+function renderBlocks(markdown) {
+  const lines = String(markdown).replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+
+    const fence = line.match(/^```(\S*)\s*$/);
+    if (fence) {
+      const body = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) body.push(lines[i++]);
+      i++; // closing fence
+      out.push(renderFence(fence[1], body.join('\n')));
+      continue;
+    }
+```
+
+to:
+
+```javascript
+function renderBlocks(markdown) {
+  const lines = String(markdown).replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let i = 0;
+  const protoIds = new Set(); // this render's prototype fence ids — fresh per call, never shared
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+
+    const fence = line.match(/^```(\S*)\s*$/);
+    if (fence) {
+      const body = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) body.push(lines[i++]);
+      i++; // closing fence
+      out.push(renderFence(fence[1], body.join('\n'), protoIds));
+      continue;
+    }
+```
+
+`protoIds` lives inside `renderBlocks`, not at module scope, so it can't leak between calls. `renderDiff` calls `renderBlocks` once per render — one `Set`. `renderVersionDiff` calls `renderBlocks(fromMarkdown)` and `renderBlocks(toMarkdown)` as two separate calls, each getting its own fresh `Set` — the old and new side of a version diff never share or leak prototype-id state.
 
 - [ ] **Step 4: Run to confirm it passes**
 
@@ -554,6 +801,10 @@ Append to the end of the "issue 017" section in `test/e2e.js` (after `await cli(
     'the anchor stubs keep a layout box so focusComment can scroll to the prototype',
     !/\.proto-anchors\s*\{[^}]*display:\s*none/.test(protoCss),
     protoCss.slice(0, 300)
+  );
+  check(
+    'the stub container carries no hidden attribute — public/style.css declares [hidden] { display: none !important }, which would beat the .proto-anchors rule above',
+    !/proto-anchors"\s+hidden/.test(protoHtml)
   );
 ```
 
@@ -623,7 +874,7 @@ git commit -m "feat: style the prototype block, frame and hidden anchor stubs"
 - Modify: `public/app.js` (new section, inserted after the flow-diagrams section ends — after the `docEl.addEventListener('keydown', …)` block that currently closes just before `// ---------- boot ----------`)
 - Modify: `test/e2e.js` (append to the "issue 017" section, after the CSS check added in Task 3)
 
-**Reuse:** `flowEl(id)`, `flowLabel(ids)`, `flowCommentable()`, `openComposerAt(rect, quote)`, `focusComment(id)`, `pendingRange`/`pendingAnchors`/`pendingQuote` module state, `clearFlowSelection()` (all existing, `public/app.js:130-1864` — see spec's grounding). `searched, none — NEW`: `protoFrames` (a `contentWindow → block` `Map`), `bindProtos()`, the `message` listener, `openProtoComposer()` are new — nothing in the codebase tracks iframe windows today.
+**Reuse:** `flowEl(id)`, `flowLabel(ids)`, `flowCommentable()`, `openComposerAt(rect, quote)`, `focusComment(id)`, `pendingRange`/`pendingAnchors`/`pendingQuote` module state, `clearFlowSelection()` (all existing, `public/app.js:130-1864` — see spec's grounding). `searched, none — NEW`: `protoFrames` (a `contentWindow → block` `Map`), `lastProtoBlocks` (a `data-proto-id → block` `Map`, held across renders so an unchanged block's live iframe can be swapped back in), `bindProtos()`, the `message` listener, `openProtoComposer()` are new — nothing in the codebase tracks iframe windows today.
 
 **Interfaces:**
 - Consumes: `flowEl`, `flowLabel`, `flowCommentable`, `openComposerAt`, `focusComment`, `clearFlowSelection`, `pendingRange`/`pendingAnchors`/`pendingQuote` — all `Reuse` above, no new names to learn.
@@ -655,6 +906,18 @@ Append to the end of the "issue 017" section in `test/e2e.js` (after the CSS che
     'markFlowAnchors() also notifies a prototype frame when one of its elements gets commented',
     /function markFlowAnchors\([^)]*\)\s*\{[\s\S]*?proto-commented[\s\S]*?\n\}/.test(appSrc2)
   );
+  const openProtoComposerSrc = (appSrc2.match(/function openProtoComposer\([^)]*\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  check(
+    "openProtoComposer rejects a reported anchorId that isn't prefixed with the sending block's own fence id — a frame can't hijack a click onto a different block's anchor",
+    /dataset\.protoId/.test(openProtoComposerSrc) && /startsWith\(prefix\)/.test(openProtoComposerSrc),
+    openProtoComposerSrc.slice(0, 400)
+  );
+  const bindProtosSrc = (appSrc2.match(/function bindProtos\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  check(
+    "bindProtos() reuses an existing frame instead of letting an unrelated re-render tear it down, when the incoming block's srcdoc is byte-identical to the one it's replacing",
+    /getAttribute\('srcdoc'\)/.test(bindProtosSrc) && /replaceWith/.test(bindProtosSrc),
+    bindProtosSrc.slice(0, 400)
+  );
 ```
 
 - [ ] **Step 2: Run to confirm it fails**
@@ -671,21 +934,41 @@ In `public/app.js`, insert this new section right after the flow-diagrams sectio
 //
 // A prototype fence renders as a sandboxed iframe with the same click-to-comment
 // affordance a flow diagram's box gets: the frame's own shim script reports a
-// click as { anchorId, rect } via postMessage, and the composer opens exactly
-// as it does for a flow node. flowEl/flowLabel/flowCommentable are reused as
-// is — the anchor lives on the hidden stub beside the frame, not inside it.
+// click (or Enter/Space) as { anchorId, rect } via postMessage, and the
+// composer opens exactly as it does for a flow node. flowEl/flowLabel/
+// flowCommentable are reused as is — the anchor lives on the stub beside the
+// frame, not inside it.
 
 const protoFrames = new Map(); // iframe.contentWindow -> the .proto-block that owns it
+let lastProtoBlocks = new Map(); // data-proto-id -> the .proto-block from the previous render
 
 // Re-scanned on every render: docEl.innerHTML is fully replaced each time, so
-// old frames are gone and the map is rebuilt from scratch rather than grown
-// forever (a stale contentWindow entry would otherwise never be released).
+// every .proto-block is a fresh DOM node. When a fresh block's srcdoc is
+// byte-identical to the block that carried the same data-proto-id last time,
+// swap the fresh node back out for the old one — its iframe is already
+// loaded and keeps its running state, instead of reloading (and re-running
+// the agent's script) on every unrelated reviewer's comment.
+// lazydev: this only recognizes a whole-block match (same id, identical
+// srcdoc); it doesn't diff attributes within a block, so it buys nothing when
+// only part of a prototype changed.
 function bindProtos() {
   protoFrames.clear();
+  const nextProtoBlocks = new Map();
   for (const block of docEl.querySelectorAll('.proto-block')) {
+    const id = block.dataset.protoId;
     const frame = block.querySelector('.proto-frame');
+    const prevBlock = lastProtoBlocks.get(id);
+    const prevFrame = prevBlock && prevBlock.querySelector('.proto-frame');
+    if (frame && prevFrame && prevFrame.getAttribute('srcdoc') === frame.getAttribute('srcdoc')) {
+      block.replaceWith(prevBlock);
+      nextProtoBlocks.set(id, prevBlock);
+      protoFrames.set(prevFrame.contentWindow, prevBlock);
+      continue;
+    }
     if (frame) protoFrames.set(frame.contentWindow, block);
+    nextProtoBlocks.set(id, block);
   }
+  lastProtoBlocks = nextProtoBlocks;
 }
 
 // Filtered on event.source (an exact window reference), never event.origin —
@@ -699,10 +982,15 @@ window.addEventListener('message', (e) => {
   openProtoComposer(block, data.anchorId, data.rect);
 });
 
-// Open the composer for a click reported up from inside `block`'s frame.
-// Mirrors openFlowComposer: an anchor that already carries a thread (data-cids
-// on its stub) focuses that thread instead of starting a second one.
+// Open the composer for a click reported up from inside `block`'s frame. A
+// reported anchorId is only trusted when it names an element inside this same
+// block — the block's frame could otherwise forge a click onto a different
+// block's anchor and hijack or misattribute its comment thread. Mirrors
+// openFlowComposer: an anchor that already carries a thread (data-cids on its
+// stub) focuses that thread instead of starting a second one.
 function openProtoComposer(block, anchorId, rect) {
+  const prefix = `${block.dataset.protoId}:el:`;
+  if (typeof anchorId !== 'string' || !anchorId.startsWith(prefix)) return;
   const el = flowEl(anchorId);
   if (!el) return;
   if (el.dataset.cids) {
@@ -923,8 +1211,14 @@ not `allow-same-origin`, so nothing inside it can reach this page). The
 reviewer clicks an element to comment on it, and that comment comes back with
 `anchors` (see **`submit`** above) exactly like a flow diagram's.
 
+The frame also carries a fixed Content-Security-Policy that blocks every
+URL-loaded subresource and all network egress: an image must be a `data:`
+URI, there's no way to load a web font, and no script inside the frame can
+reach the network. Inline CSS and inline script are unaffected.
+
 A malformed block (no `id:`, or blank markup) falls back to rendering as plain
-code, exactly as a malformed `choice` or `flow` does.
+code, exactly as a malformed `choice` or `flow` does. So does a repeated
+`id:` — the second (and later) fence reusing an already-used prototype id.
 ```
 
 - [ ] **Step 3: Add a prototype paragraph to `integration/claude/plan-review/SKILL.md`**
@@ -949,7 +1243,8 @@ height: 320
 `id:` is required and namespaces the prototype; `height:` is optional (default
 400). Mark any element you want commentable with `data-proto-id="x"` — the
 server turns it into a stable anchor. Comments on it come back with an
-`anchors` list, same as a flow diagram's.
+`anchors` list, same as a flow diagram's. The frame's CSP means an image must
+be a `data:` URI — no web fonts, no network calls.
 ```
 
 - [ ] **Step 4: Update the walkthrough line and add a `### Prototypes` section to `README.md`**
@@ -997,6 +1292,10 @@ it directly. Comments carry an `anchors` list in the submit bundle naming
 exactly which element they're about, and survive a rework round the same way a
 flow diagram's do: a comment archives (never disappears) once the element it
 named is gone.
+
+The frame carries a fixed CSP: inline CSS and inline script work, but every
+URL-loaded subresource and all network egress is blocked — an image needs to
+be a `data:` URI, and there's no way to pull in a web font.
 ```
 
 - [ ] **Step 5: Add a Roadmap line to `README.md`**
