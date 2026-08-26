@@ -14,7 +14,7 @@
     "test:plan": "node test/e2e.js",
     "test:code": "node test/codereview.js",
     "test:demo": "node test/demo.js",
-    "selfcheck": "node server/gitdiff.js && node server/diffanchor.js && node server/flow.js && node server/anchor.js && node test/reviewvm.js"
+    "selfcheck": "node server/gitdiff.js && node server/diffanchor.js && node server/flow.js && node server/anchor.js && node server/prototype.js && node test/reviewvm.js"
   },
   "engines": {
     "node": ">=18"

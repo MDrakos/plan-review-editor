@@ -1,0 +1,345 @@
+'use strict';
+
+// The ```prototype fence: an inline sandboxed iframe carrying agent-authored
+// markup, click-to-comment via a shim that reports clicks (and Enter/Space)
+// up as anchor ids mirrored outside the frame as stubs. server/markdown.js
+// dispatches to renderPrototype; server/anchor.js's idAnchors carries
+// comments forward on the stub ids exactly as it does for flow.js's <g>
+// anchors.
+//
+// The frame is sandbox="allow-scripts" and deliberately NOT allow-same-origin:
+// that keeps its origin opaque, so agent-authored script inside it can never
+// reach the reviewer page, no matter what it does. A frame-level CSP closes
+// the one channel the sandbox attribute doesn't: it blocks every URL-loaded
+// subresource and all network egress, leaving only inline CSS/script, which
+// the sandbox already grants.
+
+const { escapeHtml } = require('./escapehtml');
+
+const MIN_HEIGHT = 80;
+const MAX_HEIGHT = 2000;
+const DEFAULT_HEIGHT = 400;
+const ID_RE = /^[A-Za-z0-9_-]+$/;
+
+// Split a fence body into its header ("key: value" lines) and markup
+// (everything from the first non-header line down, verbatim). Returns
+// { id, height, markup }, or null when `id:` is missing/invalid/duplicated or
+// the markup is blank — the caller falls back to a plain code block, exactly
+// as a malformed `choice`/`flow` fence does.
+function parseHeader(body) {
+  const lines = String(body).replace(/\r\n/g, '\n').split('\n');
+  let id = '';
+  let height = DEFAULT_HEIGHT;
+  let i = 0;
+  for (; i < lines.length; i++) {
+    const kv = lines[i].match(/^(\w+):\s*(.*)$/);
+    if (!kv) break;
+    if (kv[1] === 'id') {
+      if (id) return null; // two id: lines
+      id = kv[2].trim();
+    } else if (kv[1] === 'height') {
+      const n = Number(kv[2].trim());
+      if (Number.isFinite(n)) height = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, n));
+    }
+  }
+  const markup = lines.slice(i).join('\n');
+  if (!id || !ID_RE.test(id) || !markup.trim()) return null;
+  return { id, height, markup };
+}
+
+// Blank out the interior of protected regions — HTML comments, <pre> blocks,
+// and <script> bodies — while keeping every other character's position the
+// same, so a later tag scan can never mistake text inside them (a JS string
+// literal, a code sample) for a real attribute on a real tag.
+// lazydev: this is a regex mask, not an HTML parser — a <pre> or <script>
+// whose own opening tag is malformed enough to confuse `[^>]*` can still slip
+// past it. The markup is agent-authored and well-formed by construction; a
+// real parser is a bigger tool than this fence needs.
+function maskProtected(markup) {
+  const blank = (s) => s.replace(/[^\n]/g, ' ');
+  return markup
+    .replace(/<!--[\s\S]*?-->/g, blank)
+    .replace(/(<pre\b[^>]*>)([\s\S]*?)(<\/pre>)/gi, (m, open, body, close) => open + blank(body) + close)
+    .replace(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi, (m, open, body, close) => open + blank(body) + close);
+}
+
+// Scan `markup` for every real tag (an attribute scan over masked markup, not
+// an HTML parse) carrying data-proto-id="x" and build the stub list: one
+// entry per distinct id, first tag wins, and within one tag its first
+// data-proto-id attribute wins if it carries more than one. A missing
+// data-proto-label defaults the label to the id.
+function scanStubs(markup, fenceId) {
+  const masked = maskProtected(markup);
+  const tagRe = /<[a-zA-Z][^>]*>/g;
+  const seen = new Set();
+  const stubs = [];
+  let m;
+  while ((m = tagRe.exec(masked))) {
+    const idMatch = m[0].match(/\bdata-proto-id="([^"]*)"/);
+    if (!idMatch || !idMatch[1] || seen.has(idMatch[1])) continue;
+    seen.add(idMatch[1]);
+    const label = m[0].match(/\bdata-proto-label="([^"]*)"/);
+    stubs.push({ id: idMatch[1], label: label ? label[1] : idMatch[1], anchorId: `${fenceId}:el:${idMatch[1]}` });
+  }
+  return stubs;
+}
+
+// Rewrite one already-matched opening tag: drop any data-anchor-id already on
+// it (the server is the only thing allowed to mint that attribute — an
+// agent-authored one could forge a click onto a different element), add
+// tabindex="0" when the tag doesn't already declare one, and append a fresh
+// data-anchor-id beside its first data-proto-id attribute.
+function rewriteTag(tag, fenceId) {
+  // Strip first and unconditionally: a tag with no data-proto-id can still
+  // carry a forged data-anchor-id, and it would otherwise survive untouched.
+  let out = tag.replace(/\s+data-anchor-id=(?:"[^"]*"|'[^']*'|[^\s>]*)/g, '');
+  const idMatch = tag.match(/\bdata-proto-id="([^"]*)"/);
+  if (!idMatch || !idMatch[1]) return out;
+  if (!/\btabindex\s*=/.test(out)) out = out.replace(/^<([a-zA-Z][^\s>]*)/, '<$1 tabindex="0"');
+  const anchorId = escapeHtml(`${fenceId}:el:${idMatch[1]}`);
+  return out.replace(/\/?>$/, (close) => ` data-anchor-id="${anchorId}"${close}`);
+}
+
+// Apply rewriteTag to every real tag in `markup` (scanned on masked markup,
+// applied to the original at the same offsets — masking never changes
+// length), leaving comment/<pre>/<script> bodies untouched.
+function rewriteMarkup(markup, fenceId) {
+  const masked = maskProtected(markup);
+  const tagRe = /<[a-zA-Z][^>]*>/g;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = tagRe.exec(masked))) {
+    out += markup.slice(last, m.index) + rewriteTag(markup.slice(m.index, m.index + m[0].length), fenceId);
+    last = m.index + m[0].length;
+  }
+  return out + markup.slice(last);
+}
+
+// The frame's own CSP: no URL-loaded subresource and no network egress of any
+// kind (fetch, sendBeacon, a remote <img>, a web font) — only inline CSS and
+// inline script, which the sandbox already grants, keep working.
+const CSP_META =
+  '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; script-src \'unsafe-inline\'; img-src data:">';
+
+// A minimal reset — the prototype is a screen the agent designed, not part of
+// the reviewer's chrome, so it always gets a plain light surface regardless
+// of the reviewer's theme.
+const BASE_STYLE =
+  '<style>*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;color:#1a1a1a;background:#fff}</style>';
+
+// Click, or Enter/Space on the nearest [data-anchor-id] → report it to the
+// parent. Two inbound messages: 'proto-commented' marks an element as
+// carrying a thread, 'proto-clear' drops the selection highlight. '*' is the
+// only possible target origin in both directions, because sandbox="allow-scripts"
+// without allow-same-origin gives this frame an opaque (null) origin.
+const SHIM = `(function(){
+function report(el){
+  var r = el.getBoundingClientRect();
+  parent.postMessage({ kind: 'proto-click', anchorId: el.dataset.anchorId, rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom } }, '*');
+}
+document.addEventListener('click', function(e){
+  var el = e.target.closest('[data-anchor-id]');
+  if (el) report(el);
+});
+document.addEventListener('keydown', function(e){
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  var el = e.target.closest('[data-anchor-id]');
+  if (!el) return;
+  e.preventDefault();
+  report(el);
+});
+window.addEventListener('message', function(e){
+  var d = e.data || {};
+  if (d.kind === 'proto-commented') {
+    var el = document.querySelector('[data-anchor-id="' + CSS.escape(d.anchorId) + '"]');
+    if (el) el.classList.add('commented');
+  } else if (d.kind === 'proto-clear') {
+    var sel = document.querySelectorAll('.selected');
+    for (var i = 0; i < sel.length; i++) sel[i].classList.remove('selected');
+  }
+});
+})();`;
+
+// Render one ```prototype fence body to a sandboxed iframe plus its anchor
+// stubs, or fall back to a plain code block when the fence is malformed (no
+// id:, blank markup, or an id: already used elsewhere in this document) —
+// exactly as renderChoice/renderFlow do. `usedIds`, when passed, is the
+// per-document set of prototype fence ids already rendered; the caller
+// (renderBlocks) owns its lifetime.
+function renderPrototype(body, usedIds) {
+  const parsed = parseHeader(body);
+  if (!parsed || (usedIds && usedIds.has(parsed.id))) {
+    return `<pre><code class="language-prototype">${escapeHtml(body)}</code></pre>`;
+  }
+  if (usedIds) usedIds.add(parsed.id);
+  const { id, height, markup } = parsed;
+  const stubs = scanStubs(markup, id);
+  const inner = CSP_META + BASE_STYLE + `<script>${SHIM}</script>` + rewriteMarkup(markup, id);
+  const stubHtml = stubs
+    .map((s) => `<span data-anchor-id="${escapeHtml(s.anchorId)}" data-label="${escapeHtml(s.label)}"></span>`)
+    .join('');
+  return (
+    `<div class="proto-block" data-proto-id="${escapeHtml(id)}" style="--proto-h:${height}px">` +
+    `<iframe class="proto-frame" sandbox="allow-scripts" srcdoc="${escapeHtml(inner)}"></iframe>` +
+    `<div class="proto-anchors">${stubHtml}</div>` +
+    `</div>`
+  );
+}
+
+module.exports = { parseHeader, scanStubs, rewriteMarkup, renderPrototype };
+
+if (require.main === module) {
+  const assert = require('assert');
+
+  // header parsing: id required, height defaults to 400
+  const p1 = parseHeader('id: signup\n<div>hi</div>');
+  assert.strictEqual(p1.id, 'signup');
+  assert.strictEqual(p1.height, 400);
+  assert.strictEqual(p1.markup, '<div>hi</div>');
+
+  // height is clamped to 80–2000
+  assert.strictEqual(parseHeader('id: signup\nheight: 5000\n<div>hi</div>').height, 2000);
+  assert.strictEqual(parseHeader('id: signup\nheight: 10\n<div>hi</div>').height, 80);
+
+  // a non-numeric height falls back to the default rather than erroring
+  assert.strictEqual(parseHeader('id: signup\nheight: nope\n<div>hi</div>').height, 400);
+
+  // malformed: no id, blank markup, two id: lines, an id with invalid characters
+  assert.strictEqual(parseHeader('<div>hi</div>'), null, 'no id: line');
+  assert.strictEqual(parseHeader('id: signup\n   \n'), null, 'blank markup');
+  assert.strictEqual(parseHeader('id: a\nid: b\n<div>hi</div>'), null, 'two id: lines');
+  assert.strictEqual(parseHeader('id: my signup\n<div>hi</div>'), null, 'id with a space');
+
+  // stub scanning: id namespacing, first-wins on a duplicate data-proto-id,
+  // a bare data-proto-id defaults its label to the id itself, and a
+  // data-proto-id sitting inside a comment/<pre>/<script> is not a real tag
+  // so it is never picked up
+  const stubs = scanStubs(
+    '<button data-proto-id="save" data-proto-label="Save button">Save</button>' +
+      '<span data-proto-id="save">dup</span><i data-proto-id="cancel">x</i>' +
+      '<!-- <b data-proto-id="ghost">not real</b> -->' +
+      '<pre>&lt;b data-proto-id="ghost2"&gt;not real&lt;/b&gt;</pre>' +
+      '<script>var s = "data-proto-id=\\"ghost3\\"";</script>',
+    'signup'
+  );
+  assert.deepStrictEqual(stubs, [
+    { id: 'save', label: 'Save button', anchorId: 'signup:el:save' },
+    { id: 'cancel', label: 'cancel', anchorId: 'signup:el:cancel' },
+  ]);
+
+  // an element carrying two data-proto-id attributes: the first wins, and
+  // scanStubs/rewriteMarkup must agree on which one that is
+  const dupAttrStubs = scanStubs('<button data-proto-id="a" data-proto-id="b">x</button>', 'signup');
+  assert.deepStrictEqual(dupAttrStubs, [{ id: 'a', label: 'a', anchorId: 'signup:el:a' }]);
+
+  // markup rewrite: every occurrence of a given data-proto-id gets a matching
+  // data-anchor-id, so a click on either duplicate reports the same anchor
+  const rewritten = rewriteMarkup(
+    '<button data-proto-id="save">Save</button><span data-proto-id="save">dup</span>',
+    'signup'
+  );
+  assert.strictEqual(
+    (rewritten.match(/data-anchor-id="signup:el:save"/g) || []).length,
+    2,
+    'both elements sharing a data-proto-id get the anchor attribute'
+  );
+
+  // rewriteMarkup obeys the same first-wins rule as scanStubs on a
+  // duplicate-attribute element
+  assert.ok(
+    rewriteMarkup('<button data-proto-id="a" data-proto-id="b">x</button>', 'signup').includes(
+      'data-anchor-id="signup:el:a"'
+    ),
+    'rewriteMarkup must agree with scanStubs on which duplicate attribute wins'
+  );
+
+  // the server is the only thing allowed to mint data-anchor-id: a literal
+  // one already in the markup is stripped before the generated one is added
+  const forged = rewriteMarkup(
+    '<button data-anchor-id="other:el:x" data-proto-id="save">Save</button>',
+    'signup'
+  );
+  assert.ok(!/data-anchor-id="other:el:x"/.test(forged), 'a pre-existing data-anchor-id is stripped');
+  assert.strictEqual((forged.match(/data-anchor-id=/g) || []).length, 1, 'exactly one data-anchor-id remains');
+  const forgedSingleQuoted = rewriteMarkup(
+    "<button data-anchor-id='other:el:x' data-proto-id=\"save\">Save</button>",
+    'signup'
+  );
+  assert.ok(!/data-anchor-id='other:el:x'/.test(forgedSingleQuoted), 'a single-quoted forgery is stripped too');
+  // the strip is unconditional: an element with no data-proto-id is never
+  // given an anchor id, so a forged one there must not survive either
+  const forgedBare = rewriteMarkup(
+    '<div data-anchor-id="signup:el:save">x</div><span data-anchor-id=signup:el:save>y</span>',
+    'signup'
+  );
+  assert.ok(!/data-anchor-id/.test(forgedBare), 'a forgery on a tag with no data-proto-id is stripped, quoted or not');
+
+  // every rewritten element gets a keyboard path: tabindex="0" unless it
+  // already declares one, in which case its own value is left alone
+  assert.ok(/<button[^>]*\btabindex="0"/.test(rewriteMarkup('<button data-proto-id="x">x</button>', 'signup')));
+  const ownTabindex = rewriteMarkup('<button tabindex="-1" data-proto-id="x">x</button>', 'signup');
+  assert.ok(/tabindex="-1"/.test(ownTabindex), "the element's own tabindex is left alone, not overwritten");
+  assert.ok(!/tabindex="0"/.test(ownTabindex), 'no second tabindex is added on top of an existing one');
+
+  // a data-proto-id occurrence inside a comment, <pre>, or <script> body is
+  // never rewritten — only a real tag's own attribute is
+  const protectedMarkup =
+    '<!-- <b data-proto-id="ghost">not real</b> -->' +
+    '<pre>&lt;b data-proto-id="ghost2"&gt;not real&lt;/b&gt;</pre>' +
+    '<script>var s = "data-proto-id=\\"ghost3\\"";</script>';
+  assert.strictEqual(
+    (rewriteMarkup(protectedMarkup, 'signup').match(/data-anchor-id=/g) || []).length,
+    0,
+    'nothing inside a comment, <pre>, or <script> body is treated as a real attribute'
+  );
+
+  // full render: CSP meta first, sandbox attrs, no allow-same-origin, the
+  // declared height on the CSS var, a hidden-free stub per data-proto-id, and
+  // the raw markup only inside the escaped srcdoc — never verbatim in the
+  // outer HTML
+  const html = renderPrototype('id: signup\nheight: 320\n<button data-proto-id="save">Save</button>');
+  assert.ok(html.includes('sandbox="allow-scripts"'));
+  assert.ok(!/allow-same-origin/.test(html));
+  assert.ok(html.includes('--proto-h:320px'));
+  assert.ok(html.includes('data-anchor-id="signup:el:save"'));
+  assert.ok(
+    html.includes('class="proto-anchors"') && !/proto-anchors"\s+hidden/.test(html),
+    'the stub container carries no hidden attribute — the CSS hides it instead, so focusComment can still scroll to it'
+  );
+  assert.ok(
+    !html.includes('<button data-proto-id="save">Save</button>'),
+    'the raw markup must never appear unescaped outside the srcdoc attribute'
+  );
+
+  // the CSP meta tag is the very first thing in the inner document — before
+  // the base stylesheet, the markup, and the shim
+  const decoded = html
+    .match(/srcdoc="([^"]*)"/)[1]
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+  assert.ok(decoded.startsWith('<meta http-equiv="Content-Security-Policy"'));
+  assert.ok(decoded.includes("default-src 'none'"));
+
+  // the shim's own <script> sits before the agent's markup, so a raw
+  // </script> inside the agent's own inline script can never orphan it
+  const shimIdx = decoded.indexOf('<script>');
+  const markupIdx = decoded.indexOf('data-anchor-id="signup:el:save"');
+  assert.ok(shimIdx !== -1 && shimIdx < markupIdx, 'the shim script is injected before the markup');
+  assert.ok(decoded.includes("addEventListener('keydown'"), 'the shim also listens for keydown, not just click');
+
+  // two prototype fences sharing an id: the second falls back to a plain
+  // code block, exactly like a missing id: does
+  const usedIds = new Set();
+  const first = renderPrototype('id: signup\n<button data-proto-id="save">Save</button>', usedIds);
+  const second = renderPrototype('id: signup\n<button data-proto-id="cancel">Cancel</button>', usedIds);
+  assert.ok(first.includes('sandbox="allow-scripts"'));
+  assert.ok(second.startsWith('<pre><code class="language-prototype">'), 'a reused id falls back to a code block');
+
+  // malformed fence falls back to a plain code block, like choice/flow
+  assert.ok(renderPrototype('no id here').startsWith('<pre><code class="language-prototype">'));
+
+  console.log('prototype.js self-check ok');
+}
