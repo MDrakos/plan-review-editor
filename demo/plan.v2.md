@@ -12,6 +12,18 @@ explicit fast-follow (v1.1), not part of this v1.
 
 ## How it works
 
+```flow
+id: signin
+user[User enters email] -> ratelimit[Rate limit per email]: added after review
+ratelimit -> mint[Mint one-time token]
+mint -> store[Token store]: save hash
+mint -> email[Send sign-in link]: raw token
+email -> click[User opens the link]
+click -> exchange[Exchange for a session]: burn token
+click -> expired[Expired or used]: request a new link
+exchange -> store: mark burned
+```
+
 1. The user enters their email and requests a link
 2. We mint a single-use token and email a sign-in URL
    - the token is hashed at rest; the email carries the raw token
@@ -76,3 +88,4 @@ sendEmail(email, `${BASE}/auth/magic?t=${token}`);
 
 - Reworked the context per review; passkeys explicitly deferred to v1.1.
 - Added a rollout-order question above.
+- Put a rate-limit step in front of minting in the flow diagram.

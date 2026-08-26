@@ -98,14 +98,28 @@ Three pieces, zero runtime dependencies:
 Want to see the whole loop without wiring up a real agent?
 
 ```sh
-npm run demo
+npm run demo            # both stages
+npm run demo -- plan    # the plan review only
+npm run demo -- code    # the code review only
 ```
 
-A scripted stand-in "agent" presents a sample plan, opens your browser, and as
-you review it replies to your chats, shows live rework progress, re-presents a
+A scripted stand-in "agent" plays both halves of the loop, on its own port
+(4781), so it never touches a real session. (Great to screen-record for a
+walkthrough.)
+
+**Stage 1, the plan.** It presents a sample plan, opens your browser, and as you
+review it replies to your chats, shows live rework progress, re-presents a
 revised version with the changes highlighted, and remembers the questions you
-already answered. Runs on its own port (4781), so it never touches a real
-session. (Great to screen-record for a walkthrough.)
+already answered. The plan embeds a flow diagram, so you can click a box or an
+arrow and comment on that too, and the rework adds a new box to it.
+
+**Stage 2, the code.** It builds a throwaway git repo holding the code that plan
+would produce (a file modified, one added, one deleted, one untracked) and puts
+the diff in the code-review UI. Two things in it are wrong on purpose: leave a
+line comment, or a **Suggest** with your exact replacement text, hit **Request
+changes**, and the terminal applies your suggestion verbatim, fixes the planted
+bugs, and re-presents, with the changed lines marked and your comments moved to
+the code they were about. The repo lives in a temp dir and is deleted on exit.
 
 ## Quick start
 

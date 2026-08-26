@@ -11,6 +11,17 @@ one-time sign-in link emailed to the user, with passkeys as a later follow-up.
 
 ## How it works
 
+```flow
+id: signin
+user[User enters email] -> mint[Mint one-time token]
+mint -> store[Token store]: save hash
+mint -> email[Send sign-in link]: raw token
+email -> click[User opens the link]
+click -> exchange[Exchange for a session]: burn token
+click -> expired[Expired or used]: request a new link
+exchange -> store: mark burned
+```
+
 1. The user enters their email and requests a link
 2. We mint a single-use token and email a sign-in URL
    - the token is hashed at rest; the email carries the raw token
