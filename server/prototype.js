@@ -48,39 +48,51 @@ function parseHeader(body) {
 }
 
 // Blank out the interior of protected regions — HTML comments, <pre> blocks,
-// and <script> bodies — while keeping every other character's position the
-// same, so a later tag scan can never mistake text inside them (a JS string
-// literal, a code sample) for a real attribute on a real tag.
-// lazydev: this is a regex mask, not an HTML parser — a <pre> or <script>
-// whose own opening tag is malformed enough to confuse `[^>]*` can still slip
-// past it. The markup is agent-authored and well-formed by construction; a
-// real parser is a bigger tool than this fence needs.
+// <script> bodies, and <style> bodies — while keeping every other character's
+// position the same, so a later tag scan can never mistake text inside them
+// (a JS string literal, a code sample, a CSS comment) for a real attribute on
+// a real tag.
+// lazydev: this is a regex mask, not an HTML parser — a <pre>, <script>, or
+// <style> whose own opening tag is malformed enough to confuse `[^>]*` can
+// still slip past it. The markup is agent-authored and well-formed by
+// construction; a real parser is a bigger tool than this fence needs.
 function maskProtected(markup) {
   const blank = (s) => s.replace(/[^\n]/g, ' ');
   return markup
     .replace(/<!--[\s\S]*?-->/g, blank)
     .replace(/(<pre\b[^>]*>)([\s\S]*?)(<\/pre>)/gi, (m, open, body, close) => open + blank(body) + close)
-    .replace(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi, (m, open, body, close) => open + blank(body) + close);
+    .replace(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi, (m, open, body, close) => open + blank(body) + close)
+    .replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (m, open, body, close) => open + blank(body) + close);
 }
 
-// Scan `markup` for every real tag (an attribute scan over masked markup, not
-// an HTML parse) carrying data-proto-id="x" and build the stub list: one
-// entry per distinct id, first tag wins, and within one tag its first
-// data-proto-id attribute wins if it carries more than one. A missing
-// data-proto-label defaults the label to the id.
-function scanStubs(markup, fenceId) {
+// Call fn(tagText, index) for every real tag in `markup` — scanned over a
+// masked copy (so nothing inside a comment/<pre>/<script>/<style> body is
+// mistaken for a real tag) but handed the original text at the same offset,
+// in document order. Shared by scanStubs and rewriteMarkup so they can never
+// disagree on what counts as a tag.
+function forEachTag(markup, fn) {
   const masked = maskProtected(markup);
   const tagRe = /<[a-zA-Z][^>]*>/g;
-  const seen = new Set();
-  const stubs = [];
   let m;
   while ((m = tagRe.exec(masked))) {
-    const idMatch = m[0].match(/\bdata-proto-id="([^"]*)"/);
-    if (!idMatch || !idMatch[1] || seen.has(idMatch[1])) continue;
-    seen.add(idMatch[1]);
-    const label = m[0].match(/\bdata-proto-label="([^"]*)"/);
-    stubs.push({ id: idMatch[1], label: label ? label[1] : idMatch[1], anchorId: `${fenceId}:el:${idMatch[1]}` });
+    fn(markup.slice(m.index, m.index + m[0].length), m.index);
   }
+}
+
+// Scan `markup` for every real tag carrying data-proto-id="x" and build the
+// stub list: one entry per distinct id, first tag wins, and within one tag
+// its first data-proto-id attribute wins if it carries more than one. A
+// missing data-proto-label defaults the label to the id.
+function scanStubs(markup, fenceId) {
+  const seen = new Set();
+  const stubs = [];
+  forEachTag(markup, (tag) => {
+    const idMatch = tag.match(/\bdata-proto-id="([^"]*)"/);
+    if (!idMatch || !idMatch[1] || seen.has(idMatch[1])) return;
+    seen.add(idMatch[1]);
+    const label = tag.match(/\bdata-proto-label="([^"]*)"/);
+    stubs.push({ id: idMatch[1], label: label ? label[1] : idMatch[1], anchorId: `${fenceId}:el:${idMatch[1]}` });
+  });
   return stubs;
 }
 
@@ -95,24 +107,20 @@ function rewriteTag(tag, fenceId) {
   let out = tag.replace(/\s+data-anchor-id=(?:"[^"]*"|'[^']*'|[^\s>]*)/g, '');
   const idMatch = tag.match(/\bdata-proto-id="([^"]*)"/);
   if (!idMatch || !idMatch[1]) return out;
-  if (!/\btabindex\s*=/.test(out)) out = out.replace(/^<([a-zA-Z][^\s>]*)/, '<$1 tabindex="0"');
+  if (!/(?<![\w-])tabindex\s*=/i.test(out)) out = out.replace(/^<([a-zA-Z][^\s>]*)/, '<$1 tabindex="0"');
   const anchorId = escapeHtml(`${fenceId}:el:${idMatch[1]}`);
   return out.replace(/\/?>$/, (close) => ` data-anchor-id="${anchorId}"${close}`);
 }
 
-// Apply rewriteTag to every real tag in `markup` (scanned on masked markup,
-// applied to the original at the same offsets — masking never changes
-// length), leaving comment/<pre>/<script> bodies untouched.
+// Apply rewriteTag to every real tag in `markup`, leaving comment/<pre>/
+// <script>/<style> bodies untouched.
 function rewriteMarkup(markup, fenceId) {
-  const masked = maskProtected(markup);
-  const tagRe = /<[a-zA-Z][^>]*>/g;
   let out = '';
   let last = 0;
-  let m;
-  while ((m = tagRe.exec(masked))) {
-    out += markup.slice(last, m.index) + rewriteTag(markup.slice(m.index, m.index + m[0].length), fenceId);
-    last = m.index + m[0].length;
-  }
+  forEachTag(markup, (tag, index) => {
+    out += markup.slice(last, index) + rewriteTag(tag, fenceId);
+    last = index + tag.length;
+  });
   return out + markup.slice(last);
 }
 
@@ -282,6 +290,13 @@ if (require.main === module) {
   assert.ok(/tabindex="-1"/.test(ownTabindex), "the element's own tabindex is left alone, not overwritten");
   assert.ok(!/tabindex="0"/.test(ownTabindex), 'no second tabindex is added on top of an existing one');
 
+  // an unrelated attribute merely ending in "-tabindex" must not be mistaken
+  // for a real tabindex attribute
+  assert.ok(
+    /tabindex="0"/.test(rewriteMarkup('<div data-proto-id="x" data-tabindex="a">hi</div>', 'signup')),
+    'a data-tabindex attribute must not block tabindex="0" injection'
+  );
+
   // a data-proto-id occurrence inside a comment, <pre>, or <script> body is
   // never rewritten — only a real tag's own attribute is
   const protectedMarkup =
@@ -292,6 +307,14 @@ if (require.main === module) {
     (rewriteMarkup(protectedMarkup, 'signup').match(/data-anchor-id=/g) || []).length,
     0,
     'nothing inside a comment, <pre>, or <script> body is treated as a real attribute'
+  );
+
+  // a data-proto-id occurrence inside a <style> body is never rewritten either
+  const styleMarkup = '<style>/* <b data-proto-id="ghost4">not real</b> */</style>';
+  assert.strictEqual(
+    (rewriteMarkup(styleMarkup, 'signup').match(/data-anchor-id=/g) || []).length,
+    0,
+    'nothing inside a <style> body is treated as a real attribute'
   );
 
   // full render: CSP meta first, sandbox attrs, no allow-same-origin, the
