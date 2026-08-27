@@ -38,8 +38,9 @@ function parseHeader(body) {
       if (id) return null; // two id: lines
       id = kv[2].trim();
     } else if (kv[1] === 'height') {
-      const n = Number(kv[2].trim());
-      if (Number.isFinite(n)) height = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, n));
+      const raw = kv[2].trim();
+      const n = Number(raw);
+      if (raw && Number.isFinite(n)) height = Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, n));
     }
   }
   const markup = lines.slice(i).join('\n');
@@ -212,6 +213,11 @@ if (require.main === module) {
 
   // a non-numeric height falls back to the default rather than erroring
   assert.strictEqual(parseHeader('id: signup\nheight: nope\n<div>hi</div>').height, 400);
+
+  // an empty height: value must not be coerced by Number('') === 0 into the
+  // minimum — it falls back to the default like any other non-numeric value
+  assert.strictEqual(parseHeader('id: signup\nheight:\n<div>hi</div>').height, 400, 'blank height falls back to the default, not 0/MIN_HEIGHT');
+  assert.strictEqual(parseHeader('id: signup\nheight:   \n<div>hi</div>').height, 400, 'whitespace-only height falls back to the default too');
 
   // malformed: no id, blank markup, two id: lines, an id with invalid characters
   assert.strictEqual(parseHeader('<div>hi</div>'), null, 'no id: line');
