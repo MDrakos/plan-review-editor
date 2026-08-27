@@ -48,9 +48,9 @@ version: 1
 ## FX-5 — `openProtoComposer` rejects an anchor id not scoped to its own block
 
 - **Behavior:** `openProtoComposer(block, anchorId, rect)` only proceeds when `anchorId` is a string prefixed with `${block.dataset.protoId}:el:`. A mismatch (or a non-string) returns silently.
-- **Input (source-level):** `openProtoComposer`'s body checked for `dataset.protoId` and `startsWith(prefix)`.
-- **Expected:** the check exists and runs before `flowEl`/`openComposerAt` are reached.
-- **Test:** `test/e2e.js` source-regex assertion against `public/app.js` (Task 4 Step 1).
+- **Input:** `openProtoComposer(block, anchorId, rect)` called directly through the liveness VM harness (`buildLivenessVm`, `test/e2e.js`) with a fake block whose `dataset.protoId` is `'signup'`, once with `anchorId = 'other:el:save'` and once with `anchorId = 'signup:el:save'`.
+- **Expected:** the mismatched call leaves the composer element `hidden`; the correctly-scoped call opens it (`hidden === false`), proving the rejection isn't vacuous.
+- **Test:** `test/e2e.js`, driven through `buildLivenessVm` (real behavior, not a source grep — a pre-PR review found the prior source-regex check couldn't fail for the reason it claimed to).
 - **Subsumes:** amendment A2 (client half); STRIDE TM-3 (a prototype frame forging an anchor id to hijack or misattribute a comment thread onto a different block's element — including the runtime-script variant, since the check runs on every reported click regardless of how the frame produced the id). Partially closes TM-4 (an unvalidated `postMessage` shape leaving stale pending state): the `typeof anchorId !== 'string'` half of that check is a byproduct of this fix. The remaining half of TM-4 — validating `rect`'s numeric shape — is unaddressed (see Dropped).
 
 ## FX-6 — the stub container has no `hidden` attribute; CSS alone hides it
@@ -101,13 +101,12 @@ version: 1
 - **Test:** `server/prototype.js` self-check (Task 1 Step 9).
 - **Subsumes:** amendment A6 (shim ordering); FMEA FM-14 (a literal `</script>` in the agent's own inline script silently disabling the shim for that block, because the original design appended the shim *after* the markup).
 
-## FX-12 — `bindProtos()` reuses a frame whose `srcdoc` is unchanged instead of tearing it down
+## FX-12 — REMOVED: `bindProtos()` no longer attempts frame reuse
 
-- **Behavior:** on each render, a fresh `.proto-block` whose `srcdoc` is byte-identical to the block that carried the same `data-proto-id` last render is swapped back out for the old (already-loaded) block, so an unrelated peer's comment save doesn't recreate — and re-hang, re-run, or re-beacon — an unchanged prototype's iframe.
-- **Input (source-level):** `bindProtos`'s body checked for comparing `getAttribute('srcdoc')` and calling `replaceWith`.
-- **Expected:** the comparison and the swap both exist, ahead of the fallback path that registers a genuinely new frame.
-- **Test:** `test/e2e.js` source-regex assertion against `public/app.js` (Task 4 Step 1) — structural only, per the design's own stated limit (no real browser in this suite).
-- **Subsumes:** amendment A7; STRIDE TM-10 (peer review activity defeating "recoverable by reload" for a hung prototype — the primary target). TM-9 (the same unconditional-rebuild root cause turning a network beacon into an activity-correlated oracle) is closed by this same fix as a secondary consequence, though as noted under FX-2 it is already moot once the CSP blocks the beacon outright.
+- **What changed:** a pre-PR review found the reuse this fixture described was inert: `renderDoc`/the diff view assign `docEl.innerHTML` wholesale *before* calling `bindProtos()`, so every prior `.proto-block` — including the one `bindProtos()` would try to swap back in — is already detached by the time `replaceWith` runs. A browser reloads a detached-then-reattached iframe regardless of how synchronously the swap happens, so the "keep the iframe alive" reuse never actually worked. Making it real would require `renderDoc` to patch only the changed subtrees instead of replacing `docEl.innerHTML` wholesale — out of scope as a small fix, so the reuse code (and this fixture's `replaceWith`/`getAttribute('srcdoc')` structural test) was deleted rather than kept as dead code that looks like a mitigation.
+- **Current behavior:** `bindProtos()` just rebuilds the `iframe.contentWindow → block` map on every render; every render's iframes reload, same as before this feature existed.
+- **Test:** `test/e2e.js` now asserts `bindProtos()`'s body contains no `replaceWith` (a regression guard against reintroducing the same dead pattern), alongside the real behavioral test at FX-5.
+- **STRIDE fallout:** TM-10 (peer review activity defeating "recoverable by reload" for a hung prototype) and TM-9's secondary closure are **not** mitigated by this feature — TM-9 remains moot only because FX-2's CSP already blocks the beacon it would need.
 
 ## FX-13 — a prototype comment carries forward across an unrelated re-present, and archives when its element is removed
 
