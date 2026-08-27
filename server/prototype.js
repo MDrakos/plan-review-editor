@@ -164,11 +164,10 @@ const CSP_META =
 const BASE_STYLE =
   '<style>*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;color:#1a1a1a;background:#fff}</style>';
 
-// Click, or Enter/Space on the nearest [data-anchor-id] → report it to the
-// parent. Two inbound messages: 'proto-commented' marks an element as
-// carrying a thread, 'proto-clear' drops the selection highlight. '*' is the
-// only possible target origin in both directions, because sandbox="allow-scripts"
-// without allow-same-origin gives this frame an opaque (null) origin.
+// Click, or Enter/Space on the nearest [data-anchor-id], reports {anchorId,
+// rect} to the parent; a 'proto-commented' message back marks that element as
+// carrying a thread. '*' is the only possible postMessage target origin in
+// both directions, since the sandboxed frame's own origin is opaque.
 const SHIM = `(function(){
 function report(el){
   var r = el.getBoundingClientRect();
@@ -190,9 +189,6 @@ window.addEventListener('message', function(e){
   if (d.kind === 'proto-commented') {
     var el = document.querySelector('[data-anchor-id="' + CSS.escape(d.anchorId) + '"]');
     if (el) el.classList.add('commented');
-  } else if (d.kind === 'proto-clear') {
-    var sel = document.querySelectorAll('.selected');
-    for (var i = 0; i < sel.length; i++) sel[i].classList.remove('selected');
   }
 });
 })();`;
@@ -421,6 +417,10 @@ if (require.main === module) {
   const markupIdx = decoded.indexOf('data-anchor-id="signup:el:save"');
   assert.ok(shimIdx !== -1 && shimIdx < markupIdx, 'the shim script is injected before the markup');
   assert.ok(decoded.includes("addEventListener('keydown'"), 'the shim also listens for keydown, not just click');
+
+  // the shim must not carry dead code clearing a .selected class nothing in
+  // this feature ever adds
+  assert.ok(!/querySelectorAll\('\.selected'\)/.test(SHIM), 'the shim has no handling for a class nothing sets');
 
   // two prototype fences sharing an id: the second falls back to a plain
   // code block, exactly like a missing id: does
