@@ -66,6 +66,25 @@ function maskProtected(markup) {
     .replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (m, open, body, close) => open + blank(body) + close);
 }
 
+// Find the `>` that closes the tag starting at `start` (its `<`), tracking
+// single- and double-quoted attribute values so a `>` inside one (e.g.
+// title="a > b") doesn't end the tag early. Returns -1 for a tag whose quote
+// never closes, so the caller can stop rather than scanning past it forever.
+function tagEnd(text, start) {
+  let quote = null;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    } else if (c === '>') {
+      return i;
+    }
+  }
+  return -1;
+}
+
 // Call fn(tagText, index) for every real tag in `markup` — scanned over a
 // masked copy (so nothing inside a comment/<pre>/<script>/<style> body is
 // mistaken for a real tag) but handed the original text at the same offset,
@@ -73,10 +92,13 @@ function maskProtected(markup) {
 // disagree on what counts as a tag.
 function forEachTag(markup, fn) {
   const masked = maskProtected(markup);
-  const tagRe = /<[a-zA-Z][^>]*>/g;
+  const openRe = /<[a-zA-Z]/g;
   let m;
-  while ((m = tagRe.exec(masked))) {
-    fn(markup.slice(m.index, m.index + m[0].length), m.index);
+  while ((m = openRe.exec(masked))) {
+    const end = tagEnd(masked, m.index);
+    if (end === -1) break; // an unterminated quote — nothing after it is recoverable either
+    fn(markup.slice(m.index, end + 1), m.index);
+    openRe.lastIndex = end + 1;
   }
 }
 
@@ -322,6 +344,27 @@ if (require.main === module) {
     0,
     'nothing inside a <style> body is treated as a real attribute'
   );
+
+  // a `>` inside a quoted attribute value is ordinary authored content (a label
+  // reading "greater than"), not a tag boundary — the scanner must not stop
+  // there, whether the targeted attribute comes before or after it
+  const gtAfterTarget = renderPrototype('id: t\n<div data-proto-id="x" title="a > b">hi</div>');
+  assert.ok(gtAfterTarget.includes('data-anchor-id=&quot;t:el:x&quot;'), 'the anchor still lands on the element');
+  assert.ok(!/ b&quot;&gt;/.test(gtAfterTarget), 'the rest of the quoted attribute must not leak out as its own text');
+  const gtBeforeTarget = renderPrototype('id: t\n<div title="a > b" data-proto-id="save">hi</div>');
+  assert.ok(
+    gtBeforeTarget.includes('data-anchor-id=&quot;t:el:save&quot;'),
+    'a quoted > before the target attribute must not drop the target silently'
+  );
+
+  // an unterminated quote must never hang or run away scanning the rest of the
+  // document — it just means that one tag has no discoverable end
+  const before = Date.now();
+  const unterminated = renderPrototype(
+    'id: t\n<div data-proto-id="x" title="unterminated>hi</div><button data-proto-id="save">Save</button>'
+  );
+  assert.ok(Date.now() - before < 2000, 'an unterminated quote must not hang the scanner');
+  assert.ok(typeof unterminated === 'string');
 
   // full render: CSP meta first, sandbox attrs, no allow-same-origin, the
   // declared height on the CSS var, a hidden-free stub per data-proto-id, and
