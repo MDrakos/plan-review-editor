@@ -3355,6 +3355,28 @@ async function main() {
   );
   await cli('stop', '--session', pt.id);
 
+  const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
+  const protoCssIdx = cssSrc.indexOf('.proto-block');
+  const protoCss = protoCssIdx === -1 ? '' : cssSrc.slice(protoCssIdx);
+  check(
+    '.proto-block/.proto-frame/.proto-anchors exist and paint with design tokens, not literal colours',
+    protoCss.includes('.proto-block') &&
+      protoCss.includes('.proto-frame') &&
+      protoCss.includes('.proto-anchors') &&
+      protoCss.includes('height: var(--proto-h)') &&
+      !/#[0-9a-fA-F]{3,8}\b/.test(protoCss),
+    protoCss.slice(0, 300)
+  );
+  check(
+    'the anchor stubs keep a layout box so focusComment can scroll to the prototype',
+    !/\.proto-anchors\s*\{[^}]*display:\s*none/.test(protoCss),
+    protoCss.slice(0, 300)
+  );
+  check(
+    'the stub container carries no hidden attribute — public/style.css declares [hidden] { display: none !important }, which would beat the .proto-anchors rule above',
+    !/proto-anchors"\s+hidden/.test(protoHtml)
+  );
+
   console.log('issue 008: a re-present carries a choice resolution forward (persists until cleared)');
   const rcDoc = path.join(dir, 'planreview-e2e-carry-res.md');
   const rcChoice = '\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n';
