@@ -78,6 +78,28 @@ stable id plus a display label; a bare `name` uses the id as the label. Comments
 on the diagram come back with an `anchors` list naming the exact nodes and edges
 they are about — more than one entry means the reviewer selected a group.
 
+**Show a screen as a live prototype, not a description.** When the plan
+introduces a new UI, embed it as a `prototype` fence instead of describing it
+in prose or ASCII. The reviewer clicks an element to comment on it, exactly as
+they comment on a flow diagram's boxes:
+
+````markdown
+```prototype
+id: signup
+height: 320
+<div class="card">
+  <h2 data-proto-id="title">Create your account</h2>
+  <button data-proto-id="save" data-proto-label="Save button">Save</button>
+</div>
+```
+````
+
+`id:` is required and namespaces the prototype; `height:` is optional (default
+400). Mark any element you want commentable with `data-proto-id="x"` — the
+server turns it into a stable anchor. Comments on it come back with an
+`anchors` list, same as a flow diagram's. The frame's CSP means an image must
+be a `data:` URI — no web fonts, no network calls.
+
 **Link external references inline.** When the plan names an external resource — a
 Jira issue key (`ENG-1234`), a Confluence page, a design doc, a PR, or any
 off-plan URL — resolve it to its real URL (via your Jira/Confluence connectors or
