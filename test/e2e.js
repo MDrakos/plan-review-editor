@@ -228,7 +228,7 @@ function buildLivenessVm({ fakeState, getNow, onFetch, promptQueue, storage }) {
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
   const ctx = vm.createContext({
-    window: {},
+    window: { addEventListener() {} },
     document: {
       getElementById: getEl, querySelector: () => makeEl(), querySelectorAll: () => [], addEventListener() {},
       createElement: () => makeEl(), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({}) }),
@@ -3375,6 +3375,40 @@ async function main() {
   check(
     'the stub container carries no hidden attribute — public/style.css declares [hidden] { display: none !important }, which would beat the .proto-anchors rule above',
     !/proto-anchors"\s+hidden/.test(protoHtml)
+  );
+
+  const appSrc2 = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  check(
+    'bindProtos() is wired at both renderDoc sites, right alongside bindFlows()',
+    (appSrc2.match(/bindFlows\(\);\n\s*bindProtos\(\);/g) || []).length === 2
+  );
+  const protoListener = (appSrc2.match(
+    /window\.addEventListener\('message'[\s\S]*?\n\}\);/
+  ) || [''])[0];
+  check(
+    "the prototype message listener filters on event.source, never event.origin — a sandboxed frame's origin is null and not a value worth trusting",
+    /protoFrames\.get\(e\.source\)/.test(protoListener) && !/\.origin\b/.test(protoListener),
+    protoListener.slice(0, 300)
+  );
+  check(
+    'dismissComposer() also clears the selection inside every prototype frame',
+    /function dismissComposer\(\)\s*\{[^}]*proto-clear/.test(appSrc2)
+  );
+  check(
+    'markFlowAnchors() also notifies a prototype frame when one of its elements gets commented',
+    /function markFlowAnchors\([^)]*\)\s*\{[\s\S]*?proto-commented[\s\S]*?\n\}/.test(appSrc2)
+  );
+  const openProtoComposerSrc = (appSrc2.match(/function openProtoComposer\([^)]*\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  check(
+    "openProtoComposer rejects a reported anchorId that isn't prefixed with the sending block's own fence id — a frame can't hijack a click onto a different block's anchor",
+    /dataset\.protoId/.test(openProtoComposerSrc) && /startsWith\(prefix\)/.test(openProtoComposerSrc),
+    openProtoComposerSrc.slice(0, 400)
+  );
+  const bindProtosSrc = (appSrc2.match(/function bindProtos\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  check(
+    "bindProtos() reuses an existing frame instead of letting an unrelated re-render tear it down, when the incoming block's srcdoc is byte-identical to the one it's replacing",
+    /getAttribute\('srcdoc'\)/.test(bindProtosSrc) && /replaceWith/.test(bindProtosSrc),
+    bindProtosSrc.slice(0, 400)
   );
 
   console.log('issue 008: a re-present carries a choice resolution forward (persists until cleared)');

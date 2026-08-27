@@ -276,6 +276,7 @@ function renderDoc(doc) {
     doc.html || '<p class="empty">Waiting for the agent to present a plan…</p>';
   highlightDoc();
   bindFlows();
+  bindProtos();
   state.version = doc.version;
   state.versions = doc.versions || [];
   state.presentedAt = doc.presentedAt || null;
@@ -420,6 +421,7 @@ async function showDiff() {
     : '<p class="empty">No changes between these versions.</p>';
   highlightDoc();
   bindFlows();
+  bindProtos();
   diffLegend.hidden = false;
   diffShowBtn.hidden = true;
   diffCloseBtn.hidden = false;
@@ -1119,6 +1121,7 @@ function dismissComposer() {
   pendingAnchors = null;
   pendingQuote = '';
   clearFlowSelection();
+  for (const win of protoFrames.keys()) win.postMessage({ kind: 'proto-clear' }, '*');
 }
 
 document.getElementById('composer-cancel').addEventListener('click', dismissComposer);
@@ -1827,6 +1830,9 @@ function markFlowAnchors(anchors, cid) {
     const cids = (el.dataset.cids || '').split(' ').filter(Boolean);
     if (!cids.includes(cid)) cids.push(cid);
     el.dataset.cids = cids.join(' ');
+    const protoBlock = el.closest('.proto-block');
+    const frame = protoBlock && protoBlock.querySelector('.proto-frame');
+    if (frame) frame.contentWindow.postMessage({ kind: 'proto-commented', anchorId: id }, '*');
   }
 }
 
@@ -2104,6 +2110,84 @@ docEl.addEventListener('keydown', (e) => {
   e.preventDefault();
   openFlowComposer([g]);
 });
+
+// ---------- prototype frames (```prototype) ----------
+//
+// A prototype fence renders as a sandboxed iframe with the same click-to-comment
+// affordance a flow diagram's box gets: the frame's own shim script reports a
+// click (or Enter/Space) as { anchorId, rect } via postMessage, and the
+// composer opens exactly as it does for a flow node. flowEl/flowLabel/
+// flowCommentable are reused as is — the anchor lives on the stub beside the
+// frame, not inside it.
+
+const protoFrames = new Map(); // iframe.contentWindow -> the .proto-block that owns it
+let lastProtoBlocks = new Map(); // data-proto-id -> the .proto-block from the previous render
+
+// Re-scanned on every render: docEl.innerHTML is fully replaced each time, so
+// every .proto-block is a fresh DOM node. When a fresh block's srcdoc is
+// byte-identical to the block that carried the same data-proto-id last time,
+// swap the fresh node back out for the old one — its iframe is already
+// loaded and keeps its running state, instead of reloading (and re-running
+// the agent's script) on every unrelated reviewer's comment.
+// lazydev: this only recognizes a whole-block match (same id, identical
+// srcdoc); it doesn't diff attributes within a block, so it buys nothing when
+// only part of a prototype changed.
+function bindProtos() {
+  protoFrames.clear();
+  const nextProtoBlocks = new Map();
+  for (const block of docEl.querySelectorAll('.proto-block')) {
+    const id = block.dataset.protoId;
+    const frame = block.querySelector('.proto-frame');
+    const prevBlock = lastProtoBlocks.get(id);
+    const prevFrame = prevBlock && prevBlock.querySelector('.proto-frame');
+    if (frame && prevFrame && prevFrame.getAttribute('srcdoc') === frame.getAttribute('srcdoc')) {
+      block.replaceWith(prevBlock);
+      nextProtoBlocks.set(id, prevBlock);
+      protoFrames.set(prevFrame.contentWindow, prevBlock);
+      continue;
+    }
+    if (frame) protoFrames.set(frame.contentWindow, block);
+    nextProtoBlocks.set(id, block);
+  }
+  lastProtoBlocks = nextProtoBlocks;
+}
+
+// Filtered on event.source (an exact window reference), never event.origin —
+// a sandboxed frame with no allow-same-origin has an opaque (null) origin,
+// which is not a value worth trusting.
+window.addEventListener('message', (e) => {
+  const block = protoFrames.get(e.source);
+  if (!block) return;
+  const data = e.data || {};
+  if (data.kind !== 'proto-click') return;
+  openProtoComposer(block, data.anchorId, data.rect);
+});
+
+// Open the composer for a click reported up from inside `block`'s frame. A
+// reported anchorId is only trusted when it names an element inside this same
+// block — the block's frame could otherwise forge a click onto a different
+// block's anchor and hijack or misattribute its comment thread. Mirrors
+// openFlowComposer: an anchor that already carries a thread (data-cids on its
+// stub) focuses that thread instead of starting a second one.
+function openProtoComposer(block, anchorId, rect) {
+  const prefix = `${block.dataset.protoId}:el:`;
+  if (typeof anchorId !== 'string' || !anchorId.startsWith(prefix)) return;
+  const el = flowEl(anchorId);
+  if (!el) return;
+  if (el.dataset.cids) {
+    focusComment(el.dataset.cids.split(' ')[0]);
+    return;
+  }
+  if (!flowCommentable()) return;
+  const frameRect = block.querySelector('.proto-frame').getBoundingClientRect();
+  pendingRange = null;
+  pendingAnchors = [anchorId];
+  pendingQuote = flowLabel(pendingAnchors);
+  openComposerAt(
+    { left: frameRect.left + rect.left, bottom: frameRect.top + rect.bottom },
+    pendingQuote
+  );
+}
 
 // ---------- boot ----------
 
