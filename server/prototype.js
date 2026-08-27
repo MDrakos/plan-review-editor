@@ -44,23 +44,29 @@ const blank = (s) => s.replace(/[^\n]/g, ' ');
 
 // Blank out the body of every <tagName>...</tagName> in `markup`, keeping the
 // open/close tags and every other character's position the same.
+// Returns null when a tag opens and never closes: everything after it would be
+// raw text in a browser, so the caller must discard the fence rather than treat
+// that text as elements. Bodies are collected as ranges and blanked in one pass,
+// so a document with many raw-text elements stays linear.
 function blankTagBody(markup, tagName) {
-  // The open tag's end comes from tagEnd, so the mask and the tag scan can
-  // never disagree about where a tag stops. A tag whose open or closing tag
-  // never appears is left alone.
   const openRe = new RegExp(`<${tagName}\\b`, 'gi');
   const close = `</${tagName}>`;
-  let out = markup;
+  const lower = markup.toLowerCase();
+  const parts = [];
+  let last = 0;
   let m;
-  while ((m = openRe.exec(out))) {
-    const tagStop = tagEnd(out, m.index);
-    if (tagStop === -1) break;
-    const bodyEnd = out.toLowerCase().indexOf(close, tagStop + 1);
-    if (bodyEnd === -1) break;
-    out = out.slice(0, tagStop + 1) + blank(out.slice(tagStop + 1, bodyEnd)) + out.slice(bodyEnd);
+  while ((m = openRe.exec(markup))) {
+    const tagStop = tagEnd(markup, m.index);
+    if (tagStop === -1) return null;
+    const bodyEnd = lower.indexOf(close, tagStop + 1);
+    if (bodyEnd === -1) return null;
+    parts.push(markup.slice(last, tagStop + 1), blank(markup.slice(tagStop + 1, bodyEnd)));
+    last = bodyEnd;
     openRe.lastIndex = bodyEnd + close.length;
   }
-  return out;
+  if (!parts.length) return markup;
+  parts.push(markup.slice(last));
+  return parts.join('');
 }
 
 // Blank out the interior of protected regions — HTML comments and the raw-text
@@ -73,7 +79,10 @@ function blankTagBody(markup, tagName) {
 // it. Upgrading past that means a real tokenizer here instead of regexes.
 function maskProtected(markup) {
   let out = markup.replace(/<!--[\s\S]*?-->/g, blank);
-  for (const tag of ['script', 'style', 'textarea', 'title']) out = blankTagBody(out, tag);
+  for (const tag of ['script', 'style', 'textarea', 'title']) {
+    out = blankTagBody(out, tag);
+    if (out === null) return null;
+  }
   return out;
 }
 
@@ -107,6 +116,7 @@ function tagEnd(text, start) {
 // in which a forged data-anchor-id would survive.
 function forEachTag(markup, fn) {
   const masked = maskProtected(markup);
+  if (masked === null) return false;
   const openRe = /<[a-zA-Z]/g;
   let m;
   while ((m = openRe.exec(masked))) {
@@ -423,6 +433,21 @@ if (require.main === module) {
     !/<button[^>]*data-anchor-id="signup:el:ta"/.test(merged),
     "a masked element's anchor never lands on the tag after it"
   );
+
+  // a raw-text element with no closing tag swallows the rest of the document in
+  // a browser, so anything after it would be text, not elements to anchor to
+  const unclosedRawText = renderPrototype(
+    'id: t\n<script>var x = 1;</scriptTYPO><div data-proto-id="real">R</div>'
+  );
+  assert.ok(unclosedRawText.startsWith('<pre><code'), 'an unterminated raw-text tag falls back to a code block');
+  assert.ok(!unclosedRawText.includes('t:el:real'), 'no anchor is minted for text a browser would never render');
+
+  // masking many small raw-text elements stays linear
+  let manyTags = '';
+  for (let i = 0; i < 8000; i++) manyTags += `<style>.a${i}{}</style>`;
+  const manyStart = Date.now();
+  rewriteMarkup(`${manyTags}<div data-proto-id="real">y</div>`, 't');
+  assert.ok(Date.now() - manyStart < 250, 'masking 8000 raw-text elements does not scale quadratically');
 
   // height boundaries: a real number clamps, a non-number falls back
   const h = (v) => renderPrototype(`id: t\nheight: ${v}\n<b data-proto-id="x">y</b>`).match(/--proto-h:(\d+)px/)[1];

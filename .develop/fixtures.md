@@ -77,11 +77,11 @@ version: 1
 - **Test:** `server/prototype.js` self-check (Task 1 Step 9, `usedIds` assertions); `test/e2e.js` (Task 2, duplicate-id and flow-sharing checks).
 - **Subsumes:** amendment A5; FMEA FM-7 and STRIDE TM-8 (the same defect — two fences sharing an `id:` collide on every anchor they emit, and `querySelector`'s first-match semantics resolve every click/paint/carry-forward to the wrong block). **Correction preserved:** TM-8's claim that a `flow` fence and a `prototype` fence sharing an id also collide is wrong and is not "fixed" — the second half of this fixture pins that down as a passing case, not a regression.
 
-## FX-9 — `data-proto-id` inside a comment, `<pre>`, or `<script>` body is never rewritten
+## FX-9 — `data-proto-id` inside a comment or a raw-text element body is never rewritten
 
-- **Behavior:** `scanStubs`/`rewriteMarkup` scan a masked copy of the markup (HTML comments, `<pre>` bodies, and `<script>` bodies blanked out) so a `data-proto-id`-shaped substring inside a JS string literal, an HTML comment, or a `<pre>`-quoted code sample is never mistaken for a real attribute on a real tag.
-- **Input:** `<!-- <b data-proto-id="ghost">not real</b> -->`, `<pre>&lt;b data-proto-id="ghost2"&gt;...</pre>`, `<script>var s = "data-proto-id=\"ghost3\"";</script>`.
-- **Expected:** none of `ghost`/`ghost2`/`ghost3` appear in `scanStubs`'s output or get a `data-anchor-id` from `rewriteMarkup`.
+- **Behavior:** `scanStubs`/`rewriteMarkup` scan a masked copy of the markup, with HTML comments and the bodies of the raw-text elements (`<script>`, `<style>`, `<textarea>`, `<title>`) blanked out, so a `data-proto-id`-shaped substring inside a JS string literal, a CSS comment, an HTML comment or a placeholder is never mistaken for a real attribute. `<pre>` is deliberately **not** masked: it holds ordinary child markup, so a tag inside one is a real tag and must still have a forged `data-anchor-id` stripped. A code sample shown inside a `<pre>` is escaped, so it is text rather than tags and the scan passes over it anyway. A raw-text element that never closes makes the whole fence fall back to a code block, since everything after it would be text in a browser rather than elements to anchor to.
+- **Input:** `<!-- <b data-proto-id="ghost">not real</b> -->`, `<pre>&lt;b data-proto-id="ghost2"&gt;...</pre>`, `<script>var s = "data-proto-id=\"ghost3\"";</script>`, plus `<pre><span data-anchor-id="signup:el:save">spoof</span></pre>` and `<script>x</scriptTYPO><div data-proto-id="real">`.
+- **Expected:** none of `ghost`/`ghost2`/`ghost3` appear in `scanStubs`'s output or get a `data-anchor-id`; the forged id inside the `<pre>` is stripped; and the unterminated `<script>` renders the fence as a code block with no anchor minted for `real`.
 - **Test:** `server/prototype.js` self-check (Task 1 Step 5).
 - **Subsumes:** amendment A6 (masking); FMEA FM-3 (`rewriteMarkup`'s unanchored regex matching `data-proto-id="x"` occurrences that are not real attributes, and disagreeing with the tag-anchored `scanStubs` on exactly this input class — closed here because both functions now scan the same masked, tag-anchored source).
 
