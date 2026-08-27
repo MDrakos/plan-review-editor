@@ -45,13 +45,22 @@ const blank = (s) => s.replace(/[^\n]/g, ' ');
 // Blank out the body of every <tagName>...</tagName> in `markup`, keeping the
 // open/close tags and every other character's position the same.
 function blankTagBody(markup, tagName) {
-  // The open tag's own attributes are quote-aware for the same reason `tagEnd`
-  // is: a `>` inside one is not the end of the tag.
-  const re = new RegExp(
-    `(<${tagName}\\b(?:"[^"]*"|'[^']*'|[^>])*>)([\\s\\S]*?)(</${tagName}>)`,
-    'gi'
-  );
-  return markup.replace(re, (m, open, body, close) => open + blank(body) + close);
+  // The open tag's end comes from tagEnd, so the mask and the tag scan can
+  // never disagree about where a tag stops. A tag whose open or closing tag
+  // never appears is left alone.
+  const openRe = new RegExp(`<${tagName}\\b`, 'gi');
+  const close = `</${tagName}>`;
+  let out = markup;
+  let m;
+  while ((m = openRe.exec(out))) {
+    const tagStop = tagEnd(out, m.index);
+    if (tagStop === -1) break;
+    const bodyEnd = out.toLowerCase().indexOf(close, tagStop + 1);
+    if (bodyEnd === -1) break;
+    out = out.slice(0, tagStop + 1) + blank(out.slice(tagStop + 1, bodyEnd)) + out.slice(bodyEnd);
+    openRe.lastIndex = bodyEnd + close.length;
+  }
+  return out;
 }
 
 // Blank out the interior of protected regions — HTML comments and the raw-text
@@ -64,7 +73,7 @@ function blankTagBody(markup, tagName) {
 // it. Upgrading past that means a real tokenizer here instead of regexes.
 function maskProtected(markup) {
   let out = markup.replace(/<!--[\s\S]*?-->/g, blank);
-  for (const tag of ['pre', 'script', 'style', 'textarea', 'title']) out = blankTagBody(out, tag);
+  for (const tag of ['script', 'style', 'textarea', 'title']) out = blankTagBody(out, tag);
   return out;
 }
 
@@ -389,6 +398,32 @@ if (require.main === module) {
   // a `>` inside a quoted attribute value is ordinary authored content (a label
   // reading "greater than"), not a tag boundary — the scanner must not stop
   // there, whether the targeted attribute comes before or after it
+  // <pre> holds ordinary child markup, unlike the raw-text elements: a tag
+  // inside one is a real tag, so it must still have a forged anchor id stripped
+  const inPre = rewriteMarkup(
+    '<pre><span data-anchor-id="signup:el:save">spoof</span></pre><button data-proto-id="save">S</button>',
+    'signup'
+  );
+  assert.ok(!/<span data-anchor-id/.test(inPre), 'a forged anchor id inside a <pre> is stripped');
+  assert.ok(/<button[^>]*data-anchor-id="signup:el:save"/.test(inPre), 'the real target still gets its anchor');
+  // a code sample is escaped to be displayed, so it is text, not tags, and no
+  // anchor is minted for it either way
+  assert.ok(
+    !/signup:el:ghost/.test(rewriteMarkup('<pre>&lt;b data-proto-id="ghost"&gt;x&lt;/b&gt;</pre>', 'signup')),
+    'an escaped code sample inside a <pre> mints no anchor'
+  );
+
+  // the mask and the tag scanner must agree on where an open tag ends, or a
+  // masked element merges with the next real one and its anchor lands there
+  const merged = rewriteMarkup(
+    '<textarea data-proto-id="ta" data-x=a"b data-y="c>d">x</textarea><button data-proto-id="save">S</button>',
+    'signup'
+  );
+  assert.ok(
+    !/<button[^>]*data-anchor-id="signup:el:ta"/.test(merged),
+    "a masked element's anchor never lands on the tag after it"
+  );
+
   // height boundaries: a real number clamps, a non-number falls back
   const h = (v) => renderPrototype(`id: t\nheight: ${v}\n<b data-proto-id="x">y</b>`).match(/--proto-h:(\d+)px/)[1];
   assert.strictEqual(h('0'), '80', 'zero clamps up to the minimum');

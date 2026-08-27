@@ -268,3 +268,10 @@ and a prototype's interaction state resets whenever anyone comments.
 message dropping a `selected` class. Nothing in the feature ever sets that class — the
 selected state lives on the stub outside the frame, not inside it — so the handler was
 dead on arrival and was deleted. `dismissComposer` posts no message into the frames.
+
+**`<pre>` is not masked.** *Components → `server/prototype.js`* has the markup scan
+skipping comment, `<pre>` and `<script>` regions. `<pre>` was dropped from that list: it
+holds ordinary child markup, so a tag inside one is a real tag and must still have a
+forged `data-anchor-id` stripped from it. Masking it meant those never were. A code
+sample displayed inside a `<pre>` is escaped, so it is text rather than tags and the scan
+passes it over regardless — the masking bought nothing and cost the guarantee.
