@@ -2121,35 +2121,21 @@ docEl.addEventListener('keydown', (e) => {
 // frame, not inside it.
 
 const protoFrames = new Map(); // iframe.contentWindow -> the .proto-block that owns it
-let lastProtoBlocks = new Map(); // data-proto-id -> the .proto-block from the previous render
 
 // Re-scanned on every render: docEl.innerHTML is fully replaced each time, so
-// every .proto-block is a fresh DOM node. When a fresh block's srcdoc is
-// byte-identical to the block that carried the same data-proto-id last time,
-// swap the fresh node back out for the old one — its iframe is already
-// loaded and keeps its running state, instead of reloading (and re-running
-// the agent's script) on every unrelated reviewer's comment.
-// lazydev: this only recognizes a whole-block match (same id, identical
-// srcdoc); it doesn't diff attributes within a block, so it buys nothing when
-// only part of a prototype changed.
+// every .proto-block is a fresh DOM node with a freshly (re)loaded iframe.
+// lazydev: an unchanged block's iframe can't be kept alive across a render —
+// docEl.innerHTML replaces the whole tree first, so by the time this runs every
+// prior node is already detached, and a browser reloads a detached-then-
+// reattached iframe regardless of how synchronously that happens. Avoiding the
+// reload needs renderDoc to patch only the changed subtrees instead of
+// replacing docEl.innerHTML wholesale.
 function bindProtos() {
   protoFrames.clear();
-  const nextProtoBlocks = new Map();
   for (const block of docEl.querySelectorAll('.proto-block')) {
-    const id = block.dataset.protoId;
     const frame = block.querySelector('.proto-frame');
-    const prevBlock = lastProtoBlocks.get(id);
-    const prevFrame = prevBlock && prevBlock.querySelector('.proto-frame');
-    if (frame && prevFrame && prevFrame.getAttribute('srcdoc') === frame.getAttribute('srcdoc')) {
-      block.replaceWith(prevBlock);
-      nextProtoBlocks.set(id, prevBlock);
-      protoFrames.set(prevFrame.contentWindow, prevBlock);
-      continue;
-    }
     if (frame) protoFrames.set(frame.contentWindow, block);
-    nextProtoBlocks.set(id, block);
   }
-  lastProtoBlocks = nextProtoBlocks;
 }
 
 // Filtered on event.source (an exact window reference), never event.origin —
@@ -2163,12 +2149,10 @@ window.addEventListener('message', (e) => {
   openProtoComposer(block, data.anchorId, data.rect);
 });
 
-// Open the composer for a click reported up from inside `block`'s frame. A
-// reported anchorId is only trusted when it names an element inside this same
-// block — the block's frame could otherwise forge a click onto a different
-// block's anchor and hijack or misattribute its comment thread. Mirrors
-// openFlowComposer: an anchor that already carries a thread (data-cids on its
-// stub) focuses that thread instead of starting a second one.
+// Open the composer for a click reported up from inside `block`'s frame, once
+// the reported anchorId is confirmed to name an element inside this same
+// block. Mirrors openFlowComposer: an anchor that already carries a thread
+// focuses it instead of opening a second composer.
 function openProtoComposer(block, anchorId, rect) {
   const prefix = `${block.dataset.protoId}:el:`;
   if (typeof anchorId !== 'string' || !anchorId.startsWith(prefix)) return;

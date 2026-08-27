@@ -241,6 +241,9 @@ function buildLivenessVm({ fakeState, getNow, onFetch, promptQueue, storage }) {
     clearInterval: (id) => { const idx = timers.findIndex((t) => t.id === id); if (idx !== -1) timers.splice(idx, 1); },
     setTimeout: () => 0, clearTimeout: () => {},
     Date: { now: getNow }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true,
+    // flowEl's CSS.escape(id) — a real identity shim is fine, none of app.js's
+    // anchor ids contain characters CSS.escape would actually need to escape.
+    CSS: { escape: (s) => String(s) },
     prompt: () => { promptCalls++; return queue.length ? queue.shift() : null; },
     // Browser globals the reviewer-identity module (app.js) legitimately uses.
     crypto: { randomUUID: () => `shim-uuid-${tid++}` },
@@ -3398,16 +3401,47 @@ async function main() {
     'markFlowAnchors() also notifies a prototype frame when one of its elements gets commented',
     /function markFlowAnchors\([^)]*\)\s*\{[\s\S]*?proto-commented[\s\S]*?\n\}/.test(appSrc2)
   );
-  const openProtoComposerSrc = (appSrc2.match(/function openProtoComposer\([^)]*\)\s*\{[\s\S]*?\n\}/) || [''])[0];
-  check(
-    "openProtoComposer rejects a reported anchorId that isn't prefixed with the sending block's own fence id — a frame can't hijack a click onto a different block's anchor",
-    /dataset\.protoId/.test(openProtoComposerSrc) && /startsWith\(prefix\)/.test(openProtoComposerSrc),
-    openProtoComposerSrc.slice(0, 400)
-  );
+  // openProtoComposer's anchorId-scoping guard, driven for real through the
+  // liveness VM harness rather than grepped from source: a mismatched anchorId
+  // must never open the composer, and a correctly-scoped one must (proving the
+  // rejection above isn't just vacuously true).
+  {
+    const fakeProtoState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'reviewing',
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+      presence: [],
+    };
+    const protoVm = buildLivenessVm({ fakeState: fakeProtoState, getNow: () => 1 });
+    protoVm.load('liveness.js');
+    protoVm.load('app.js');
+    await protoVm.flush(); // boot fetchState() settles → status 'reviewing'
+    const composerEl = protoVm.getEl('composer');
+    const fakeFrame = { getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0 }) };
+    const fakeBlock = { dataset: { protoId: 'signup' }, querySelector: () => fakeFrame };
+    const rect = { left: 0, top: 0, right: 0, bottom: 0 };
+
+    composerEl.hidden = true;
+    protoVm.ctx.openProtoComposer(fakeBlock, 'other:el:save', rect);
+    check(
+      "openProtoComposer leaves the composer closed when the reported anchorId isn't prefixed with the block's own fence id",
+      composerEl.hidden === true,
+      `hidden=${composerEl.hidden}`
+    );
+
+    protoVm.ctx.openProtoComposer(fakeBlock, 'signup:el:save', rect);
+    check(
+      'openProtoComposer opens the composer for a correctly-scoped anchorId — the rejection above was a real check, not a no-op',
+      composerEl.hidden === false,
+      `hidden=${composerEl.hidden}`
+    );
+  }
   const bindProtosSrc = (appSrc2.match(/function bindProtos\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
   check(
-    "bindProtos() reuses an existing frame instead of letting an unrelated re-render tear it down, when the incoming block's srcdoc is byte-identical to the one it's replacing",
-    /getAttribute\('srcdoc'\)/.test(bindProtosSrc) && /replaceWith/.test(bindProtosSrc),
+    'bindProtos() no longer attempts frame reuse across a wholesale docEl.innerHTML replace — that reload the reuse was meant to avoid is unavoidable once the node has been detached at all',
+    !/replaceWith/.test(bindProtosSrc),
     bindProtosSrc.slice(0, 400)
   );
 
