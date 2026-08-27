@@ -3229,6 +3229,132 @@ async function main() {
       /if \(!moved\) \{\s*moved = true;\s*svg\.classList\.add\('panning'\);\s*try \{\s*svg\.setPointerCapture/.test(appSrc)
   );
 
+  console.log('issue 017: inline prototypes — rendering, id anchoring, carry-forward, and the bundle');
+  const PROTO_A =
+    '# Screens\n\nBefore the prototype.\n\n```prototype\nid: signup\nheight: 320\n' +
+    '<div class="card"><h2 data-proto-id="title">Create your account</h2>' +
+    '<input data-proto-id="email" placeholder="Email">' +
+    '<button data-proto-id="save" data-proto-label="Save button">Save</button></div>\n```\n';
+  // The same prototype with the `save` button (and its stub) taken out.
+  const PROTO_B =
+    '# Screens\n\nBefore the prototype.\n\n```prototype\nid: signup\nheight: 320\n' +
+    '<div class="card"><h2 data-proto-id="title">Create your account</h2>' +
+    '<input data-proto-id="email" placeholder="Email"></div>\n```\n';
+
+  const protoHtml = render(PROTO_A);
+  check(
+    'a ```prototype fence renders a sandboxed frame (allow-scripts, NOT allow-same-origin) with a matching anchor id per data-proto-id, and the raw markup nowhere but inside srcdoc',
+    protoHtml.includes('sandbox="allow-scripts"') &&
+      !/allow-same-origin/.test(protoHtml) &&
+      protoHtml.includes('data-anchor-id="signup:el:save"') &&
+      protoHtml.includes('data-anchor-id="signup:el:email"') &&
+      !protoHtml.includes('<button data-proto-id="save"'),
+    protoHtml.slice(0, 200)
+  );
+  check(
+    'a malformed prototype fence falls back to plain code, exactly as a malformed choice/flow does',
+    render('# T\n\n```prototype\nno id here\n```\n').includes('<pre><code class="language-prototype">')
+  );
+  check(
+    'a document with no prototype fence is untouched by the feature',
+    !/proto-/.test(render('# T\n\nJust prose, and `code`.\n\n```js\nlet a = 1;\n```\n'))
+  );
+  check(
+    'idAnchors is not fooled by a prefix of a longer prototype anchor id',
+    idAnchors('signup:el:save', protoHtml) === true &&
+      idAnchors('signup:el:sav', protoHtml) === false
+  );
+  check(
+    "the frame's CSP blocks network egress and every URL-loaded subresource, leaving only inline CSS/script",
+    protoHtml.includes('Content-Security-Policy') && protoHtml.includes("default-src 'none'")
+  );
+  check(
+    'every rewritten element gets a keyboard path to the composer, matching flow.js\'s <g> elements (tabindex lives inside the escaped srcdoc, so its own quotes come back as &quot;)',
+    protoHtml.includes('tabindex=&quot;0&quot;')
+  );
+  check(
+    'a document reusing an already-used prototype fence id falls back to a code block for the repeat, never a second indistinguishable stub set',
+    (() => {
+      const dupeHtml = render(
+        '```prototype\nid: signup\n<button data-proto-id="save">Save</button>\n```\n' +
+          '```prototype\nid: signup\n<button data-proto-id="cancel">Cancel</button>\n```\n'
+      );
+      const stubCount = (dupeHtml.match(/data-anchor-id="signup:el:save"/g) || []).length;
+      return (
+        stubCount === 1 &&
+        dupeHtml.includes('<pre><code class="language-prototype">') &&
+        !dupeHtml.includes('data-anchor-id="signup:el:cancel"')
+      );
+    })()
+  );
+  check(
+    'a flow fence and a prototype fence may share an id: without colliding — the kind segment (node/edge vs el) already keeps them distinct',
+    render(
+      '```flow\nid: signup\nsave[Save]\n```\n' +
+        '```prototype\nid: signup\n<button data-proto-id="save">Save</button>\n```\n'
+    ).includes('data-anchor-id="signup:el:save"')
+  );
+
+  const protoDoc = path.join(dir, 'planreview-e2e-proto.md');
+  fs.writeFileSync(protoDoc, PROTO_A);
+  const pt = await cli('start', protoDoc, '--no-open');
+  const ptState = await browser(`/api/state?session=${pt.id}`);
+  check(
+    'the served document carries the rendered prototype frame and its anchor stubs',
+    ptState.data.doc.html.includes('data-anchor-id="signup:el:save"') &&
+      ptState.data.doc.html.includes('data-anchor-id="signup:el:title"')
+  );
+
+  await browser(`/api/review-state?session=${pt.id}`, {
+    reviewerId: 'A',
+    comments: [
+      { id: 'pn', quote: 'Save button', text: 'move this above the fold', anchors: ['signup:el:save'], author: { id: 'A' } },
+      { id: 'pp', quote: 'Before the prototype.', text: 'a prose comment', author: { id: 'A' } },
+    ],
+    choices: {},
+  });
+
+  const ptSubmit = cli('wait', '--session', pt.id, '--timeout', '10');
+  await sleep(300);
+  await browser(`/api/submit?session=${pt.id}`, { comments: [], choices: {}, note: '' });
+  const ptEv = await ptSubmit;
+  const ptBundled = (ptEv.comments || []).find((c) => c.id === 'pn');
+  check(
+    'the submit bundle carries anchors naming the prototype element the comment is attached to',
+    !!ptBundled &&
+      Array.isArray(ptBundled.anchors) &&
+      ptBundled.anchors[0] === 'signup:el:save' &&
+      !('anchors' in (ptEv.comments.find((c) => c.id === 'pp') || {})),
+    JSON.stringify(ptBundled)
+  );
+
+  // Re-present the SAME prototype: the element comment must still be active.
+  fs.writeFileSync(protoDoc, PROTO_A + '\nA reworked addition.\n');
+  await cli('present', protoDoc, '--session', pt.id);
+  const ptById = (st) => Object.fromEntries(st.data.review.comments.map((c) => [c.id, c]));
+  const ptKept = ptById(await browser(`/api/state?session=${pt.id}`));
+  check(
+    'a re-present that keeps the element carries its comment forward, unarchived',
+    ptKept.pn && !ptKept.pn.archived,
+    JSON.stringify(ptKept)
+  );
+
+  // Re-present with the Save button (and its stub) removed: the comment archives.
+  await browser(`/api/submit?session=${pt.id}`, { comments: [], choices: {}, note: '' });
+  fs.writeFileSync(protoDoc, PROTO_B);
+  await cli('present', protoDoc, '--session', pt.id);
+  const ptGone = ptById(await browser(`/api/state?session=${pt.id}`));
+  check(
+    'removing the element archives its comment rather than dropping it',
+    ptGone.pn && ptGone.pn.archived === true && ptGone.pn.text === 'move this above the fold',
+    JSON.stringify(ptGone.pn)
+  );
+  check(
+    'a prose comment in the same document still anchors on its quote',
+    ptGone.pp && ptGone.pp.archived === false
+  );
+  await cli('stop', '--session', pt.id);
+
   console.log('issue 008: a re-present carries a choice resolution forward (persists until cleared)');
   const rcDoc = path.join(dir, 'planreview-e2e-carry-res.md');
   const rcChoice = '\n\n```choice\nid: pick\nprompt: Which one?\noptions:\n  - A1\n  - A2\n```\n';

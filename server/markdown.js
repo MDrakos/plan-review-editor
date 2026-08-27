@@ -7,6 +7,7 @@
 
 const { escapeHtml } = require('./escapehtml');
 const { renderFlow } = require('./flow');
+const { renderPrototype } = require('./prototype');
 
 function inline(text) {
   let out = escapeHtml(text);
@@ -20,9 +21,10 @@ function inline(text) {
   return out;
 }
 
-function renderFence(lang, body) {
+function renderFence(lang, body, protoIds) {
   if (lang === 'choice') return renderChoice(body);
   if (lang === 'flow') return renderFlow(body);
+  if (lang === 'prototype') return renderPrototype(body, protoIds);
   const cls = lang ? ` class="language-${escapeHtml(lang)}"` : '';
   return `<pre><code${cls}>${escapeHtml(body)}</code></pre>`;
 }
@@ -179,6 +181,7 @@ function renderBlocks(markdown) {
   const lines = String(markdown).replace(/\r\n/g, '\n').split('\n');
   const out = [];
   let i = 0;
+  const protoIds = new Set(); // this render's prototype fence ids — fresh per call, never shared
 
   while (i < lines.length) {
     const line = lines[i];
@@ -194,7 +197,7 @@ function renderBlocks(markdown) {
       i++;
       while (i < lines.length && !/^```\s*$/.test(lines[i])) body.push(lines[i++]);
       i++; // closing fence
-      out.push(renderFence(fence[1], body.join('\n')));
+      out.push(renderFence(fence[1], body.join('\n'), protoIds));
       continue;
     }
 
