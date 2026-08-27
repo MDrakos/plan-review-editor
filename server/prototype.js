@@ -389,6 +389,14 @@ if (require.main === module) {
   // a `>` inside a quoted attribute value is ordinary authored content (a label
   // reading "greater than"), not a tag boundary — the scanner must not stop
   // there, whether the targeted attribute comes before or after it
+  // height boundaries: a real number clamps, a non-number falls back
+  const h = (v) => renderPrototype(`id: t\nheight: ${v}\n<b data-proto-id="x">y</b>`).match(/--proto-h:(\d+)px/)[1];
+  assert.strictEqual(h('0'), '80', 'zero clamps up to the minimum');
+  assert.strictEqual(h('99999'), '2000', 'a huge height clamps down to the maximum');
+  assert.strictEqual(h('Infinity'), '400', 'Infinity is not a height, so the default applies');
+  assert.strictEqual(h('abc'), '400', 'a non-number falls back to the default');
+  assert.strictEqual(h('-50'), '80', 'a negative height clamps up to the minimum');
+
   // a quote only opens an attribute value when it follows `=`; an apostrophe in
   // an unquoted value is ordinary text and must not desync the scan
   const apos = renderPrototype(

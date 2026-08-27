@@ -3394,8 +3394,8 @@ async function main() {
     protoListener.slice(0, 300)
   );
   check(
-    'dismissComposer() also clears the selection inside every prototype frame',
-    /function dismissComposer\(\)\s*\{[^}]*proto-clear/.test(appSrc2)
+    'nothing posts proto-clear into a frame — the shim has no handler for it',
+    !/proto-clear/.test(appSrc2) && !/proto-clear/.test(fs.readFileSync(path.join(__dirname, '..', 'server', 'prototype.js'), 'utf8'))
   );
   check(
     'markFlowAnchors() also notifies a prototype frame when one of its elements gets commented',

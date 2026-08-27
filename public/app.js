@@ -1121,7 +1121,6 @@ function dismissComposer() {
   pendingAnchors = null;
   pendingQuote = '';
   clearFlowSelection();
-  for (const win of protoFrames.keys()) win.postMessage({ kind: 'proto-clear' }, '*');
 }
 
 document.getElementById('composer-cancel').addEventListener('click', dismissComposer);
