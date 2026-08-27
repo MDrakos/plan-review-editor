@@ -1,18 +1,10 @@
 'use strict';
 
-// The ```prototype fence: an inline sandboxed iframe carrying agent-authored
-// markup, click-to-comment via a shim that reports clicks (and Enter/Space)
-// up as anchor ids mirrored outside the frame as stubs. server/markdown.js
-// dispatches to renderPrototype; server/anchor.js's idAnchors carries
-// comments forward on the stub ids exactly as it does for flow.js's <g>
-// anchors.
-//
-// The frame is sandbox="allow-scripts" and deliberately NOT allow-same-origin:
-// that keeps its origin opaque, so agent-authored script inside it can never
-// reach the reviewer page, no matter what it does. A frame-level CSP closes
-// the one channel the sandbox attribute doesn't: it blocks every URL-loaded
-// subresource and all network egress, leaving only inline CSS/script, which
-// the sandbox already grants.
+// The ```prototype fence: agent-authored markup rendered into a sandboxed,
+// click-to-comment iframe, with its targetable elements' ids mirrored outside
+// the frame as anchor stubs. server/markdown.js dispatches to renderPrototype;
+// server/anchor.js's idAnchors carries comments forward on those stubs exactly
+// as it does for flow.js's <g> anchors.
 
 const { escapeHtml } = require('./escapehtml');
 
