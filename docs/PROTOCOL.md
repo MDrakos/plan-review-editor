@@ -101,13 +101,14 @@ shows a "reworking" overlay until you `present` again.
 - `comments[].quote` is the selected passage — locate it in your markdown
   source to understand what the comment anchors to.
 - `comments[].anchors` is present only when the comment is attached to a flow
-  diagram rather than to a passage. It is a non-empty array of
-  `<fenceId>:node:<id>` / `<fenceId>:edge:<src>-><dst>` values, each naming a
-  statement in the matching ```` ```flow ```` fence, so you can find exactly what
-  is being talked about. More than one entry means the reviewer box-selected a
-  group and the comment is about all of them together. `quote` then holds the
-  members' visible labels, for reading, not for locating. Absent on every prose
-  comment, so an existing integration is unaffected.
+  diagram or a prototype element rather than to a passage. It is a non-empty
+  array of `<fenceId>:node:<id>` / `<fenceId>:edge:<src>-><dst>` (flow) or
+  `<fenceId>:el:<id>` (prototype) values, each naming a statement in the
+  matching ```` ```flow ```` or ```` ```prototype ```` fence, so you can find
+  exactly what is being talked about. More than one entry means the reviewer
+  box-selected a group and the comment is about all of them together. `quote`
+  then holds the members' visible labels, for reading, not for locating.
+  Absent on every prose comment, so an existing integration is unaffected.
 - `comments[].author` (`{ id, name? }`) attributes the comment to a reviewer —
   see **Multiple reviewers** below. It is absent only for a pre-identity client
   (treated as `anonymous`). One bundle consolidates **every** reviewer's
@@ -302,6 +303,48 @@ The server lays the boxes out top to bottom and renders inline SVG; there is no
 layout to specify and no diagram library involved. The reviewer clicks a box or
 an arrow — or shift-drags a box around a group — and comments on it, and those
 comments come back with `anchors` (see **`submit`** above).
+
+## Prototypes
+
+Embed a live, clickable screen with a `prototype` fence:
+
+````markdown
+```prototype
+id: signup
+height: 320
+<style>.card{font:14px system-ui;padding:16px}</style>
+<div class="card">
+  <h2 data-proto-id="title">Create your account</h2>
+  <input data-proto-id="email" placeholder="Email">
+  <button data-proto-id="save" data-proto-label="Save button">Save</button>
+</div>
+```
+````
+
+- `id:` — required, like `flow` and `choice`. It namespaces this prototype's
+  anchor ids.
+- `height:` — optional, defaults to 400, clamped to 80–2000.
+- Everything from the first non-`key: value` line down is the markup, verbatim
+  — real HTML, CSS and (sandboxed) script.
+- `data-proto-id="x"` marks an element targetable; the server expands it to
+  `<fenceId>:el:x`. An element with no `data-proto-id` isn't targetable — the
+  escape hatch for layout wrappers.
+- `data-proto-label="…"` is the human name shown on the comment card; it
+  defaults to the `data-proto-id` value.
+
+The markup renders inside a sandboxed `<iframe>` (`allow-scripts`, deliberately
+not `allow-same-origin`, so nothing inside it can reach this page). The
+reviewer clicks an element to comment on it, and that comment comes back with
+`anchors` (see **`submit`** above) exactly like a flow diagram's.
+
+The frame also carries a fixed Content-Security-Policy that blocks every
+URL-loaded subresource and all network egress: an image must be a `data:`
+URI, there's no way to load a web font, and no script inside the frame can
+reach the network. Inline CSS and inline script are unaffected.
+
+A malformed block (no `id:`, or blank markup) falls back to rendering as plain
+code, exactly as a malformed `choice` or `flow` does. So does a repeated
+`id:` — the second (and later) fence reusing an already-used prototype id.
 
 ## Choice-conflict resolution
 

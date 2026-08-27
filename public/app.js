@@ -276,6 +276,7 @@ function renderDoc(doc) {
     doc.html || '<p class="empty">Waiting for the agent to present a plan…</p>';
   highlightDoc();
   bindFlows();
+  bindProtos();
   state.version = doc.version;
   state.versions = doc.versions || [];
   state.presentedAt = doc.presentedAt || null;
@@ -420,6 +421,7 @@ async function showDiff() {
     : '<p class="empty">No changes between these versions.</p>';
   highlightDoc();
   bindFlows();
+  bindProtos();
   diffLegend.hidden = false;
   diffShowBtn.hidden = true;
   diffCloseBtn.hidden = false;
@@ -1827,6 +1829,9 @@ function markFlowAnchors(anchors, cid) {
     const cids = (el.dataset.cids || '').split(' ').filter(Boolean);
     if (!cids.includes(cid)) cids.push(cid);
     el.dataset.cids = cids.join(' ');
+    const protoBlock = el.closest('.proto-block');
+    const frame = protoBlock && protoBlock.querySelector('.proto-frame');
+    if (frame) frame.contentWindow.postMessage({ kind: 'proto-commented', anchorId: id }, '*');
   }
 }
 
@@ -2104,6 +2109,68 @@ docEl.addEventListener('keydown', (e) => {
   e.preventDefault();
   openFlowComposer([g]);
 });
+
+// ---------- prototype frames (```prototype) ----------
+//
+// A prototype fence renders as a sandboxed iframe with the same click-to-comment
+// affordance a flow diagram's box gets: the frame's own shim script reports a
+// click (or Enter/Space) as { anchorId, rect } via postMessage, and the
+// composer opens exactly as it does for a flow node. flowEl/flowLabel/
+// flowCommentable are reused as is — the anchor lives on the stub beside the
+// frame, not inside it.
+
+const protoFrames = new Map(); // iframe.contentWindow -> the .proto-block that owns it
+
+// Re-scanned on every render: docEl.innerHTML is fully replaced each time, so
+// every .proto-block is a fresh DOM node with a freshly (re)loaded iframe.
+// lazydev: an unchanged block's iframe can't be kept alive across a render —
+// docEl.innerHTML replaces the whole tree first, so by the time this runs every
+// prior node is already detached, and a browser reloads a detached-then-
+// reattached iframe regardless of how synchronously that happens. Avoiding the
+// reload needs renderDoc to patch only the changed subtrees instead of
+// replacing docEl.innerHTML wholesale.
+function bindProtos() {
+  protoFrames.clear();
+  for (const block of docEl.querySelectorAll('.proto-block')) {
+    const frame = block.querySelector('.proto-frame');
+    if (frame) protoFrames.set(frame.contentWindow, block);
+  }
+}
+
+// Filtered on event.source (an exact window reference), never event.origin —
+// a sandboxed frame with no allow-same-origin has an opaque (null) origin,
+// which is not a value worth trusting.
+window.addEventListener('message', (e) => {
+  const block = protoFrames.get(e.source);
+  if (!block) return;
+  const data = e.data || {};
+  if (data.kind !== 'proto-click') return;
+  openProtoComposer(block, data.anchorId, data.rect);
+});
+
+// Open the composer for a click reported up from inside `block`'s frame, once
+// the reported anchorId is confirmed to name an element inside this same
+// block. Mirrors openFlowComposer: an anchor that already carries a thread
+// focuses it instead of opening a second composer.
+function openProtoComposer(block, anchorId, rect) {
+  const prefix = `${block.dataset.protoId}:el:`;
+  if (typeof anchorId !== 'string' || !anchorId.startsWith(prefix)) return;
+  const el = flowEl(anchorId);
+  if (!el) return;
+  if (el.dataset.cids) {
+    focusComment(el.dataset.cids.split(' ')[0]);
+    return;
+  }
+  if (!flowCommentable()) return;
+  const frameRect = block.querySelector('.proto-frame').getBoundingClientRect();
+  pendingRange = null;
+  pendingAnchors = [anchorId];
+  pendingQuote = flowLabel(pendingAnchors);
+  openComposerAt(
+    { left: frameRect.left + rect.left, bottom: frameRect.top + rect.bottom },
+    pendingQuote
+  );
+}
 
 // ---------- boot ----------
 

@@ -1,6 +1,7 @@
 # 017 — live prototypes in the plan, commentable like the document
 
-**Status:** approved 2026-08-26, not yet implemented
+**Status:** implemented 2026-08-26 on `miked/inline-prototypes`. Two things below did not
+ship as written; see **What shipped differently** at the end.
 **Issue:** `issues/todo/017-inline-prototypes-in-the-plan.md`
 **Sibling:** `docs/specs/2026-08-25-016-whiteboard-flow-diagram-design.md` (defined the `anchors` model this reuses)
 
@@ -245,3 +246,32 @@ would be its own issue.
   the document, and this does not start.
 - **A measuring shim.** Recorded above as the upgrade path if declared heights
   turn out to be a nuisance in practice.
+
+## What shipped differently
+
+Two things in this document describe behavior the implementation does not have. The
+design is left as written, as the record of what was approved; this section is the
+correction.
+
+**The frame is not reused across renders.** *Components → `public/app.js`* has
+`bindProtos()` keeping a prototype's iframe alive when its `srcdoc` is unchanged, so a
+peer reviewer's unrelated comment does not tear the frame down and re-run its script.
+That was built and then removed, because it never worked: `renderDoc` and the diff view
+both assign `docEl.innerHTML` wholesale *before* calling `bindProtos()`, so every prior
+block is already detached by the time the swap runs, and a browser reloads a
+detached-then-reattached iframe. Making it real means `renderDoc` patching changed
+subtrees instead of replacing the document, which is a larger change than this feature.
+The consequence is that a prototype containing a hung script re-hangs on every re-render,
+and a prototype's interaction state resets whenever anyone comments.
+
+**The shim has no `proto-clear` handler.** *Components → The shim* lists a `proto-clear`
+message dropping a `selected` class. Nothing in the feature ever sets that class — the
+selected state lives on the stub outside the frame, not inside it — so the handler was
+dead on arrival and was deleted. `dismissComposer` posts no message into the frames.
+
+**`<pre>` is not masked.** *Components → `server/prototype.js`* has the markup scan
+skipping comment, `<pre>` and `<script>` regions. `<pre>` was dropped from that list: it
+holds ordinary child markup, so a tag inside one is a real tag and must still have a
+forged `data-anchor-id` stripped from it. Masking it meant those never were. A code
+sample displayed inside a `<pre>` is escaped, so it is text rather than tags and the scan
+passes it over regardless — the masking bought nothing and cost the guarantee.

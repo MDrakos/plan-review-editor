@@ -4,3 +4,4 @@ node_modules/
 .planreview/
 .sessions/
 .riker/
+.sdd/

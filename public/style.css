@@ -1646,3 +1646,33 @@ mark.hl {
   pointer-events: none;
 }
 .flow-block:hover .flow-hint { opacity: 1; }
+
+.proto-block {
+  position: relative;
+  margin: 18px 0;
+  border: 1px solid var(--pr-rule);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--pr-surface);
+}
+
+.proto-frame {
+  display: block;
+  width: 100%;
+  height: var(--proto-h);
+  border: 0;
+}
+
+/* The stubs mirror the frame's targetable ids into the outer document so
+   idAnchors and flowEl can see them. They are inert and invisible, but they keep
+   a zero-size box inside the block rather than `display: none`, so
+   focusComment's scrollIntoView lands on the prototype instead of doing
+   nothing. */
+.proto-anchors {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}

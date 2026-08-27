@@ -228,7 +228,7 @@ function buildLivenessVm({ fakeState, getNow, onFetch, promptQueue, storage }) {
   const fire = (type, data) => es && es._h[type] && es._h[type]({ data: JSON.stringify(data) });
 
   const ctx = vm.createContext({
-    window: {},
+    window: { addEventListener() {} },
     document: {
       getElementById: getEl, querySelector: () => makeEl(), querySelectorAll: () => [], addEventListener() {},
       createElement: () => makeEl(), createRange: () => ({ setStart() {}, setEnd() {}, getBoundingClientRect: () => ({}) }),
@@ -241,6 +241,9 @@ function buildLivenessVm({ fakeState, getNow, onFetch, promptQueue, storage }) {
     clearInterval: (id) => { const idx = timers.findIndex((t) => t.id === id); if (idx !== -1) timers.splice(idx, 1); },
     setTimeout: () => 0, clearTimeout: () => {},
     Date: { now: getNow }, NodeFilter: { SHOW_TEXT: 4 }, confirm: () => true,
+    // flowEl's CSS.escape(id) — a real identity shim is fine, none of app.js's
+    // anchor ids contain characters CSS.escape would actually need to escape.
+    CSS: { escape: (s) => String(s) },
     prompt: () => { promptCalls++; return queue.length ? queue.shift() : null; },
     // Browser globals the reviewer-identity module (app.js) legitimately uses.
     crypto: { randomUUID: () => `shim-uuid-${tid++}` },
@@ -3227,6 +3230,219 @@ async function main() {
     'pan: capture is taken in pointermove, once the drag passes the 4px threshold',
     /Math\.abs\(dx\) \+ Math\.abs\(dy\) < 4/.test(appSrc) &&
       /if \(!moved\) \{\s*moved = true;\s*svg\.classList\.add\('panning'\);\s*try \{\s*svg\.setPointerCapture/.test(appSrc)
+  );
+
+  console.log('issue 017: inline prototypes — rendering, id anchoring, carry-forward, and the bundle');
+  const PROTO_A =
+    '# Screens\n\nBefore the prototype.\n\n```prototype\nid: signup\nheight: 320\n' +
+    '<div class="card"><h2 data-proto-id="title">Create your account</h2>' +
+    '<input data-proto-id="email" placeholder="Email">' +
+    '<button data-proto-id="save" data-proto-label="Save button">Save</button></div>\n```\n';
+  // The same prototype with the `save` button (and its stub) taken out.
+  const PROTO_B =
+    '# Screens\n\nBefore the prototype.\n\n```prototype\nid: signup\nheight: 320\n' +
+    '<div class="card"><h2 data-proto-id="title">Create your account</h2>' +
+    '<input data-proto-id="email" placeholder="Email"></div>\n```\n';
+
+  const protoHtml = render(PROTO_A);
+  check(
+    'a ```prototype fence renders a sandboxed frame (allow-scripts, NOT allow-same-origin) with a matching anchor id per data-proto-id, and the raw markup nowhere but inside srcdoc',
+    protoHtml.includes('sandbox="allow-scripts"') &&
+      !/allow-same-origin/.test(protoHtml) &&
+      protoHtml.includes('data-anchor-id="signup:el:save"') &&
+      protoHtml.includes('data-anchor-id="signup:el:email"') &&
+      !protoHtml.includes('<button data-proto-id="save"'),
+    protoHtml.slice(0, 200)
+  );
+  check(
+    'a malformed prototype fence falls back to plain code, exactly as a malformed choice/flow does',
+    render('# T\n\n```prototype\nno id here\n```\n').includes('<pre><code class="language-prototype">')
+  );
+  check(
+    'a document with no prototype fence is untouched by the feature',
+    !/proto-/.test(render('# T\n\nJust prose, and `code`.\n\n```js\nlet a = 1;\n```\n'))
+  );
+  check(
+    'idAnchors is not fooled by a prefix of a longer prototype anchor id',
+    idAnchors('signup:el:save', protoHtml) === true &&
+      idAnchors('signup:el:sav', protoHtml) === false
+  );
+  check(
+    "the frame's CSP blocks network egress and every URL-loaded subresource, leaving only inline CSS/script",
+    protoHtml.includes('Content-Security-Policy') && protoHtml.includes("default-src 'none'")
+  );
+  check(
+    'every rewritten element gets a keyboard path to the composer, matching flow.js\'s <g> elements (tabindex lives inside the escaped srcdoc, so its own quotes come back as &quot;)',
+    protoHtml.includes('tabindex=&quot;0&quot;')
+  );
+  check(
+    'a document reusing an already-used prototype fence id falls back to a code block for the repeat, never a second indistinguishable stub set',
+    (() => {
+      const dupeHtml = render(
+        '```prototype\nid: signup\n<button data-proto-id="save">Save</button>\n```\n' +
+          '```prototype\nid: signup\n<button data-proto-id="cancel">Cancel</button>\n```\n'
+      );
+      const stubCount = (dupeHtml.match(/data-anchor-id="signup:el:save"/g) || []).length;
+      return (
+        stubCount === 1 &&
+        dupeHtml.includes('<pre><code class="language-prototype">') &&
+        !dupeHtml.includes('data-anchor-id="signup:el:cancel"')
+      );
+    })()
+  );
+  check(
+    'a flow fence and a prototype fence may share an id: without colliding — the kind segment (node/edge vs el) already keeps them distinct',
+    render(
+      '```flow\nid: signup\nsave[Save]\n```\n' +
+        '```prototype\nid: signup\n<button data-proto-id="save">Save</button>\n```\n'
+    ).includes('data-anchor-id="signup:el:save"')
+  );
+
+  const protoDoc = path.join(dir, 'planreview-e2e-proto.md');
+  fs.writeFileSync(protoDoc, PROTO_A);
+  const pt = await cli('start', protoDoc, '--no-open');
+  const ptState = await browser(`/api/state?session=${pt.id}`);
+  check(
+    'the served document carries the rendered prototype frame and its anchor stubs',
+    ptState.data.doc.html.includes('data-anchor-id="signup:el:save"') &&
+      ptState.data.doc.html.includes('data-anchor-id="signup:el:title"')
+  );
+
+  await browser(`/api/review-state?session=${pt.id}`, {
+    reviewerId: 'A',
+    comments: [
+      { id: 'pn', quote: 'Save button', text: 'move this above the fold', anchors: ['signup:el:save'], author: { id: 'A' } },
+      { id: 'pp', quote: 'Before the prototype.', text: 'a prose comment', author: { id: 'A' } },
+    ],
+    choices: {},
+  });
+
+  const ptSubmit = cli('wait', '--session', pt.id, '--timeout', '10');
+  await sleep(300);
+  await browser(`/api/submit?session=${pt.id}`, { comments: [], choices: {}, note: '' });
+  const ptEv = await ptSubmit;
+  const ptBundled = (ptEv.comments || []).find((c) => c.id === 'pn');
+  check(
+    'the submit bundle carries anchors naming the prototype element the comment is attached to',
+    !!ptBundled &&
+      Array.isArray(ptBundled.anchors) &&
+      ptBundled.anchors[0] === 'signup:el:save' &&
+      !('anchors' in (ptEv.comments.find((c) => c.id === 'pp') || {})),
+    JSON.stringify(ptBundled)
+  );
+
+  // Re-present the SAME prototype: the element comment must still be active.
+  fs.writeFileSync(protoDoc, PROTO_A + '\nA reworked addition.\n');
+  await cli('present', protoDoc, '--session', pt.id);
+  const ptById = (st) => Object.fromEntries(st.data.review.comments.map((c) => [c.id, c]));
+  const ptKept = ptById(await browser(`/api/state?session=${pt.id}`));
+  check(
+    'a re-present that keeps the element carries its comment forward, unarchived',
+    ptKept.pn && !ptKept.pn.archived,
+    JSON.stringify(ptKept)
+  );
+
+  // Re-present with the Save button (and its stub) removed: the comment archives.
+  await browser(`/api/submit?session=${pt.id}`, { comments: [], choices: {}, note: '' });
+  fs.writeFileSync(protoDoc, PROTO_B);
+  await cli('present', protoDoc, '--session', pt.id);
+  const ptGone = ptById(await browser(`/api/state?session=${pt.id}`));
+  check(
+    'removing the element archives its comment rather than dropping it',
+    ptGone.pn && ptGone.pn.archived === true && ptGone.pn.text === 'move this above the fold',
+    JSON.stringify(ptGone.pn)
+  );
+  check(
+    'a prose comment in the same document still anchors on its quote',
+    ptGone.pp && ptGone.pp.archived === false
+  );
+  await cli('stop', '--session', pt.id);
+
+  const cssSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
+  const protoCssIdx = cssSrc.indexOf('.proto-block');
+  const protoCss = protoCssIdx === -1 ? '' : cssSrc.slice(protoCssIdx);
+  check(
+    '.proto-block/.proto-frame/.proto-anchors exist and paint with design tokens, not literal colours',
+    protoCss.includes('.proto-block') &&
+      protoCss.includes('.proto-frame') &&
+      protoCss.includes('.proto-anchors') &&
+      protoCss.includes('height: var(--proto-h)') &&
+      !/#[0-9a-fA-F]{3,8}\b/.test(protoCss),
+    protoCss.slice(0, 300)
+  );
+  check(
+    'the anchor stubs keep a layout box so focusComment can scroll to the prototype',
+    !/\.proto-anchors\s*\{[^}]*display:\s*none/.test(protoCss),
+    protoCss.slice(0, 300)
+  );
+  check(
+    'the stub container carries no hidden attribute — public/style.css declares [hidden] { display: none !important }, which would beat the .proto-anchors rule above',
+    !/proto-anchors"\s+hidden/.test(protoHtml)
+  );
+
+  const appSrc2 = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  check(
+    'bindProtos() is wired at both renderDoc sites, right alongside bindFlows()',
+    (appSrc2.match(/bindFlows\(\);\n\s*bindProtos\(\);/g) || []).length === 2
+  );
+  const protoListener = (appSrc2.match(
+    /window\.addEventListener\('message'[\s\S]*?\n\}\);/
+  ) || [''])[0];
+  check(
+    "the prototype message listener filters on event.source, never event.origin — a sandboxed frame's origin is null and not a value worth trusting",
+    /protoFrames\.get\(e\.source\)/.test(protoListener) && !/\.origin\b/.test(protoListener),
+    protoListener.slice(0, 300)
+  );
+  check(
+    'nothing posts proto-clear into a frame — the shim has no handler for it',
+    !/proto-clear/.test(appSrc2) && !/proto-clear/.test(fs.readFileSync(path.join(__dirname, '..', 'server', 'prototype.js'), 'utf8'))
+  );
+  check(
+    'markFlowAnchors() also notifies a prototype frame when one of its elements gets commented',
+    /function markFlowAnchors\([^)]*\)\s*\{[\s\S]*?proto-commented[\s\S]*?\n\}/.test(appSrc2)
+  );
+  // openProtoComposer's anchorId-scoping guard, driven for real through the
+  // liveness VM harness rather than grepped from source: a mismatched anchorId
+  // must never open the composer, and a correctly-scoped one must (proving the
+  // rejection above isn't just vacuously true).
+  {
+    const fakeProtoState = {
+      doc: { title: 'T', html: '<p>x</p>', version: 1 },
+      status: 'reviewing',
+      review: { comments: [], choices: {} },
+      chat: [],
+      progress: [],
+      presence: [],
+    };
+    const protoVm = buildLivenessVm({ fakeState: fakeProtoState, getNow: () => 1 });
+    protoVm.load('liveness.js');
+    protoVm.load('app.js');
+    await protoVm.flush(); // boot fetchState() settles → status 'reviewing'
+    const composerEl = protoVm.getEl('composer');
+    const fakeFrame = { getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0 }) };
+    const fakeBlock = { dataset: { protoId: 'signup' }, querySelector: () => fakeFrame };
+    const rect = { left: 0, top: 0, right: 0, bottom: 0 };
+
+    composerEl.hidden = true;
+    protoVm.ctx.openProtoComposer(fakeBlock, 'other:el:save', rect);
+    check(
+      "openProtoComposer leaves the composer closed when the reported anchorId isn't prefixed with the block's own fence id",
+      composerEl.hidden === true,
+      `hidden=${composerEl.hidden}`
+    );
+
+    protoVm.ctx.openProtoComposer(fakeBlock, 'signup:el:save', rect);
+    check(
+      'openProtoComposer opens the composer for a correctly-scoped anchorId — the rejection above was a real check, not a no-op',
+      composerEl.hidden === false,
+      `hidden=${composerEl.hidden}`
+    );
+  }
+  const bindProtosSrc = (appSrc2.match(/function bindProtos\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  check(
+    'bindProtos() no longer attempts frame reuse across a wholesale docEl.innerHTML replace — that reload the reuse was meant to avoid is unavoidable once the node has been detached at all',
+    !/replaceWith/.test(bindProtosSrc),
+    bindProtosSrc.slice(0, 400)
   );
 
   console.log('issue 008: a re-present carries a choice resolution forward (persists until cleared)');

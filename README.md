@@ -53,8 +53,9 @@ seeing each other.
 1. The agent starts a local server and presents a plan (markdown).
 2. The plan renders as an HTML document in your browser.
 3. You select text and leave inline comments, click a box or an arrow in any
-   flow diagram to comment on that, answer any choice blocks the plan embeds,
-   and can chat with the agent in a sidebar about anything — related to the
+   flow diagram (or an element in a live prototype) to comment on that, answer
+   any choice blocks the plan embeds, and can chat with the agent in a sidebar
+   about anything — related to the
    document or not.
 4. **Submit review** bundles every comment, choice, and note and hands it to
    the agent. The session pauses while the agent reworks the plan.
@@ -314,6 +315,33 @@ carry an `anchors` list in the submit bundle naming exactly which nodes and edge
 they are about, and they survive a rework round the same way a quoted comment
 does: a comment archives (never disappears) once the boxes it named are gone.
 
+### Prototypes
+
+Plans can embed a live, clickable screen with a `prototype` fence:
+
+````markdown
+```prototype
+id: signup
+height: 320
+<div class="card">
+  <h2 data-proto-id="title">Create your account</h2>
+  <input data-proto-id="email" placeholder="Email">
+  <button data-proto-id="save" data-proto-label="Save button">Save</button>
+</div>
+```
+````
+
+The markup renders in a sandboxed frame — real HTML, CSS and (sandboxed)
+script — and the reviewer clicks a `data-proto-id`-marked element to comment on
+it directly. Comments carry an `anchors` list in the submit bundle naming
+exactly which element they're about, and survive a rework round the same way a
+flow diagram's do: a comment archives (never disappears) once the element it
+named is gone.
+
+The frame carries a fixed CSP: inline CSS and inline script work, but every
+URL-loaded subresource and all network egress is blocked — an image needs to
+be a `data:` URI, and there's no way to pull in a web font.
+
 ### Comparing versions
 
 Every rework round is a new version. Above the document, a **Compare** control
@@ -331,6 +359,7 @@ dismissible "what changed since your last review" highlight on each new round.
 - [x] Bundle comments and submit them as one review
 - [x] Interactive choice blocks inside documents
 - [x] Flow diagrams with commentable boxes and arrows
+- [x] Inline prototypes — a live, clickable screen the reviewer can comment on element by element
 - [x] Chat sidebar alongside the document
 - [x] `planreview` CLI and the blocking agent event loop
 - [x] Pause → rework → reload cycle in the same browser window
