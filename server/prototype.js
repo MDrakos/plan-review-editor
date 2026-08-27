@@ -45,7 +45,12 @@ const blank = (s) => s.replace(/[^\n]/g, ' ');
 // Blank out the body of every <tagName>...</tagName> in `markup`, keeping the
 // open/close tags and every other character's position the same.
 function blankTagBody(markup, tagName) {
-  const re = new RegExp(`(<${tagName}\\b[^>]*>)([\\s\\S]*?)(</${tagName}>)`, 'gi');
+  // The open tag's own attributes are quote-aware for the same reason `tagEnd`
+  // is: a `>` inside one is not the end of the tag.
+  const re = new RegExp(
+    `(<${tagName}\\b(?:"[^"]*"|'[^']*'|[^>])*>)([\\s\\S]*?)(</${tagName}>)`,
+    'gi'
+  );
   return markup.replace(re, (m, open, body, close) => open + blank(body) + close);
 }
 
@@ -64,16 +69,17 @@ function maskProtected(markup) {
 }
 
 // Find the `>` that closes the tag starting at `start` (its `<`), tracking
-// single- and double-quoted attribute values so a `>` inside one (e.g.
-// title="a > b") doesn't end the tag early. Returns -1 for a tag whose quote
-// never closes, so the caller can stop rather than scanning past it forever.
+// quoted attribute values so a `>` inside one (e.g. title="a > b") doesn't end
+// the tag early. A quote only opens a value when it follows `=`, so an
+// apostrophe in an unquoted value stays ordinary text. Returns -1 for a tag
+// whose quote never closes.
 function tagEnd(text, start) {
   let quote = null;
   for (let i = start; i < text.length; i++) {
     const c = text[i];
     if (quote) {
       if (c === quote) quote = null;
-    } else if (c === '"' || c === "'") {
+    } else if ((c === '"' || c === "'") && /=\s*$/.test(text.slice(start, i))) {
       quote = c;
     } else if (c === '>') {
       return i;
@@ -87,16 +93,20 @@ function tagEnd(text, start) {
 // mistaken for a real tag) but handed the original text at the same offset,
 // in document order. Shared by scanStubs and rewriteMarkup so they can never
 // disagree on what counts as a tag.
+// Returns false when a tag's quote never closes: the tail is then unscanned, so
+// callers must discard the whole fence rather than emit half-rewritten markup
+// in which a forged data-anchor-id would survive.
 function forEachTag(markup, fn) {
   const masked = maskProtected(markup);
   const openRe = /<[a-zA-Z]/g;
   let m;
   while ((m = openRe.exec(masked))) {
     const end = tagEnd(masked, m.index);
-    if (end === -1) break; // an unterminated quote — nothing after it is recoverable either
+    if (end === -1) return false;
     fn(markup.slice(m.index, end + 1), m.index);
     openRe.lastIndex = end + 1;
   }
+  return true;
 }
 
 // Scan `markup` for every real tag carrying data-proto-id="x" and build the
@@ -134,14 +144,15 @@ function rewriteTag(tag, fenceId) {
 
 // Apply rewriteTag to every real tag in `markup`, leaving comment/<pre>/
 // <script>/<style> bodies untouched.
+// Null when the scan could not finish — see forEachTag.
 function rewriteMarkup(markup, fenceId) {
   let out = '';
   let last = 0;
-  forEachTag(markup, (tag, index) => {
+  const ok = forEachTag(markup, (tag, index) => {
     out += markup.slice(last, index) + rewriteTag(tag, fenceId);
     last = index + tag.length;
   });
-  return out + markup.slice(last);
+  return ok ? out + markup.slice(last) : null;
 }
 
 // The frame's own CSP: no URL-loaded subresource and no network egress of any
@@ -192,14 +203,18 @@ window.addEventListener('message', function(e){
 // per-document set of prototype fence ids already rendered; the caller
 // (renderBlocks) owns its lifetime.
 function renderPrototype(body, usedIds) {
+  const asCode = () => `<pre><code class="language-prototype">${escapeHtml(body)}</code></pre>`;
   const parsed = parseHeader(body);
-  if (!parsed || (usedIds && usedIds.has(parsed.id))) {
-    return `<pre><code class="language-prototype">${escapeHtml(body)}</code></pre>`;
-  }
-  if (usedIds) usedIds.add(parsed.id);
+  if (!parsed || (usedIds && usedIds.has(parsed.id))) return asCode();
   const { id, height, markup } = parsed;
+  // Markup the tag scanner cannot finish is shown as code rather than rendered:
+  // a half-rewritten frame would carry through any data-anchor-id it never
+  // reached, letting the markup point a comment at an element it does not own.
+  const rewritten = rewriteMarkup(markup, id);
+  if (rewritten === null) return asCode();
+  if (usedIds) usedIds.add(parsed.id);
   const stubs = scanStubs(markup, id);
-  const inner = CSP_META + BASE_STYLE + `<script>${SHIM}</script>` + rewriteMarkup(markup, id);
+  const inner = CSP_META + BASE_STYLE + `<script>${SHIM}</script>` + rewritten;
   const stubHtml = stubs
     .map((s) => `<span data-anchor-id="${escapeHtml(s.anchorId)}" data-label="${escapeHtml(s.label)}"></span>`)
     .join('');
@@ -353,9 +368,53 @@ if (require.main === module) {
     'nothing inside a <title> body is treated as a real attribute'
   );
 
+  // a masked element's own opening tag can carry a `>` in a quoted attribute
+  // too; ending its open tag there swallows the rest of the markup and drops
+  // every real target after it
+  for (const m of [
+    '<pre title="a>b">x</pre>',
+    '<pre title="</pre>">x</pre>',
+    '<style media="a>b">.c{}</style>',
+    '<script data-x="a>b">var v = 1;</script>',
+    '<textarea placeholder="a>b">z</textarea>',
+  ]) {
+    assert.ok(
+      /data-anchor-id="signup:el:real"/.test(
+        rewriteMarkup(`${m}<div data-proto-id="real">y</div>`, 'signup')
+      ),
+      `a target after ${m} is still rewritten`
+    );
+  }
+
   // a `>` inside a quoted attribute value is ordinary authored content (a label
   // reading "greater than"), not a tag boundary — the scanner must not stop
   // there, whether the targeted attribute comes before or after it
+  // a quote only opens an attribute value when it follows `=`; an apostrophe in
+  // an unquoted value is ordinary text and must not desync the scan
+  const apos = renderPrototype(
+    'id: t\n<div title=it\'s>trigger</div><button data-proto-id="save">S</button>'
+  );
+  assert.ok(apos.includes('t:el:save'), 'an apostrophe in an unquoted value does not abort the scan');
+  const aposForged = rewriteMarkup(
+    '<div title=it\'s>t</div><button data-anchor-id="signup:el:save" data-proto-id="ok">F</button>',
+    'signup'
+  );
+  assert.ok(
+    !aposForged.includes('data-anchor-id="signup:el:save"'),
+    'a forged data-anchor-id after an apostrophe is still stripped'
+  );
+
+  // a tag the scanner genuinely cannot finish makes the whole fence fall back to
+  // a code block: emitting half-scanned markup would ship unstripped anchors
+  const unscannable = renderPrototype(
+    'id: t\n<button data-anchor-id=@t:el:forged@ data-proto-id="ok">F</button><div title=@never closed>'.replace(
+      /@/g,
+      '"'
+    )
+  );
+  assert.ok(unscannable.startsWith('<pre><code'), 'an unscannable fence falls back to a code block');
+  assert.ok(!/data-anchor-id="t:el:forged"/.test(unscannable), 'no live forged anchor is emitted');
+
   const gtAfterTarget = renderPrototype('id: t\n<div data-proto-id="x" title="a > b">hi</div>');
   assert.ok(gtAfterTarget.includes('data-anchor-id=&quot;t:el:x&quot;'), 'the anchor still lands on the element');
   assert.ok(!/ b&quot;&gt;/.test(gtAfterTarget), 'the rest of the quoted attribute must not leak out as its own text');
