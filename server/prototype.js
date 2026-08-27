@@ -48,22 +48,27 @@ function parseHeader(body) {
   return { id, height, markup };
 }
 
-// Blank out the interior of protected regions — HTML comments, <pre> blocks,
-// <script> bodies, and <style> bodies — while keeping every other character's
-// position the same, so a later tag scan can never mistake text inside them
-// (a JS string literal, a code sample, a CSS comment) for a real attribute on
-// a real tag.
-// lazydev: this is a regex mask, not an HTML parser — a <pre>, <script>, or
-// <style> whose own opening tag is malformed enough to confuse `[^>]*` can
-// still slip past it. The markup is agent-authored and well-formed by
-// construction; a real parser is a bigger tool than this fence needs.
+const blank = (s) => s.replace(/[^\n]/g, ' ');
+
+// Blank out the body of every <tagName>...</tagName> in `markup`, keeping the
+// open/close tags and every other character's position the same.
+function blankTagBody(markup, tagName) {
+  const re = new RegExp(`(<${tagName}\\b[^>]*>)([\\s\\S]*?)(</${tagName}>)`, 'gi');
+  return markup.replace(re, (m, open, body, close) => open + blank(body) + close);
+}
+
+// Blank out the interior of protected regions — HTML comments and the raw-text
+// element bodies below — while keeping every other character's position the
+// same, so a later tag scan can never mistake text inside them (a JS string
+// literal, a code sample, a CSS comment, a placeholder label) for a real
+// attribute on a real tag.
+// lazydev: this is a regex mask, not an HTML parser — a masked element whose
+// own opening tag is malformed enough to confuse `[^>]*` can still slip past
+// it. Upgrading past that means a real tokenizer here instead of regexes.
 function maskProtected(markup) {
-  const blank = (s) => s.replace(/[^\n]/g, ' ');
-  return markup
-    .replace(/<!--[\s\S]*?-->/g, blank)
-    .replace(/(<pre\b[^>]*>)([\s\S]*?)(<\/pre>)/gi, (m, open, body, close) => open + blank(body) + close)
-    .replace(/(<script\b[^>]*>)([\s\S]*?)(<\/script>)/gi, (m, open, body, close) => open + blank(body) + close)
-    .replace(/(<style\b[^>]*>)([\s\S]*?)(<\/style>)/gi, (m, open, body, close) => open + blank(body) + close);
+  let out = markup.replace(/<!--[\s\S]*?-->/g, blank);
+  for (const tag of ['pre', 'script', 'style', 'textarea', 'title']) out = blankTagBody(out, tag);
+  return out;
 }
 
 // Find the `>` that closes the tag starting at `start` (its `<`), tracking
@@ -343,6 +348,21 @@ if (require.main === module) {
     (rewriteMarkup(styleMarkup, 'signup').match(/data-anchor-id=/g) || []).length,
     0,
     'nothing inside a <style> body is treated as a real attribute'
+  );
+
+  // <textarea> and <title> are raw-text elements too: a data-proto-id-shaped
+  // substring inside either is markup-as-text the reader typed, not a real tag
+  const textareaMarkup = '<textarea>note: <div data-proto-id="ghost5">x</div></textarea>';
+  assert.strictEqual(
+    (rewriteMarkup(textareaMarkup, 'signup').match(/data-anchor-id=/g) || []).length,
+    0,
+    'nothing inside a <textarea> body is treated as a real attribute'
+  );
+  const titleMarkup = '<title>a <span data-proto-id="ghost6">page</span></title>';
+  assert.strictEqual(
+    (rewriteMarkup(titleMarkup, 'signup').match(/data-anchor-id=/g) || []).length,
+    0,
+    'nothing inside a <title> body is treated as a real attribute'
   );
 
   // a `>` inside a quoted attribute value is ordinary authored content (a label
