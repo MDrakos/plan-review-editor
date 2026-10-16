@@ -119,11 +119,12 @@ Run `~/.claude/bin/agent-route plan-review`. If it prints a provider other than
 own words, the plan, and this instruction:
 
 > You are reviewing a plan before any code is written. You did not write it.
-> Read the repository as needed. Return numbered findings. Each names the plan
-> step and the `file:line` it touches, and says what is wrong: a wrong
-> assumption about the code, a missing step, a step that breaks a caller, or a
-> risk the plan does not handle. Do not praise the plan. If you find nothing,
-> say what you checked.
+> Look for blind spots in this plan, not whether the work should be done.
+> Read only the files the plan names and the code they call. Return numbered
+> findings. Each names the plan step and the `file:line` it touches, and says
+> what is wrong: a wrong assumption about the code, a missing step, a step that
+> breaks a caller, or a risk the plan does not handle. Do not praise the plan.
+> If you find nothing, say what you checked.
 
 Then run, and wait for it:
 
