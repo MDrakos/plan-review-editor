@@ -109,6 +109,38 @@ or title as the link text: `[ENG-1234](https://.../browse/ENG-1234)`,
 them in a new tab. Don't leave a bare key or title as plain text, and don't append
 a naked URL — put the link on the reference itself so the reviewer can click through.
 
+## 1b. A plan gets a review from another model family first
+
+Do this only when the document is a plan: steps to build or change something.
+Skip it for option lists, reports and other documents.
+
+Run `~/.claude/bin/agent-route plan-review`. If it prints a provider other than
+`claude`, write a brief file with three parts: the user's original ask in their
+own words, the plan, and this instruction:
+
+> You are reviewing a plan before any code is written. You did not write it.
+> Read the repository as needed. Return numbered findings. Each names the plan
+> step and the `file:line` it touches, and says what is wrong: a wrong
+> assumption about the code, a missing step, a step that breaks a caller, or a
+> risk the plan does not handle. Do not praise the plan. If you find nothing,
+> say what you checked.
+
+Then run, and wait for it:
+
+```sh
+python3 ~/work/research/tools/cross_review.py --host <provider> --repo <repo the plan changes> --brief <brief-file> --out <brief-file>.json
+```
+
+Check each finding in `findings_raw` against the code. Then add a
+`## Codex review` section to the end of the plan (use the provider's name in
+the heading). List every finding with one outcome: **fixed** (say how the plan
+changed), **accepted** (say why it stays as it is), or **rejected** (say why it
+is wrong). Drop none.
+
+If the JSON `status` is `empty` or `failed`, or the route prints `claude` or
+nothing, the section says `Not reviewed:` and the reason. That never means "no
+findings".
+
 ## 2. Present it — and capture the session id
 
 ```sh
